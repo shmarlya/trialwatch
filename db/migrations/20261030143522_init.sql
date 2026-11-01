@@ -1,7 +1,8 @@
 -- migrate:up
 
 -- The whole schema in one file: the migrations written up to 2026-11-01 (init, reference data,
--- ctis trials, UTC time zone, search export, gold labels), squashed. New changes go in new files.
+-- ctis trials, UTC time zone, search export, gold verdicts and reviews, per-file export key),
+-- squashed. New changes go in new files.
 
 -- Every session on this database shows and parses timestamps in UTC, whatever the server's
 -- or client's own setting. Columns are timestamptz (stored as UTC instants either way); this
@@ -66,6 +67,9 @@ ORDER BY ct_number, fetched_at DESC;
 -- Rows from a CTIS portal CSV export (the public search's download), e.g. the 2025-11-10 export
 -- Bruckner et al. reviewed. Its columns differ from /retrieve, so it is kept apart from
 -- ctis.trial_snapshot. Each row is stored as it was in the file (header -> text), never updated.
+-- An export is the result of one search, and its filters give each row a meaning (e.g. "Phase
+-- II-IV", or "has a paediatric investigation plan"): the same row in two files of the same day is
+-- two facts, so the file name is part of the key.
 CREATE TABLE ctis.search_export_snapshot (
     id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     ct_number    text NOT NULL REFERENCES ctis.trial,
@@ -76,7 +80,7 @@ CREATE TABLE ctis.search_export_snapshot (
     -- sha256 of the canonical JSON of the row; loading the same file twice adds nothing
     content_hash bytea NOT NULL CHECK (length(content_hash) = 32),
     payload      jsonb COMPRESSION lz4 NOT NULL,
-    UNIQUE (ct_number, captured_on, content_hash)
+    CONSTRAINT search_export_snapshot_row_key UNIQUE (ct_number, captured_on, source_file, content_hash)
 );
 CREATE INDEX search_export_snapshot_fetch_run_idx ON ctis.search_export_snapshot (fetch_run_id);
 
@@ -226,10 +230,10 @@ INSERT INTO ref.member_state (iso2, name, is_eu) VALUES
 CREATE SCHEMA gold;
 
 -- Bruckner et al.'s final verdict per trial: one row per study trial (277), loaded from their
--- <date>_ctis_study_final_dataset.csv (on OSF, no licence) by `trialwatch gold bruckner` or the dev seed
--- in db/dev/. The answer key for ADR-001: our due-date and
--- results-document checks must reach the same verdicts. Never updated; a later release of the
--- file with different content is reported by the loader, not written over.
+-- <date>_ctis_study_final_dataset.csv (on OSF, no licence) by `trialwatch gold bruckner` or the
+-- dev seed in db/dev/. The answer key for ADR-001: our due-date and results-document checks must
+-- reach the same verdicts. Never updated; a later release of the file with different content is
+-- reported by the loader, not written over.
 CREATE TABLE gold.bruckner_verdict (
     ct_number        text PRIMARY KEY REFERENCES ctis.trial,
     fetch_run_id     bigint NOT NULL REFERENCES ctis.fetch_run,
@@ -251,6 +255,47 @@ CREATE TABLE gold.bruckner_verdict (
     payload          jsonb NOT NULL
 );
 CREATE INDEX bruckner_verdict_fetch_run_idx ON gold.bruckner_verdict (fetch_run_id);
+
+-- Bruckner et al.'s manual review of the 206 results documents, from their
+-- ctis_merged_reviews_consolidated_with_comments.csv (on OSF, no licence), loaded by
+-- `trialwatch gold bruckner-reviews`. The answer key per part for the results-document check.
+-- Never updated.
+
+-- One row per results document (= per trial with results posted).
+CREATE TABLE gold.bruckner_document (
+    ct_number         text PRIMARY KEY REFERENCES ctis.trial,
+    fetch_run_id      bigint NOT NULL REFERENCES ctis.fetch_run,
+    source_file       text NOT NULL,
+    -- when the results appeared in CTIS (their results_pub_date_DDMMYYYY)
+    results_posted_on date NOT NULL,
+    -- their agreement_flag: the first two reviewers agreed before any discussion
+    reviewers_agreed  boolean NOT NULL,
+    final_comment     text,
+    content_hash      bytea NOT NULL CHECK (length(content_hash) = 32),
+    -- the row as in the file. The file is not valid UTF-8 (text copied from CTIS was mangled
+    -- before it reached us), so broken bytes are stored as U+FFFD; no label is affected.
+    payload           jsonb NOT NULL
+);
+CREATE INDEX bruckner_document_fetch_run_idx ON gold.bruckner_document (fetch_run_id);
+
+-- One row per reviewer per document: what each reviewer answered, part by part. NULL = the
+-- reviewer left that part blank.
+CREATE TABLE gold.bruckner_review (
+    ct_number      text NOT NULL REFERENCES gold.bruckner_document,
+    -- first: columns *_till_christie, every document; second: *_team, one of four team members
+    -- (named in the row's reviewer_team); third: *_ghassan, 37 documents, mostly disagreements
+    reviewer       text NOT NULL CHECK (reviewer IN ('first', 'second', 'third')),
+    -- the document reports the number of participants
+    participants   boolean,
+    -- the document reports results for the primary outcome(s)
+    outcomes       boolean,
+    -- the trial was cancelled (no participants enrolled)
+    cancelled      boolean,
+    -- the reviewer asked for a second look
+    asked_to_check boolean,
+    comment        text,
+    PRIMARY KEY (ct_number, reviewer)
+);
 
 
 -- migrate:down

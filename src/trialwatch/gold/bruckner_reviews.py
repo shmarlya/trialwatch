@@ -1,5 +1,5 @@
 """Loads Bruckner et al.'s manual review of the results documents into gold.bruckner_document and
-gold.bruckner_review (see db/migrations/*_gold_bruckner_reviews.sql).
+gold.bruckner_review (see db/migrations/*_init.sql).
 
 The file is their ctis_merged_reviews_consolidated_with_comments.csv: one row per results document,
 written by R ('NA' for empty), each reviewer's answers in columns of their own. It is not valid

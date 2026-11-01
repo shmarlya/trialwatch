@@ -636,6 +636,4 @@ ALTER TABLE ONLY gold.bruckner_verdict
 --
 
 INSERT INTO public.schema_migrations (version) VALUES
-    ('20261030143522'),
-    ('20261101160000'),
-    ('20261101170000');
+    ('20261030143522');

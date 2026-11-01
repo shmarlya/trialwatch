@@ -68,7 +68,7 @@ def seed_export(conn: psycopg.Connection, path: Path, captured_on: date) -> RunR
                 INSERT INTO ctis.search_export_snapshot
                     (ct_number, fetch_run_id, captured_on, source_file, content_hash, payload)
                 SELECT ct_number, %s, %s, %s, content_hash, payload FROM export_row
-                ON CONFLICT (ct_number, captured_on, content_hash) DO NOTHING
+                ON CONFLICT (ct_number, captured_on, source_file, content_hash) DO NOTHING
                 """,
                 (result.run_id, captured_on, path.name),
             )

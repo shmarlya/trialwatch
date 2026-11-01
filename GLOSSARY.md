@@ -26,9 +26,10 @@ Abbreviations and terms used in this project, roughly grouped. Add new ones as t
 | **IMP** | Investigational Medicinal Product: the drug being tested. |
 | **Endpoint / outcome** | What a trial measures to judge the result (e.g. survival at 12 months). **Primary** = main question; **secondary** = extra questions. CTIS says "endpoint", publications usually say "outcome". |
 | **End of trial** | When the trial finishes in a country. **Global end of trial** = finished everywhere; the results deadline counts from this date. |
+| **Completion date** | The later of a trial's end date and its global end date in CTIS (Bruckner et al.'s rule); results deadlines count from it. |
 | **Early termination** | Trial stopped before planned, with a reason (e.g. sponsor decision). Still has to report results. |
 | **Temporary halt** | Trial paused; may restart. |
-| **Paediatric trial** | Trial in children. Shorter results deadline (6 months instead of 12). |
+| **Paediatric trial** | A trial under the paediatric regulation: it recruits children (age group 0-17 years or in utero) or has a PIP. Shorter results deadline (6 months instead of 12). |
 | **PIP** | Paediatric Investigation Plan: an EMA-agreed plan for testing a medicine in children. |
 | **SmPC** | Summary of Product Characteristics: the official prescribing information of an approved medicine. |
 
@@ -39,8 +40,8 @@ Abbreviations and terms used in this project, roughly grouped. Add new ones as t
 | **Summary of results** | The structured scientific results the sponsor must upload to CTIS (usually a PDF). The core thing we check. |
 | **Lay (layperson) summary** | Plain-language results summary for the public, also required. |
 | **CSR** | Clinical Study Report: the full, long report submitted to regulators; published in CTIS only in some cases. |
-| **Due** | A trial whose results deadline has passed. |
-| **On time / late** | Results posted before / after the deadline. |
+| **Due** | A trial whose results deadline has passed. Bruckner et al.: completed more than 12 months (paediatric: 6) before the export day. |
+| **On time / late** | Results posted before / after the deadline. Bruckner et al. count days: within 365 (paediatric: 183) days of completion is on time. |
 | **Reported fully** | Bruckner et al.'s definition: a full scientific results document AND a layperson summary posted. **Days to results** = results publication date minus completion date, for trials reported fully. |
 | **Not fully reported** | Results missing, or posted but missing required parts (e.g. participant numbers or primary outcome results). |
 | **Extended** | Deadline legitimately moved later (e.g. justified deferral). Not a violation. |
@@ -87,4 +88,8 @@ Abbreviations and terms used in this project, roughly grouped. Add new ones as t
 | **Verdict confidence** | Our model's own certainty (0–100%) about one trial's verdict. At 99% or above a verdict may be published; below that it needs manual approval (ADR-001, proposed). |
 | **Manual approval** | A person confirms a verdict before it is published. |
 | **Docs check** | tests/test_docs.py: fails when the docs name a file, table or command that doesn't exist, or leave one out. Runs with pytest and as a Stop hook. |
-| **Answer key** | Bruckner et al.'s final verdict per trial (on time, late, not fully reported, extended, cancelled) and what its results document contained (full, incomplete, none), in gold.bruckner_verdict. ADR-001: our checks must reach the same verdicts. |
+| **Answer key** | Bruckner et al.'s final verdict per trial (on time, late, not fully reported, extended, cancelled) and what its results document contained (full, incomplete, none), in gold.bruckner_verdict, plus each reviewer's answers per part in gold.bruckner_review. ADR-001: our checks must reach the same verdicts. |
+| **Per-part review** | How Bruckner et al.'s reviewers judged each results document: does it report participant numbers, does it give primary outcome results, was the trial cancelled. Two reviewers per document, a third for 37 of them; each answer is a row in gold.bruckner_review, the document's facts (posting date, final comment) in gold.bruckner_document. |
+| **Reviewer agreement** | The first two reviewers gave the same answers before any discussion: 163 of 206 documents (79%). Disagreements went to a third reviewer or a team discussion. |
+| **U+FFFD** | The Unicode replacement character (�). Bruckner et al.'s merged reviews file is not valid UTF-8, so its 749 broken byte sequences are stored as U+FFFD; only free text is affected. |
+| **Due-date rules** | src/trialwatch/checks/due_date.py: Bruckner et al.'s rules for which trials are due and whether results came on time, in plain code, no LLM. `trialwatch gold compare-due` checks them against all 277 of their verdicts. |

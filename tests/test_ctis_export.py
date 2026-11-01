@@ -68,3 +68,16 @@ def test_file_without_trial_number_column_is_rejected(conn, tmp_path):
     path.write_text("id,name\n1,x\n", encoding="utf-8")
     with pytest.raises(ValueError, match="Trial number"):
         seed_export(conn, path, date(2025, 11, 10))
+
+
+def test_same_rows_in_another_export_are_kept_as_their_own_facts(conn, tmp_path):
+    # e.g. a trial in both the Phase II-IV export and the PIP export of the same day
+    rows = [[CT_A, "Ended", "Yes"]]
+    main = seed_export(conn, write_export(tmp_path / "CTIS_trials_Phases_II-IV_20251110.csv", rows), date(2025, 11, 10))
+    pip = seed_export(conn, write_export(tmp_path / "CTIS_trials_with_PIP_20251110.csv", rows), date(2025, 11, 10))
+
+    assert (main.changed, pip.changed) == (1, 1)
+    files = conn.execute(
+        "SELECT source_file FROM ctis.search_export_snapshot WHERE ct_number = %s ORDER BY source_file", (CT_A,)
+    ).fetchall()
+    assert files == [("CTIS_trials_Phases_II-IV_20251110.csv",), ("CTIS_trials_with_PIP_20251110.csv",)]

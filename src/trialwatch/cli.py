@@ -10,6 +10,8 @@ from trialwatch.ctis.client import CtisClient
 from trialwatch.ctis.export import captured_on_from_name, seed_export
 from trialwatch.ctis.store import fetch_trials
 from trialwatch.gold.bruckner import seed_verdicts
+from trialwatch.gold.bruckner_reviews import seed_reviews
+from trialwatch.gold.compare import SNAPSHOT_DAY, compare_due
 
 app = typer.Typer(no_args_is_help=True, help="TrialWatch: EU clinical-trial results watchdog.")
 ctis_app = typer.Typer(no_args_is_help=True, help="CTIS (EU Clinical Trials Information System).")
@@ -80,4 +82,40 @@ def gold_bruckner(
     for where, message in result.failed.items():
         typer.echo(f"  {where}: {message}", err=True)
     if result.failed:
+        raise typer.Exit(1)
+
+
+@gold_app.command("bruckner-reviews")
+def gold_bruckner_reviews(
+    path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, help="Their ctis_merged_reviews_consolidated_with_comments.csv")],
+) -> None:
+    """Load each reviewer's answers per part for Bruckner et al.'s 206 results documents."""
+    with db.connect() as conn:
+        result = seed_reviews(conn, path)
+    typer.echo(
+        f"run {result.run_id}: read {result.fetched}, new {result.changed}, skipped {len(result.failed)}"
+    )
+    for where, message in result.failed.items():
+        typer.echo(f"  {where}: {message}", err=True)
+    if result.failed:
+        raise typer.Exit(1)
+
+
+@gold_app.command("compare-due")
+def gold_compare_due() -> None:
+    """Run our due-date rules on Bruckner et al.'s export and compare with their verdicts, trial by trial."""
+    with db.connect() as conn:
+        try:
+            result = compare_due(conn)
+        except ValueError as exc:
+            typer.echo(f"cannot compare: {exc}", err=True)
+            raise typer.Exit(1) from exc
+    both = len(result.due_ours & result.due_theirs)
+    typer.echo(f"CTIS export of {SNAPSHOT_DAY}: {result.trials} trials, {result.ended} ended")
+    typer.echo(f"due: ours {len(result.due_ours)}, theirs {len(result.due_theirs)}, both {both}")
+    for name, (compared, agreed) in result.fields.items():
+        typer.echo(f"  {name:<16} {agreed}/{compared} agree")
+    for d in result.disagreements:
+        typer.echo(f"  {d.ct_number} {d.field}: ours {d.ours!r}, theirs {d.theirs!r}", err=True)
+    if result.disagreements:
         raise typer.Exit(1)

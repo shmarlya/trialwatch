@@ -164,6 +164,39 @@ ALTER TABLE ctis.trial_snapshot ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY
 
 
 --
+-- Name: bruckner_document; Type: TABLE; Schema: gold; Owner: -
+--
+
+CREATE TABLE gold.bruckner_document (
+    ct_number text NOT NULL,
+    fetch_run_id bigint NOT NULL,
+    source_file text NOT NULL,
+    results_posted_on date NOT NULL,
+    reviewers_agreed boolean NOT NULL,
+    final_comment text,
+    content_hash bytea NOT NULL,
+    payload jsonb NOT NULL,
+    CONSTRAINT bruckner_document_content_hash_check CHECK ((length(content_hash) = 32))
+);
+
+
+--
+-- Name: bruckner_review; Type: TABLE; Schema: gold; Owner: -
+--
+
+CREATE TABLE gold.bruckner_review (
+    ct_number text NOT NULL,
+    reviewer text NOT NULL,
+    participants boolean,
+    outcomes boolean,
+    cancelled boolean,
+    asked_to_check boolean,
+    comment text,
+    CONSTRAINT bruckner_review_reviewer_check CHECK ((reviewer = ANY (ARRAY['first'::text, 'second'::text, 'third'::text])))
+);
+
+
+--
 -- Name: bruckner_verdict; Type: TABLE; Schema: gold; Owner: -
 --
 
@@ -285,19 +318,19 @@ ALTER TABLE ONLY ctis.fetch_run
 
 
 --
--- Name: search_export_snapshot search_export_snapshot_ct_number_captured_on_content_hash_key; Type: CONSTRAINT; Schema: ctis; Owner: -
---
-
-ALTER TABLE ONLY ctis.search_export_snapshot
-    ADD CONSTRAINT search_export_snapshot_ct_number_captured_on_content_hash_key UNIQUE (ct_number, captured_on, content_hash);
-
-
---
 -- Name: search_export_snapshot search_export_snapshot_pkey; Type: CONSTRAINT; Schema: ctis; Owner: -
 --
 
 ALTER TABLE ONLY ctis.search_export_snapshot
     ADD CONSTRAINT search_export_snapshot_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: search_export_snapshot search_export_snapshot_row_key; Type: CONSTRAINT; Schema: ctis; Owner: -
+--
+
+ALTER TABLE ONLY ctis.search_export_snapshot
+    ADD CONSTRAINT search_export_snapshot_row_key UNIQUE (ct_number, captured_on, source_file, content_hash);
 
 
 --
@@ -322,6 +355,22 @@ ALTER TABLE ONLY ctis.trial_snapshot
 
 ALTER TABLE ONLY ctis.trial_snapshot
     ADD CONSTRAINT trial_snapshot_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: bruckner_document bruckner_document_pkey; Type: CONSTRAINT; Schema: gold; Owner: -
+--
+
+ALTER TABLE ONLY gold.bruckner_document
+    ADD CONSTRAINT bruckner_document_pkey PRIMARY KEY (ct_number);
+
+
+--
+-- Name: bruckner_review bruckner_review_pkey; Type: CONSTRAINT; Schema: gold; Owner: -
+--
+
+ALTER TABLE ONLY gold.bruckner_review
+    ADD CONSTRAINT bruckner_review_pkey PRIMARY KEY (ct_number, reviewer);
 
 
 --
@@ -490,6 +539,13 @@ CREATE INDEX trial_snapshot_latest_idx ON ctis.trial_snapshot USING btree (ct_nu
 
 
 --
+-- Name: bruckner_document_fetch_run_idx; Type: INDEX; Schema: gold; Owner: -
+--
+
+CREATE INDEX bruckner_document_fetch_run_idx ON gold.bruckner_document USING btree (fetch_run_id);
+
+
+--
 -- Name: bruckner_verdict_fetch_run_idx; Type: INDEX; Schema: gold; Owner: -
 --
 
@@ -529,6 +585,30 @@ ALTER TABLE ONLY ctis.trial_snapshot
 
 
 --
+-- Name: bruckner_document bruckner_document_ct_number_fkey; Type: FK CONSTRAINT; Schema: gold; Owner: -
+--
+
+ALTER TABLE ONLY gold.bruckner_document
+    ADD CONSTRAINT bruckner_document_ct_number_fkey FOREIGN KEY (ct_number) REFERENCES ctis.trial(ct_number);
+
+
+--
+-- Name: bruckner_document bruckner_document_fetch_run_id_fkey; Type: FK CONSTRAINT; Schema: gold; Owner: -
+--
+
+ALTER TABLE ONLY gold.bruckner_document
+    ADD CONSTRAINT bruckner_document_fetch_run_id_fkey FOREIGN KEY (fetch_run_id) REFERENCES ctis.fetch_run(id);
+
+
+--
+-- Name: bruckner_review bruckner_review_ct_number_fkey; Type: FK CONSTRAINT; Schema: gold; Owner: -
+--
+
+ALTER TABLE ONLY gold.bruckner_review
+    ADD CONSTRAINT bruckner_review_ct_number_fkey FOREIGN KEY (ct_number) REFERENCES gold.bruckner_document(ct_number);
+
+
+--
 -- Name: bruckner_verdict bruckner_verdict_ct_number_fkey; Type: FK CONSTRAINT; Schema: gold; Owner: -
 --
 
@@ -556,4 +636,6 @@ ALTER TABLE ONLY gold.bruckner_verdict
 --
 
 INSERT INTO public.schema_migrations (version) VALUES
-    ('20261030143522');
+    ('20261030143522'),
+    ('20261101160000'),
+    ('20261101170000');

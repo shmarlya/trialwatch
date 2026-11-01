@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+.DS_Store
+data/
+.env
+# Dev seed with Bruckner et al.'s data (scripts/dev_seed.py builds it). Their OSF files carry no
+# licence, so it stays out of git until the authors agree to republication.
+db/dev/

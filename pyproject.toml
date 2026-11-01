@@ -1,0 +1,23 @@
+[project]
+name = "trialwatch"
+version = "0.1.0"
+description = "AI watchdog tracking missing and incomplete clinical-trial results in the EU register"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "psycopg[binary]>=3.3.6",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+trialwatch = "trialwatch.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

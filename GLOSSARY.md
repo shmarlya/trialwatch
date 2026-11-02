@@ -85,7 +85,7 @@ Abbreviations and terms used in this project, roughly grouped. Add new ones as t
 | **JSONB** | Postgres column type for storing and querying JSON documents. |
 | **Search export** | The CSV the CTIS public search lets you download: one row per trial, human-readable labels. Bruckner et al.'s 2025-11-10 export is stored row by row in ctis.search_export_snapshot. |
 | **ADR** | Architecture Decision Record: one page per decision (question, options, trade-offs, choice, when to revisit, lab). Ours are Excalidraw pages in docs/adr/. |
-| **Verdict confidence** | Our model's own certainty (0–100%) about one trial's verdict. At 99% or above a verdict may be published; below that it needs manual approval (ADR-001, proposed). |
+| **Verdict confidence** | Our model's own certainty (0–100%) about one trial's verdict. At 99% or above a verdict may be published; below that it needs manual approval (ADR-001, accepted; the line itself is set on real scores in S8). |
 | **Manual approval** | A person confirms a verdict before it is published. |
 | **Docs check** | tests/test_docs.py: fails when the docs name a file, table or command that doesn't exist, or leave one out. Runs with pytest and as a Stop hook. |
 | **Answer key** | Bruckner et al.'s final verdict per trial (on time, late, not fully reported, extended, cancelled) and what its results document contained (full, incomplete, none), in gold.bruckner_verdict, plus each reviewer's answers per part in gold.bruckner_review. ADR-001: our checks must reach the same verdicts. |

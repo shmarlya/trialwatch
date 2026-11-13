@@ -12,6 +12,7 @@ hooks:
 watch:
   - README.md
   - GLOSSARY.md
+  - data/bruckner/README.md
   - tools/site_hooks.py
 
 theme:
@@ -61,6 +62,7 @@ nav:
       - AI architecture decisions: ai-architecture-decisions.md
       - ADR roadmap: adr-roadmap.md
       - "ADR-001: Success criteria": adr/ADR-001-success-criteria.md
+  - Benchmark data: data/bruckner/README.md
   - Glossary: glossary.md
 not_in_nav: |
   /adr/ADR-template.md

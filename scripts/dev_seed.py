@@ -2,8 +2,8 @@
 final verdicts and their manual reviews as one dev-only dbmate migration (applied by the
 migrate-dev compose service).
 
-Run from the repo root, with their files in data/, after changing those files, the loaders or the
-tables they fill:
+Run from the repo root, with their files in data/bruckner/ (in git, see its README), after changing
+those files, the loaders or the tables they fill:
 
     uv run python scripts/dev_seed.py
 
@@ -24,16 +24,12 @@ from trialwatch.gold.bruckner_reviews import document, reviews
 from trialwatch.gold.bruckner_reviews import read_rows as read_reviews
 
 ROOT = Path(__file__).resolve().parent.parent
-BRUCKNER = ROOT / "data/bruckner_research/CTIS data and code final/Data/Data and code"
-EXPORT = (BRUCKNER / "ctis_project_step1_assessing_trial_registration_data/1_Input_datasets"
-          / "CTIS_trials_Phases_II-IV_20251110.csv")
-FINAL = (BRUCKNER / "ctis_project_step4_generating_final_results_dataset/2_Output"
-         / "2026-03-16_ctis_study_final_dataset.csv")
+BRUCKNER = ROOT / "data/bruckner"  # the four files we read, with their OSF paths in its README
+EXPORT = BRUCKNER / "CTIS_trials_Phases_II-IV_20251110.csv"
+FINAL = BRUCKNER / "2026-03-16_ctis_study_final_dataset.csv"
 # Same day's export of the trials with a paediatric investigation plan (decides paediatric status)
-PIP = (BRUCKNER / "ctis_project_step2_identifying_due_trials_from_public_ctis_data/1_Input_datasets"
-       / "CTIS_trials_with_PIP_20251110.csv")
-REVIEWS = (BRUCKNER / "ctis_project_step4_generating_final_results_dataset/1_Input_datasets"
-           / "ctis_merged_reviews_consolidated_with_comments.csv")
+PIP = BRUCKNER / "CTIS_trials_with_PIP_20251110.csv"
+REVIEWS = BRUCKNER / "ctis_merged_reviews_consolidated_with_comments.csv"
 OUT = ROOT / "db/dev/20261101150000_bruckner_seed.sql"
 LOADED_BY = f"db/dev/{OUT.name}"
 # The fetch_run row inserted just before, in the same session
@@ -119,8 +115,9 @@ def render() -> str:
 --
 -- Data: Bruckner T, Dike CE, Caquelin L, et al. Assessing Compliance with Reporting Requirements in
 -- European Phase II-IV Clinical Trials (medRxiv preprint, 2026); data and code on OSF
--- (osf.io/sn4j2). The OSF files carry no licence, so this file is git-ignored: don't publish it
--- until the authors agree. The CTIS export rows are EMA data (reuse allowed, crediting EMA).
+-- (osf.io/sn4j2), used here with the authors' permission (see data/bruckner/README.md). The CTIS
+-- export rows are EMA data (reuse allowed, crediting EMA). This file is built from data/bruckner/
+-- and is not committed; rebuild it with `uv run python scripts/dev_seed.py`.
 -- Rows are stored as `trialwatch ctis seed`, `trialwatch gold bruckner` and `trialwatch gold
 -- bruckner-reviews` store them; rows already loaded by those commands are skipped.
 

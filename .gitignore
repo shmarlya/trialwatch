@@ -4,8 +4,11 @@ node_modules/
 # Docs site built by `mkdocs build`
 site/
 .DS_Store
-data/
+# Local research files, except the four Bruckner et al. files our code reads: those are published
+# with the authors' permission, see data/bruckner/README.md.
+data/*
+!data/bruckner/
 .env
-# Dev seed with Bruckner et al.'s data (scripts/dev_seed.py builds it). Their OSF files carry no
-# licence, so it stays out of git until the authors agree to republication.
+# Dev seed built from data/bruckner/ by `uv run python scripts/dev_seed.py`. Not committed: every
+# loader change rewrites all 21 MB of it, and the CSVs it is built from are in git instead.
 db/dev/

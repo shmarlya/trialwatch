@@ -6,7 +6,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       TZ: UTC
     volumes:
-      # Local research files (git-ignored, not in the image), read-only, for `ctis seed`
+      # Research files, read-only, for `ctis seed`: data/bruckner/ is in git, the rest is local only
       - ./data:/app/data:ro
     depends_on:
       migrate:
@@ -30,7 +30,7 @@ services:
 
   # Optional, development and tests only: applies db/dev/*.sql (Bruckner et al.'s data) after
   # migrate, recorded in its own table so production bookkeeping never sees it. db/dev/ is
-  # git-ignored (their data has no licence); build it with `uv run python scripts/dev_seed.py`.
+  # generated from data/bruckner/, not committed; build it with `uv run python scripts/dev_seed.py`.
   # Profile dev keeps it out of `up`; start it with `docker compose run --rm migrate-dev`. Settings
   # are env vars, not flags, so `run --rm migrate-dev rollback` / `status` also act on db/dev only.
   migrate-dev:

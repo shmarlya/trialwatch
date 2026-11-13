@@ -1,6 +1,7 @@
 """MkDocs hooks (`hooks:` in mkdocs.yml) that build every page of the docs site from the docs we keep anyway.
 
-- Home from README.md and Glossary from GLOSSARY.md, with repo-relative links rewritten for the site.
+- Home from README.md, Glossary from GLOSSARY.md and the benchmark data's own README, with
+  repo-relative links rewritten for the site.
 - One page per docs/**/*.excalidraw: its title (the diagram's largest text), its image from docs/img/
   (rendered by tools/diagrams/render.mjs), a download link for the source, and all of its text in a
   collapsed block so the site search finds what's in the diagram.
@@ -17,14 +18,21 @@ from pathlib import Path
 from mkdocs.structure.files import File, Files
 
 ROOT = Path(__file__).parent.parent
+# Markdown kept outside docs/ -> where it goes on the site. The data README keeps its repo path so
+# that README.md's link to it resolves both on GitHub and here.
+PAGES = {
+    "README.md": "index.md",
+    "GLOSSARY.md": "glossary.md",
+    "data/bruckner/README.md": "data/bruckner/README.md",
+}
 # README.md links to docs/img/<name>.svg so the images show on GitHub; on the site, link the diagram's page.
 IMAGE_LINK = re.compile(r"\]\(docs/img/([^)\s]+)\.svg\)")
 DOCS_LINK = re.compile(r"\]\(docs/([^)\s]+)\)")
 
 
 def on_files(files: Files, *, config) -> Files:
-    files.append(File.generated(config, "index.md", content=site_links((ROOT / "README.md").read_text())))
-    files.append(File.generated(config, "glossary.md", content=site_links((ROOT / "GLOSSARY.md").read_text())))
+    for source, page in PAGES.items():
+        files.append(File.generated(config, page, content=site_links((ROOT / source).read_text())))
     docs = Path(config.docs_dir)
     for diagram in sorted(docs.rglob("*.excalidraw")):
         rel = diagram.relative_to(docs)

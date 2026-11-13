@@ -26,8 +26,9 @@ AS_BUILT = [
     "docs/external-apis.excalidraw",
     "README.md",
     "GLOSSARY.md",
+    "data/bruckner/README.md",
 ]
-SKIP_DIRS = {".git", ".venv", "data", "__pycache__", ".pytest_cache"}
+SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache"}
 # A file name with one of these extensions, optionally with directories: ctis/store.py, db/migrations/*.sql
 FILE_REF = re.compile(r"(?<![\w.~/*-])((?:[\w.-]+/)*[\w*-][\w.*-]*\.(?:md|py|sql|ya?ml|toml|sh|excalidraw|json))(?![\w/])")
 TABLE_REF = re.compile(r"\b((?:ctis|ref|gold|public)\.\w+)")

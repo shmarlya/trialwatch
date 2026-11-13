@@ -77,7 +77,7 @@ Abbreviations and terms used in this project, roughly grouped. Add new ones as t
 | **Evals** | Automated tests that score our checks against gold labels; a release is blocked if the score drops. |
 | **Reference data** | Small, fixed lookup lists (status codes, document types, countries) loaded by migrations. |
 | **Seed** | Data loaded once from files (e.g. the Bruckner benchmark), not fetched live. |
-| **Dev seed** | Optional migrations in db/dev/ with Bruckner et al.'s data (the 2025-11-10 export and the final verdicts), for development and tests only. Git-ignored: the authors' OSF files carry no licence, so it isn't published until they agree. Build it with `uv run python scripts/dev_seed.py`, apply it with `docker compose run --rm migrate-dev`; it is recorded in its own dev_schema_migrations table and kept out of db/schema.sql. |
+| **Dev seed** | Optional migrations in db/dev/ with Bruckner et al.'s data (the 2025-11-10 export and the final verdicts), for development and tests only. Generated, not committed: every loader change rewrites all 21 MB of it, and the CSVs it is built from are in data/bruckner/ instead. Build it with `uv run python scripts/dev_seed.py`, apply it with `docker compose run --rm migrate-dev`; it is recorded in its own dev_schema_migrations table and kept out of db/schema.sql. |
 | **Migration** | A numbered SQL file that changes the database schema; applied in order by dbmate. Everything up to 2026-11-01 is squashed into one file, db/migrations/20261030143522_init.sql; new changes get new files. |
 | **LLM** | Large language model (here: Claude), used to read PDFs and match publications. |
 | **MCP** | Model Context Protocol: a standard way for AI assistants to call tools; we plan an MCP server exposing our findings. |

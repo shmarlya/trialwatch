@@ -1,5 +1,5 @@
 # Checks the docs against the code and builds the docs site (mkdocs.yml) on every push and pull request;
-# pushes to main also publish it to GitHub Pages: https://shmarlya.github.io/ivyar.com/
+# pushes to main also publish it to GitHub Pages: https://shmarlya.github.io/trialwatch/
 # Needs Settings → Pages → Source = "GitHub Actions". Diagram images are not rendered here: they are
 # committed (tools/diagrams/render.mjs, pre-commit hook) and tests/test_docs.py fails if one is stale.
 name: Docs

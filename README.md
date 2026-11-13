@@ -1,4 +1,4 @@
-# ivyar.com
+# TrialWatch
 AI watchdog tracking missing and incomplete clinical-trial results in the EU register
 
 ## Docs
@@ -23,7 +23,7 @@ npm exec --prefix tools/diagrams -- playwright install chromium
 uv run pre-commit install
 ```
 
-The same docs also build a website with MkDocs Material: Home from this README, Glossary from `GLOSSARY.md`, and one page per diagram with its image and its text (so search finds what's in a diagram). `tools/site_hooks.py` generates the pages; `mkdocs.yml` holds the nav, where each new diagram needs an entry. `.github/workflows/docs.yml` runs the docs check and a strict build on every push and pull request, and every push to `main` publishes the site to https://shmarlya.github.io/ivyar.com/. Preview it locally at http://127.0.0.1:8000/ivyar.com/ with:
+The same docs also build a website with MkDocs Material: Home from this README, Glossary from `GLOSSARY.md`, and one page per diagram with its image and its text (so search finds what's in a diagram). `tools/site_hooks.py` generates the pages; `mkdocs.yml` holds the nav, where each new diagram needs an entry. `.github/workflows/docs.yml` runs the docs check and a strict build on every push and pull request, and every push to `main` publishes the site to https://shmarlya.github.io/trialwatch/. Preview it locally at http://127.0.0.1:8000/trialwatch/ with:
 
 ```bash
 uv run --group docs mkdocs serve

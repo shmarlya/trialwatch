@@ -3,9 +3,9 @@
 # page per docs/**/*.excalidraw diagram (its image from docs/img/ plus its text, so search finds it).
 site_name: TrialWatch
 site_description: AI watchdog tracking missing and incomplete clinical-trial results in the EU register
-site_url: https://shmarlya.github.io/ivyar.com/
-repo_url: https://github.com/shmarlya/ivyar.com
-repo_name: shmarlya/ivyar.com
+site_url: https://shmarlya.github.io/trialwatch/
+repo_url: https://github.com/shmarlya/trialwatch
+repo_name: shmarlya/trialwatch
 docs_dir: docs
 hooks:
   - tools/site_hooks.py

@@ -11,7 +11,7 @@ from importlib.metadata import version
 import httpx
 
 BASE_URL = "https://euclinicaltrials.eu/ctis-public-api"
-USER_AGENT = f"TrialWatch/{version('trialwatch')} (+https://ivyar.com)"
+USER_AGENT = f"TrialWatch/{version('trialwatch')} (+https://github.com/shmarlya/trialwatch)"
 
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 CT_NUMBER = re.compile(r"\d{4}-\d{6}-\d{2}-\d{2}")

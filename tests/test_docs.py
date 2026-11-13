@@ -3,10 +3,12 @@
 The "as built" docs are checked strictly: every file, table and CLI command they name must exist, and
 every table, command and compose service must appear in its diagram. The plan docs (decision map,
 roadmap, ADRs) name files that are still to be written, so only their links to other diagrams are
-checked. Text in a box starting "Not built yet" is a plan too. Runs with the suite and from the
-Stop hook in .claude/settings.json.
+checked. Text in a box starting "Not built yet" is a plan too. Every diagram must also have an
+up-to-date image in docs/img/ (rendered by tools/diagrams/render.mjs). Runs with the suite and from
+the Stop hook in .claude/settings.json.
 """
 
+import hashlib
 import json
 import re
 import subprocess
@@ -31,6 +33,8 @@ FILE_REF = re.compile(r"(?<![\w.~/*-])((?:[\w.-]+/)*[\w*-][\w.*-]*\.(?:md|py|sql
 TABLE_REF = re.compile(r"\b((?:ctis|ref|gold|public)\.\w+)")
 NOTATION = {"ref.x"}  # external-apis: "ref.x = code decoded by that table"
 PLACEHOLDER = ("…", "<", "{", "NNN", "00n")
+# First line of every image render.mjs writes: the sha256 of the .excalidraw it was rendered from
+IMAGE_STAMP = re.compile(r"<!-- Rendered from (\S+) sha256=([0-9a-f]{64}) ")
 
 
 def text_of(path: Path) -> str:
@@ -125,6 +129,28 @@ def test_system_design_shows_every_command_and_service_and_no_others():
     assert mentioned <= commands, f"system-design names commands that don't exist: {sorted(mentioned - commands)}"
     assert not sorted(c for c in commands if c not in text), "commands missing from system-design.excalidraw"
     assert not sorted(s for s in compose_services() if f"{s} — " not in text), "compose services missing from system-design.excalidraw"
+
+
+def test_every_diagram_has_an_up_to_date_image():
+    docs, img = ROOT / "docs", ROOT / "docs/img"
+    diagrams = {p.relative_to(docs).with_suffix(".svg"): p for p in docs.rglob("*.excalidraw")}
+    stale = []
+    for name, diagram in sorted(diagrams.items()):
+        image = img / name
+        stamp = IMAGE_STAMP.match(image.read_text()) if image.is_file() else None
+        if not stamp or stamp[2] != hashlib.sha256(diagram.read_bytes()).hexdigest():
+            stale.append(diagram.relative_to(ROOT).as_posix())
+    orphans = sorted(p.relative_to(ROOT).as_posix() for p in img.rglob("*.svg") if p.relative_to(img) not in diagrams)
+    assert not stale, f"images missing or stale, run `node tools/diagrams/render.mjs`: {stale}"
+    assert not orphans, f"images whose diagram is gone, run `node tools/diagrams/render.mjs`: {orphans}"
+
+
+def test_every_diagram_is_in_the_site_nav():
+    """tools/site_hooks.py makes a page for each diagram; mkdocs.yml must list it (nav or not_in_nav)."""
+    config = (ROOT / "mkdocs.yml").read_text()
+    docs = ROOT / "docs"
+    pages = (p.relative_to(docs).with_suffix(".md").as_posix() for p in docs.rglob("*.excalidraw"))
+    assert not sorted(p for p in pages if not re.search(rf"(?<![\w-]){re.escape(p)}\b", config)), "diagrams missing from mkdocs.yml nav"
 
 
 def test_links_between_diagrams_resolve():

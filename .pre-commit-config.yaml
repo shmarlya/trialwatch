@@ -1,0 +1,12 @@
+# Git hooks run by pre-commit (a uv dev dependency). One-time setup: see "Docs" in README.md.
+repos:
+  - repo: local
+    hooks:
+      # When a commit touches a diagram, re-render every stale docs/img/*.svg and delete images whose
+      # diagram is gone. If an image changed, the commit stops: `git add docs/img` and commit again.
+      - id: render-diagrams
+        name: render Excalidraw diagrams to docs/img
+        language: system
+        entry: node tools/diagrams/render.mjs --fail-on-change
+        files: ^docs/.*\.excalidraw$
+        pass_filenames: false

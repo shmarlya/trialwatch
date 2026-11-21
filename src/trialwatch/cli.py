@@ -22,7 +22,9 @@ from trialwatch.db import core as core_db
 from trialwatch.env import load_env_file
 from trialwatch.gold import bruckner, datasets
 from trialwatch.gold import compare as gold_compare
-from trialwatch.sources import registry, stages
+from trialwatch.gold import evaluate as gold_evaluate
+from trialwatch.sources import ctis, registry, snapshot, stages
+from trialwatch.sources.ctis_client import CtisClient
 from trialwatch.sources.ctis_client import CT_NUMBER
 
 app = typer.Typer(no_args_is_help=True, help="TrialWatch: EU clinical-trial results watchdog.")
@@ -417,6 +419,172 @@ def gold_compare_run(
         typer.echo(line)
     for line in gold_compare.disagreement_lines(scored):
         typer.echo(line, err=True)
+
+
+@gold_app.command("sample")
+def gold_sample(
+    dataset: Annotated[str, typer.Option(help="A dataset version, e.g. bruckner/2026-03-16")],
+    count: Annotated[int, typer.Option(min=1, help="How many items")] = 50,
+    min_per_label: Annotated[int, typer.Option(min=0, help="At least this many items of each label")] = 15,
+) -> None:
+    """Print the hardest labelled items' keys, one per line, for a short gold evaluation (gold/evaluate.py
+    hardness: reviewers disagreed, discussed, terminated, re-checked, unsettled or cancelled, commented)."""
+    try:
+        chosen = gold_evaluate.hardest(datasets.load(dataset), count, min_per_label)
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--dataset") from exc
+    typer.echo(f"# The {len(chosen)} hardest labelled items of {dataset} (trialwatch gold sample --dataset {dataset} "
+               f"--count {count} --min-per-label {min_per_label}): hardness, then key")
+    for item in chosen:
+        typer.echo(item.key)
+
+
+def _labelled_ct_numbers(chosen: datasets.Dataset) -> list[str]:
+    ct_numbers = []
+    for item in chosen.items:
+        ct_number = gold_evaluate.ct_number_of(item)
+        if item.expected_label is not None and ct_number is not None and ct_number not in ct_numbers:
+            ct_numbers.append(ct_number)
+    return ct_numbers
+
+
+@gold_app.command("snapshot")
+def gold_snapshot(
+    dataset: Annotated[str, typer.Option(help="A dataset version, e.g. bruckner/2026-03-16")],
+    out: Annotated[Path, typer.Option(help="Write the snapshot here (.tar.gz)")],
+    release: Annotated[str, typer.Option(help="The GitHub release the snapshot will be uploaded to")],
+    lock: Annotated[Path, typer.Option(help="Write the lock that names it here")] = snapshot.LOCK_FILE,
+    files_from: Annotated[
+        Path | None, typer.Option(exists=True, file_okay=False,
+                                  help="Take each document's file from this earlier --files-dir copy when it holds "
+                                       "that document and version (records still come from CTIS)")
+    ] = None,
+    copied_on: Annotated[str, typer.Option(help="When the --files-from copy was made, for the index")] = "an earlier day",
+) -> None:
+    """Freeze what CTIS answers now for every labelled trial of a gold dataset: transfer them from CTIS
+    (into this database) while recording each record and document file, then pack the recording
+    (sources/snapshot.py) and write the lock the gold pipelines read it by."""
+    try:
+        chosen = datasets.load(dataset)
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--dataset") from exc
+    ct_numbers = _labelled_ct_numbers(chosen)
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as folder:
+        with CtisClient() as live:
+            client = live
+            description = f"CTIS's answers for the labelled trials of {chosen.ref}"
+            if files_from is not None:
+                client = snapshot.LocalCopyFirst(live, files_from, copied_on)
+                description += f"; document files from a copy of {copied_on} where it holds the same version"
+            recording = snapshot.RecordingClient(client, Path(folder), description, dataset=chosen.ref)
+            with db.connect(actor="ctis-adapter", actor_kind="process") as conn:
+                result = stages.transfer(conn, _registered(conn, "ctis"), ctis.CtisAdapter(recording), ct_numbers,
+                                         why="gold snapshot", progress=typer.echo)
+            index = recording.finish()
+        packed = snapshot.pack(Path(folder), out)
+    typer.echo(result.summary())
+    _echo_failures(result.failed)
+    origins: dict[str, int] = {}
+    for trial in index["trials"].values():
+        for document in trial["documents"].values():
+            origins[document["from"]] = origins.get(document["from"], 0) + 1
+    for origin, count in sorted(origins.items()):
+        typer.echo(f"document files from {origin}: {count}")
+    lock.write_text(json.dumps(snapshot.lock_data(chosen.ref, release, packed, index["made_at"]), indent=1) + "\n")
+    typer.echo(f"{out}: {packed.trials} trials, {packed.files} files, sha256 {packed.sha256}; lock written to {lock}")
+
+
+@gold_app.command("eval")
+def gold_eval(
+    dataset: Annotated[str, typer.Option(help="A dataset version, e.g. bruckner/2026-03-16")],
+    sample: Annotated[
+        Path | None, typer.Option(exists=True, dir_okay=False, help="Only these items: a file with one key per line")
+    ] = None,
+    config: Annotated[str, typer.Option(help="The check's setup: a file in checks/configs/, without .json")] = check_settings.DEFAULT,
+    gates: Annotated[Path, typer.Option(exists=True, dir_okay=False, help="The gates to pass")] = gold_evaluate.GATES_FILE,
+    report: Annotated[Path | None, typer.Option(help="Also write the report here, as Markdown")] = None,
+    title: Annotated[str, typer.Option(help="The report's heading")] = "Gold evaluation",
+    frozen: Annotated[
+        Path | None, typer.Option("--snapshot", exists=True, dir_okay=False,
+                                  help="Read CTIS from this frozen snapshot (.tar.gz) instead of the network")
+    ] = None,
+    lock: Annotated[Path, typer.Option(help="The lock the snapshot must match")] = snapshot.LOCK_FILE,
+) -> None:
+    """Our whole workflow on a gold dataset's labelled items: transfer their evidence from CTIS, run the
+    evidence check (it calls the model), score the run against the labels, and fail (exit 1) when a
+    gate in evals/gates.json is missed. The two gold pipelines in .github/workflows/ run this."""
+    try:
+        chosen = datasets.load(dataset)
+        settings = check_settings.load(config)
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if sample is not None:
+        try:
+            chosen = gold_evaluate.only_items(chosen, _lines_of(sample))
+        except KeyError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--sample") from exc
+    requirement_set = requirement_sets.load(settings.requirements)
+    if requirement_set.name != chosen.requirements:
+        raise typer.BadParameter(f"{config} checks {requirement_set.name}, but {chosen.ref} answers {chosen.requirements}")
+    ct_numbers = _labelled_ct_numbers(chosen)
+    typer.echo(f"{chosen.ref}: {len(ct_numbers)} labelled trials · {settings.summary()}")
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as folder:
+        evidence_from = "live from CTIS"
+        if frozen is not None:
+            locked = snapshot.read_lock(lock)
+            if locked.dataset != chosen.ref:
+                raise typer.BadParameter(f"the lock is for {locked.dataset}, not {chosen.ref}", param_hint="--lock")
+            try:
+                snapshot.unpack(frozen, Path(folder), locked.sha256)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc), param_hint="--snapshot") from exc
+            evidence_from = f"frozen snapshot {frozen.name} (sha256 {locked.sha256[:12]}…, made {locked.made_at})"
+        typer.echo(f"evidence: {evidence_from}")
+        with db.connect(actor="ctis-adapter", actor_kind="process") as conn:
+            source = _registered(conn, "ctis")
+            if frozen is not None:
+                # the CTIS adapter as always, answered by the snapshot: everything after the network runs as usual
+                transferred = stages.transfer(conn, source, ctis.CtisAdapter(snapshot.ReplayClient(Path(folder))),
+                                              ct_numbers, why="gold eval", progress=typer.echo)
+            else:
+                with registry.open_adapter(source.adapter) as adapter:
+                    transferred = stages.transfer(conn, source, adapter, ct_numbers, why="gold eval",
+                                                  progress=typer.echo)
+    typer.echo(transferred.summary())
+    _echo_failures(transferred.failed)
+    system_prompt = load_prompt(settings.prompt)
+    with db.connect(actor="evidence-check", actor_kind="process") as conn:
+        found = core_db.trials_with_scheme(conn, "eu-ct", ct_numbers)
+        trial_ids = []
+        for ct_number in ct_numbers:
+            if ct_number in found:
+                trial_ids.append(found[ct_number])
+        # a trial whose evidence did not come in completely is not checked: it counts as missing
+        blocked = stages.not_ready(conn, trial_ids, requirement_set.document_kinds)
+        ready = []
+        for trial_id in trial_ids:
+            if trial_id not in blocked:
+                ready.append(trial_id)
+        typer.echo(f"{len(ready)} of {len(ct_numbers)} trials ready for the check")
+        import anthropic
+
+        client = anthropic.Anthropic(base_url=ANTHROPIC_API, max_retries=4)
+        summary = evidence.run(conn, client, ready, settings, system_prompt, progress=typer.echo,
+                               requirement_set=requirement_set)
+        scored = gold_compare.compare_run(conn, summary.run_id, chosen)
+        retrieval = gold_evaluate.retrieval_measures(conn, summary.run_id)
+    loaded_gates = gold_evaluate.load_gates(gates)
+    text = gold_evaluate.report_markdown(title, scored, loaded_gates, f"evidence: {evidence_from}\n{summary.summary()}",
+                                         retrieval)
+    typer.echo(text)
+    if report is not None:
+        report.write_text(text)
+    if gold_evaluate.failures(gold_evaluate.measures(scored), loaded_gates):
+        raise typer.Exit(1)
 
 
 # --- users of the web interface (ADR-006) ---------------------------------------------------------

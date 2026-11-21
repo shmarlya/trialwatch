@@ -142,13 +142,13 @@
 <header>
   <a class="brand" href="/">TrialWatch</a>
   <nav>
-    <a href="/">Workflow</a>
-    <a href="/sources">Sources</a>
+    <a href="/">{% if can("view.internal") %}Workflow{% else %}Home{% endif %}</a>
+    {% if can("view.internal") %}<a href="/sources">Sources</a>{% endif %}
     <a href="/trials">Trials</a>
     <a href="/sponsors">Sponsors</a>
     <a href="/prompts">Prompts</a>
     <a href="/requirements">Requirements</a>
-    <a href="/gold">Gold</a>
+    {% if can("view.internal") %}<a href="/review">Review</a><a href="/gold">Gold</a>{% endif %}
     {% if can("user.manage") %}<a href="/admin/users">Users</a>{% endif %}
   </nav>
   {% block header_extra %}{% endblock %}

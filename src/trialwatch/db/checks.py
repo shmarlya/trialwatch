@@ -169,3 +169,137 @@ def judgements(conn: psycopg.Connection, run_id: int) -> dict[int, RunJudgement]
     for row in rows:
         by_trial[row.trial_id] = row
     return by_trial
+
+
+# --- publication (ADR-007): which judgements the public sees ---------------------------------------
+
+def publish_judgement(conn: psycopg.Connection, run_id: int, trial_id: int, confidence: float | None = None,
+                      basis: str | None = None) -> bool:
+    """Make the judgement public, as the session's actor: reviewed by a person (no confidence), or
+    published by a run with the measured confidence and its basis (checks/publishing.py). False if it
+    is published already; the database refuses one with an error or of a run still running
+    (checks.publishable)."""
+    with conn.transaction():
+        cursor = conn.execute(
+            """
+            INSERT INTO checks.publication (run_id, trial_id, published_by, confidence, basis)
+            SELECT %(run)s, %(trial)s, current_setting('trialwatch.actor')::bigint, %(confidence)s, %(basis)s
+            WHERE NOT EXISTS (SELECT FROM checks.publication
+                              WHERE run_id = %(run)s AND trial_id = %(trial)s AND withdrawn_at IS NULL)
+            """,
+            {"run": run_id, "trial": trial_id, "confidence": confidence, "basis": basis},
+        )
+    return cursor.rowcount == 1
+
+
+def withdraw_publication(conn: psycopg.Connection, run_id: int, trial_id: int, note: str | None) -> bool:
+    """Take the judgement back from the public, as the session's actor (the publication is kept, marked
+    withdrawn). False if it was not published."""
+    with conn.transaction():
+        cursor = conn.execute(
+            """
+            UPDATE checks.publication
+               SET withdrawn_at = clock_timestamp(), withdrawn_by = current_setting('trialwatch.actor')::bigint,
+                   note = coalesce(%s, note)
+             WHERE run_id = %s AND trial_id = %s AND withdrawn_at IS NULL
+            """,
+            (note, run_id, trial_id),
+        )
+    return cursor.rowcount == 1
+
+
+@dataclass(frozen=True)
+class JudgementKind:
+    """What a judgement's confidence is measured by (checks/publishing.py): the exact check that made
+    it, its label, and how its evidence came in."""
+
+    run_id: int
+    trial_id: int
+    label: str | None
+    model: str
+    prompt_sha256: bytes
+    requirements: str
+    # every quote the model gave was found on its page
+    quotes_verified: bool
+    # a question had to be asked again with every page
+    widened: bool
+    # a question got no answer, or "don't know"
+    unanswered: bool
+    # when the newest document version it read was posted, as its source says
+    latest_published_at: datetime | None
+
+
+_KINDS = """
+    SELECT j.run_id, j.trial_id, j.label, r.model, r.prompt_sha256, r.requirements,
+           coalesce(bool_and(e.verified) FILTER (WHERE e.found), true) AS quotes_verified,
+           coalesce(bool_or(q.widened), false) AS widened,
+           coalesce(bool_or(q.key IS NOT NULL AND (e.id IS NULL OR e.found IS NULL)), false) AS unanswered,
+           (SELECT max(v.published_at) FROM core.document_version v WHERE v.id = ANY(j.document_versions))
+               AS latest_published_at
+    FROM checks.judgement j
+    JOIN checks.run r ON r.id = j.run_id
+    LEFT JOIN checks.question q ON q.run_id = j.run_id AND q.trial_id = j.trial_id
+    LEFT JOIN checks.evidence e ON e.run_id = q.run_id AND e.trial_id = q.trial_id AND e.key = q.key
+    WHERE j.error IS NULL AND r.status <> 'running'
+"""
+
+
+def judgement_kinds_of_run(conn: psycopg.Connection, run_id: int) -> list[JudgementKind]:
+    """The kind of every finished judgement without an error in the run."""
+    with conn.cursor(row_factory=class_row(JudgementKind)) as cur:
+        return cur.execute(_KINDS + " AND j.run_id = %s GROUP BY j.run_id, j.trial_id, r.id ORDER BY j.trial_id",
+                           (run_id,)).fetchall()
+
+
+def judgement_kinds_of_trials(conn: psycopg.Connection, trial_ids: list[int], requirements: str) -> list[JudgementKind]:
+    """The kind of every finished judgement without an error of these trials under the requirement
+    set, newest run first."""
+    with conn.cursor(row_factory=class_row(JudgementKind)) as cur:
+        return cur.execute(_KINDS + " AND j.trial_id = ANY(%s) AND r.requirements = %s "
+                           "GROUP BY j.run_id, j.trial_id, r.id ORDER BY j.run_id DESC",
+                           (trial_ids, requirements)).fetchall()
+
+
+def judgement_kind(conn: psycopg.Connection, run_id: int, trial_id: int) -> JudgementKind | None:
+    with conn.cursor(row_factory=class_row(JudgementKind)) as cur:
+        return cur.execute(_KINDS + " AND j.run_id = %s AND j.trial_id = %s GROUP BY j.run_id, j.trial_id, r.id",
+                           (run_id, trial_id)).fetchone()
+
+
+@dataclass(frozen=True)
+class RetrievalRow:
+    """One question of one trial in a run, with what retrieval showed the model first (the trace)."""
+
+    trial_id: int
+    key: str
+    widened: bool
+    found: bool | None
+    verified: bool | None
+    file_sha256: bytes | None
+    page_no: int | None
+    # the trial's retrieval step: whole documents sent, or pages searched per question
+    whole: bool | None
+    # the pages of the trial's first model call, as {"file": hex, "page": n}
+    first_pages: list | None
+
+
+def retrieval_rows(conn: psycopg.Connection, run_id: int) -> list[RetrievalRow]:
+    """Every question of the run's judgements without an error, for measuring retrieval (gold/evaluate.py)."""
+    with conn.cursor(row_factory=class_row(RetrievalRow)) as cur:
+        return cur.execute(
+            """
+            SELECT q.trial_id, q.key, q.widened, e.found, e.verified, e.file_sha256, e.page_no,
+                   (SELECT (s.data->>'whole')::boolean FROM checks.step s
+                     WHERE s.run_id = q.run_id AND s.trial_id = q.trial_id AND s.name = 'retrieval'
+                     ORDER BY s.seq LIMIT 1) AS whole,
+                   (SELECT s.data->'pages' FROM checks.step s
+                     WHERE s.run_id = q.run_id AND s.trial_id = q.trial_id AND s.name = 'call'
+                     ORDER BY s.seq LIMIT 1) AS first_pages
+            FROM checks.question q
+            JOIN checks.judgement j ON j.run_id = q.run_id AND j.trial_id = q.trial_id AND j.error IS NULL
+            LEFT JOIN checks.evidence e ON e.run_id = q.run_id AND e.trial_id = q.trial_id AND e.key = q.key
+            WHERE q.run_id = %s
+            ORDER BY q.trial_id, q.key
+            """,
+            (run_id,),
+        ).fetchall()

@@ -138,9 +138,9 @@ def test_a_judgement_that_read_a_document_posted_after_the_reviewers_day_is_set_
 
 def test_the_gold_pages_render_and_unknown_items_are_404(admin_client, monkeypatch):
     monkeypatch.setenv("TRIALWATCH_GOLD_DIR", str(REPO_GOLD))
-    # anyone may browse it; only a signed-in role is offered the transfer
+    # gold datasets are for staff (ADR-007)
     public = TestClient(web.app).get("/gold/bruckner/2026-03-16/2023-508777-91-00")
-    assert public.status_code == 200 and "Transfer evidence from CTIS" not in public.text
+    assert public.status_code == 401
     client = admin_client
     page = client.get("/gold", params={"q": "terminated", "label": "not full"})
     assert page.status_code == 200

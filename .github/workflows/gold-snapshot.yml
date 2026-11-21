@@ -1,0 +1,83 @@
+# Freezes what CTIS answers now for every labelled trial of the Bruckner gold dataset: transfers them
+# while recording each record and document file (`trialwatch gold snapshot`), and uploads the packed
+# recording to a new GitHub release. The gold pipelines read that file instead of CTIS, so every run
+# sees the same evidence. Started by hand; it calls CTIS, not the model. To use the new snapshot,
+# commit the lock this run prints (also kept as an artifact) as evals/snapshot.lock.json.
+name: Gold snapshot (freeze CTIS evidence)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: "The gold dataset version"
+        default: bruckner/2026-03-16
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      db:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: trialwatch
+          POSTGRES_PASSWORD: trialwatch
+          POSTGRES_DB: trialwatch
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trialwatch -d trialwatch"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://trialwatch:trialwatch@localhost:5432/trialwatch
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.12.13"
+          enable-cache: true
+
+      - name: Database schema
+        run: >-
+          docker run --rm --network host -v "$PWD/db:/db"
+          -e DATABASE_URL="$DATABASE_URL?sslmode=disable"
+          ghcr.io/amacneil/dbmate:2.37.0 --wait --no-dump-schema up
+
+      - name: Record CTIS's answers
+        env:
+          DATASET: ${{ inputs.dataset }}
+        run: |
+          stamp="$(date -u +%Y%m%d-%H%M%S)"
+          name="${DATASET//\//-}"
+          echo "TAG=snapshot-$name-$stamp" >> "$GITHUB_ENV"
+          echo "FILE=snapshot-$name-$stamp.tar.gz" >> "$GITHUB_ENV"
+          uv run --locked trialwatch gold snapshot --dataset "$DATASET" --out "snapshot-$name-$stamp.tar.gz" \
+            --release "snapshot-$name-$stamp" --lock snapshot.lock.json
+
+      - name: Upload to a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DATASET: ${{ inputs.dataset }}
+        run: |
+          gh release create "$TAG" "$FILE" --title "Gold snapshot of $DATASET ($TAG)" \
+            --notes "CTIS's records and documents for the labelled trials of $DATASET, frozen for the gold pipelines. Use it by committing this lock as evals/snapshot.lock.json." \
+            --latest=false
+          {
+            echo "## Commit this as evals/snapshot.lock.json"
+            echo '```json'
+            cat snapshot.lock.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the lock
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: snapshot-lock
+          path: snapshot.lock.json

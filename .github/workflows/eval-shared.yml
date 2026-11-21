@@ -1,0 +1,107 @@
+# The gold evaluation both gold pipelines share (ADR-001): our whole workflow on a gold dataset's
+# trials, against a Postgres of its own. It transfers their evidence from the frozen CTIS snapshot that
+# evals/snapshot.lock.json names (a release file made by gold-snapshot.yml, checked by its sha256),
+# through the same adapter, text extraction and retrieval as a live transfer; runs the evidence check
+# (real model calls: it needs the ANTHROPIC_API_KEY secret and costs API money), scores the run against
+# the labels, and fails when a gate in evals/gates.json is missed. Called by eval-short.yml and
+# eval-full.yml; the report is on the run's summary page and kept as an artifact.
+name: Gold evaluation (shared)
+
+on:
+  workflow_call:
+    inputs:
+      title:
+        type: string
+        required: true
+      dataset:
+        type: string
+        default: bruckner/2026-03-16
+      sample:
+        description: "A file of item keys, or empty for every labelled item"
+        type: string
+        default: ""
+      config:
+        type: string
+        default: default
+      timeout:
+        type: number
+        default: 120
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+permissions:
+  # read the snapshot release
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout }}
+    services:
+      db:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: trialwatch
+          POSTGRES_PASSWORD: trialwatch
+          POSTGRES_DB: trialwatch
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trialwatch -d trialwatch"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://trialwatch:trialwatch@localhost:5432/trialwatch
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.12.13"
+          enable-cache: true
+
+      - name: Database schema
+        run: >-
+          docker run --rm --network host -v "$PWD/db:/db"
+          -e DATABASE_URL="$DATABASE_URL?sslmode=disable"
+          ghcr.io/amacneil/dbmate:2.37.0 --wait --no-dump-schema up
+
+      - name: Frozen snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release="$(jq -r '.release // empty' evals/snapshot.lock.json)"
+          file="$(jq -r '.file // empty' evals/snapshot.lock.json)"
+          if [ -z "$release" ] || [ -z "$file" ]; then
+            echo "::error::No frozen snapshot yet: run the 'Gold snapshot' workflow and commit the lock it prints as evals/snapshot.lock.json"
+            exit 1
+          fi
+          gh release download "$release" --pattern "$file" --output snapshot.tar.gz
+          # the CLI checks it against the lock's sha256 too
+          echo "SNAPSHOT=snapshot.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Evaluate
+        env:
+          TITLE: ${{ inputs.title }}
+          DATASET: ${{ inputs.dataset }}
+          SAMPLE: ${{ inputs.sample }}
+          CONFIG: ${{ inputs.config }}
+        run: |
+          args=(--dataset "$DATASET" --config "$CONFIG" --title "$TITLE" --report gold-eval.md --snapshot "$SNAPSHOT")
+          if [ -n "$SAMPLE" ]; then args+=(--sample "$SAMPLE"); fi
+          status=0
+          uv run --locked trialwatch gold eval "${args[@]}" || status=$?
+          if [ -f gold-eval.md ]; then cat gold-eval.md >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$status"
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gold-eval
+          path: gold-eval.md
+          if-no-files-found: ignore

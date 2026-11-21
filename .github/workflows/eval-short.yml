@@ -1,0 +1,25 @@
+# Short gold evaluation: our workflow on the 50 hardest items of the Bruckner gold dataset
+# (evals/hard-50.txt, from `trialwatch gold sample`), gated by evals/gates.json. Started by hand from
+# the Actions tab; it calls the model, so it costs API money.
+name: Gold evaluation · short (hardest 50)
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "The check's setup (a file in src/trialwatch/checks/configs/, without .json)"
+        default: default
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    uses: ./.github/workflows/eval-shared.yml
+    with:
+      title: "Gold evaluation · hardest 50 of bruckner/2026-03-16"
+      sample: evals/hard-50.txt
+      config: ${{ inputs.config }}
+      timeout: 120
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -32,7 +32,7 @@ from typing import Any
 import anthropic
 import psycopg
 
-from trialwatch.checks import requirements
+from trialwatch.checks import publishing, requirements
 from trialwatch.checks.model import FALLBACK_BETA, MessagesClient, Prompt, first_text, uses_fallbacks
 from trialwatch.checks.requirements import Question, RequirementSet
 from trialwatch.checks.retrieval import pages_to_send_first, search, search_query_for
@@ -784,6 +784,8 @@ class RunSummary:
     widened: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # trials whose judgement the run published by itself (checks/publishing.py)
+    published: list[int] = field(default_factory=list)
 
     def summary(self) -> str:
         label_counts = []
@@ -886,4 +888,11 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
         checks_db.finish_run(conn, run_id, status=status, error=stop_error, trials=trials,
                              errors=len(summary.failed), input_tokens=summary.input_tokens,
                              output_tokens=summary.output_tokens)
+    # judgements of a kind that agrees with gold labels often enough go public now; the rest wait for a person
+    summary.published = publishing.auto_publish(conn, run_id)
+    judged = 0
+    for count in summary.labels.values():
+        judged += count
+    report(progress, f"published {len(summary.published)} of {judged} judgements by their measured confidence "
+                     f"(at least {publishing.AUTO_PUBLISH_AT:.0%}); the rest wait for review at /review")
     return summary

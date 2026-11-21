@@ -22,9 +22,10 @@
       {% for identifier in identifiers %}
       <dt>{{ identifier.label }}</dt><dd>{{ identifier.value }} <span class="small muted">from {{ identifier.source }}</span></dd>
       {% endfor %}
-      <dt>Added</dt><dd class="small">{{ when(row.created_at) }} by {{ row.created_by }}</dd>
+      <dt>Added</dt><dd class="small">{{ when(row.created_at) }} by {{ who(row.created_by) }}</dd>
     </dl>
   </div>
+  {% if can("view.internal") %}
   <div class="panel">
     <h3 class="panel-title">Sources</h3>
     {% for transfer in transfers %}
@@ -40,6 +41,7 @@
     {% endfor %}
     {% if not transfers %}<p class="muted">No source records.</p>{% endif %}
   </div>
+  {% endif %}
   <div class="panel">
     <h3 class="panel-title">Registered primary endpoints</h3>
     {% if registered and registered.primary_endpoints %}
@@ -55,11 +57,11 @@
   <tr {% if sponsor.removed_at %}class="muted"{% endif %}>
     <td><a href="/sponsors/{{ sponsor.organisation_id }}">{{ sponsor.name }}</a></td>
     <td class="small">{% if sponsor.removed_at %}<s>{% if sponsor.is_primary %}primary{% else %}co-sponsor{% endif %}</s>
-      <br>removed {{ when(sponsor.removed_at) }} by {{ sponsor.removed_by }}{% if sponsor.removal == "source" %} (no longer listed by {{ sponsor.source }}){% endif %}
+      <br>removed {{ when(sponsor.removed_at) }} by {{ who(sponsor.removed_by) }}{% if sponsor.removal == "source" %} (no longer listed by {{ sponsor.source }}){% endif %}
       {% elif sponsor.is_primary %}<b>primary</b>{% else %}co-sponsor{% endif %}</td>
     <td class="small">{{ sponsor.kind or "—" }}{% if sponsor.country %} · {{ sponsor.country }}{% endif %}{% if sponsor.commercial is sameas true %} · commercial{% elif sponsor.commercial is sameas false %} · non-commercial{% endif %}</td>
     <td class="small">{{ sponsor.identifiers | join(", ") or "—" }}</td>
-    <td class="small muted">{{ sponsor.source }} · {{ when(sponsor.created_at) }} · {{ sponsor.created_by }}</td>
+    <td class="small muted">{{ sponsor.source }} · {{ when(sponsor.created_at) }} · {{ who(sponsor.created_by) }}</td>
     <td>{% if not sponsor.removed_at and can("trial.sponsor.edit") %}<form method="post" action="/trials/{{ row.id }}/sponsors/{{ sponsor.organisation_id }}/remove"><button class="secondary small">Remove</button></form>{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="6" class="muted">No sponsors known.</td></tr>{% endfor %}
@@ -82,20 +84,36 @@
 </div>
 {% endif %}
 
-<h2>Evidence check</h2>
+<h2>{% if can("view.internal") %}Evidence check{% else %}Results reporting{% endif %}</h2>
+{% if not can("view.internal") %}<p class="small muted">What our check found in the trial's results documents. A result is published when a person on our team reviewed it, or when results of its kind agree with experts' hand-checked results at least {{ "%.0f" | format(auto_publish_at * 100) }}% of the time. Each answer links to the page it quotes.</p>{% endif %}
 <div class="grid two">
   <div>
   {% if judgement %}
     {% if judgements | length > 1 %}
     <div class="tabs">
       {% for other in judgements %}
-      <a href="/trials/{{ row.id }}?run={{ other.run_id }}" class="{% if other.run_id == judgement.run_id %}on{% endif %}">run {{ other.run_id }} · {{ other.label or "error" }}</a>
+      <a href="/trials/{{ row.id }}?run={{ other.run_id }}" class="{% if other.run_id == judgement.run_id %}on{% endif %}">run {{ other.run_id }} · {{ other.label or "error" }}{% if other.published and can("view.internal") %} · public{% endif %}</a>
       {% endfor %}
     </div>
     {% endif %}
     <p class="small muted">Run <a href="/runs/{{ judgement.run_id }}">{{ judgement.run_id }}</a> · {{ judgement.model }}{% if judgement.served_by %}{% for served in judgement.served_by %}{% if served != judgement.model %} (answered by {{ served }}){% endif %}{% endfor %}{% endif %} · requirements <a href="/requirements?show={{ judgement.requirements }}#{{ judgement.requirements }}">{{ judgement.requirements }}</a> · prompt <a href="/prompts?show={{ judgement.prompt }}#{{ judgement.prompt }}">{{ judgement.prompt }}</a> · {{ when(judgement.started_at) }}
       {% if judgement.input_tokens %} · tokens in {{ "{:,}".format(judgement.input_tokens) }}, out {{ "{:,}".format(judgement.output_tokens) }}{% endif %}
       {% if judgement.duration_ms %} · {{ "%.1f" | format(judgement.duration_ms / 1000) }} s{% endif %}</p>
+    {% if can("view.internal") %}
+    <div class="actions">
+      {% if judgement.published %}
+      <span class="label full">public</span>
+      {% if can("judgement.publish") %}<form method="post" action="/trials/{{ row.id }}/judgements/{{ judgement.run_id }}/withdraw"><input type="text" name="note" placeholder="why withdraw (optional)"> <button class="secondary small">Withdraw from the public</button></form>{% endif %}
+      {% if judgement.published_basis %}<span class="small muted">published by its run: {{ judgement.published_basis }}</span>{% else %}<span class="small muted">reviewed by a person</span>{% endif %}
+      {% else %}
+      <span class="label undecided">not public</span>
+      {% if can("judgement.publish") and not judgement.error and judgement.run_status != "running" %}<form method="post" action="/trials/{{ row.id }}/judgements/{{ judgement.run_id }}/publish"><button class="small">Publish</button></form><span class="small muted">after checking its quotes: the public then sees this label, answers and quotes</span>{% endif %}
+      {% endif %}
+    </div>
+    {% if decision and not judgement.published %}<p class="small">Confidence: {% if decision.confidence is not none %}<b>{{ "%.0f" | format(decision.confidence * 100) }}%</b>{% else %}<b>not measured</b>{% endif %} · {{ decision.reason }}. A run publishes by itself from {{ "%.0f" | format(auto_publish_at * 100) }}%; below that a person decides.</p>{% endif %}
+    {% endif %}
+    {% if not can("view.internal") %}<p class="small muted">{% if judgement.published_confidence is not none %}Published without a person's review: {{ "%.0f" | format(judgement.published_confidence * 100) }}% of the hand-checked trials judged this way agreed with the experts' results (at least {{ "%.0f" | format(auto_publish_at * 100) }}% is required).{% else %}Reviewed by a person on our team before it was published.{% endif %}</p>{% endif %}
+    {% if judgement.run_id == row.label_run and row.label_outdated %}<div class="alert">The trial's documents or record changed after this was judged{% if not can("view.internal") %}; a new check is pending{% endif %}.</div>{% endif %}
     {% if judgement.error %}
       <div class="alert">{{ judgement.error }}</div>
     {% else %}
@@ -122,6 +140,7 @@
     </table></div>
     {% endif %}
 
+    {% if can("view.internal") %}
     <h3 class="section">Trace, start to finish</h3>
     <ol class="trace">
     {% for step in steps %}
@@ -237,8 +256,9 @@
       </li>
     {% else %}<li class="muted">No trace recorded.</li>{% endfor %}
     </ol>
+    {% endif %}
   {% else %}
-    <p class="muted">No evidence run has checked this trial yet.</p>
+    <p class="muted">{% if can("view.internal") %}No evidence run has checked this trial yet.{% else %}No published result yet.{% endif %}</p>
   {% endif %}
   </div>
 
@@ -271,7 +291,7 @@
     <td class="small">{{ d.title or "—" }}</td>
     <td class="small">v{{ d.version }}{% if d.versions > 1 %} <span class="muted">({{ d.versions }} kept)</span>{% endif %}<br><span class="muted">{{ when(d.fetched_at) }}</span></td>
     <td class="small">{% if d.pages %}{% if d.readable_pages < d.pages %}<span class="flag">{{ d.readable_pages }}</span>/{% endif %}{{ d.pages }}{% else %}<span class="muted">not read</span>{% endif %}</td>
-    <td class="small">{{ d.basis }} · {{ d.link_source }}{% if d.confidence < 1 %} · {{ "%.0f" | format(d.confidence * 100) }}%{% endif %}<br><span class="muted">{{ when(d.linked_at) }} by {{ d.linked_by }}</span></td>
+    <td class="small">{{ d.basis }} · {{ d.link_source }}{% if d.confidence < 1 %} · {{ "%.0f" | format(d.confidence * 100) }}%{% endif %}<br><span class="muted">{{ when(d.linked_at) }} by {{ who(d.linked_by) }}</span></td>
     <td class="num small">{{ "%.1f" | format(d.size_bytes / 1048576) }} MB</td>
     <td class="small">{% if d.pages %}<a href="/files/{{ d.sha256.hex() }}">text</a> · {% endif %}<a href="/files/{{ d.sha256.hex() }}/raw" target="_blank">file</a></td>
   </tr>
@@ -303,7 +323,7 @@
   {% for entry in history %}
   <tr>
     <td class="small">{{ entry.at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
-    <td class="small">{{ entry.actor }} <span class="muted">({{ entry.actor_kind }})</span></td>
+    <td class="small">{{ who(entry.actor) }} <span class="muted">({{ entry.actor_kind }})</span></td>
     <td class="small">{{ entry.action }} {{ entry.table_name.replace("core.", "") }}</td>
     <td class="small muted">{% set changed = entry.new_row or entry.old_row %}{% if entry.table_name == "core.trial_identifier" %}{{ changed.scheme }} {{ changed.value }}{% elif entry.table_name == "core.trial_document" %}document {{ changed.document_id }} ({{ changed.basis }}){% elif entry.table_name == "core.trial_record" %}{{ "record from source" }} {{ changed.source_key }}{% elif entry.table_name == "core.trial_source" %}source key {{ changed.source_key }}{% endif %}{% if entry.note %} · {{ entry.note }}{% endif %}</td>
   </tr>

@@ -1,0 +1,24 @@
+# Full gold evaluation: our workflow on every labelled item of the Bruckner gold dataset, gated by
+# evals/gates.json. Started by hand from the Actions tab; it calls the model for every trial, so it
+# costs the most API money and takes hours.
+name: Gold evaluation · full (Bruckner)
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "The check's setup (a file in src/trialwatch/checks/configs/, without .json)"
+        default: default
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    uses: ./.github/workflows/eval-shared.yml
+    with:
+      title: "Gold evaluation · every labelled item of bruckner/2026-03-16"
+      config: ${{ inputs.config }}
+      timeout: 360
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

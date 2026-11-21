@@ -37,6 +37,25 @@ CREATE SCHEMA core;
 
 
 --
+-- Name: publishable(); Type: FUNCTION; Schema: checks; Owner: -
+--
+
+CREATE FUNCTION checks.publishable() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM checks.judgement j JOIN checks.run r ON r.id = j.run_id
+                   WHERE j.run_id = NEW.run_id AND j.trial_id = NEW.trial_id
+                     AND j.error IS NULL AND r.status <> 'running') THEN
+        RAISE EXCEPTION 'judgement of trial % in run % can''t be published: it has an error or its run is still running',
+            NEW.trial_id, NEW.run_id;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: audit(); Type: FUNCTION; Schema: core; Owner: -
 --
 
@@ -432,6 +451,83 @@ CREATE VIEW checks.judgement_current AS
      JOIN checks.run r ON ((r.id = j.run_id)))
   WHERE ((j.error IS NULL) AND (r.status <> 'running'::text))
   ORDER BY j.trial_id, r.requirements, j.run_id DESC;
+
+
+--
+-- Name: publication; Type: TABLE; Schema: checks; Owner: -
+--
+
+CREATE TABLE checks.publication (
+    id bigint NOT NULL,
+    run_id bigint NOT NULL,
+    trial_id bigint NOT NULL,
+    published_by bigint NOT NULL,
+    published_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    withdrawn_by bigint,
+    withdrawn_at timestamp with time zone,
+    note text,
+    confidence real,
+    basis text,
+    CONSTRAINT publication_check CHECK (((confidence IS NULL) = (basis IS NULL))),
+    CONSTRAINT publication_check1 CHECK (((withdrawn_at IS NULL) = (withdrawn_by IS NULL))),
+    CONSTRAINT publication_confidence_check CHECK (((confidence >= (0)::double precision) AND (confidence <= (1)::double precision)))
+);
+
+
+--
+-- Name: TABLE publication; Type: COMMENT; Schema: checks; Owner: -
+--
+
+COMMENT ON TABLE checks.publication IS 'judgements staff made public (ADR-007); withdrawn ones are kept';
+
+
+--
+-- Name: judgement_published; Type: VIEW; Schema: checks; Owner: -
+--
+
+CREATE VIEW checks.judgement_published AS
+ SELECT DISTINCT ON (j.trial_id, r.requirements) j.run_id,
+    j.trial_id,
+    j.label,
+    j.parts,
+    j.trace,
+    j.trial_record_id,
+    j.document_versions,
+    r.model,
+    r.prompt,
+    r.requirements,
+    r.started_at,
+    p.published_at,
+    p.confidence,
+    p.basis,
+    ((EXISTS ( SELECT
+           FROM (core.document_version v
+             JOIN core.trial_document l ON (((l.document_id = v.document_id) AND (l.trial_id = j.trial_id))))
+          WHERE ((v.id = ANY (j.document_versions)) AND ((v.replaced_at IS NOT NULL) OR (l.removed_at IS NOT NULL))))) OR (EXISTS ( SELECT
+           FROM (core.trial_document l
+             JOIN core.document_current d ON ((d.id = l.document_id)))
+          WHERE ((l.trial_id = j.trial_id) AND (l.removed_at IS NULL) AND (NOT (d.version_id = ANY (j.document_versions))) AND (d.kind IN ( SELECT jsonb_array_elements_text(((r.requirements_text)::jsonb -> 'document_kinds'::text)) AS jsonb_array_elements_text))))) OR (EXISTS ( SELECT
+           FROM core.trial_record_current c
+          WHERE ((c.trial_id = j.trial_id) AND (c.id IS DISTINCT FROM j.trial_record_id) AND (c.fetched_at > r.started_at))))) AS outdated
+   FROM ((checks.publication p
+     JOIN checks.judgement j ON (((j.run_id = p.run_id) AND (j.trial_id = p.trial_id))))
+     JOIN checks.run r ON ((r.id = j.run_id)))
+  WHERE (p.withdrawn_at IS NULL)
+  ORDER BY j.trial_id, r.requirements, j.run_id DESC;
+
+
+--
+-- Name: publication_id_seq; Type: SEQUENCE; Schema: checks; Owner: -
+--
+
+ALTER TABLE checks.publication ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME checks.publication_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
 
 
 --
@@ -976,6 +1072,14 @@ ALTER TABLE ONLY checks.judgement
 
 
 --
+-- Name: publication publication_pkey; Type: CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.publication
+    ADD CONSTRAINT publication_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: question question_pkey; Type: CONSTRAINT; Schema: checks; Owner: -
 --
 
@@ -1237,6 +1341,20 @@ CREATE INDEX judgement_trial_idx ON checks.judgement USING btree (trial_id, run_
 
 
 --
+-- Name: publication_live_idx; Type: INDEX; Schema: checks; Owner: -
+--
+
+CREATE UNIQUE INDEX publication_live_idx ON checks.publication USING btree (run_id, trial_id) WHERE (withdrawn_at IS NULL);
+
+
+--
+-- Name: publication_trial_idx; Type: INDEX; Schema: checks; Owner: -
+--
+
+CREATE INDEX publication_trial_idx ON checks.publication USING btree (trial_id);
+
+
+--
 -- Name: audit_log_actor_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -1339,6 +1457,20 @@ CREATE INDEX trial_sponsor_organisation_idx ON core.trial_sponsor USING btree (o
 --
 
 CREATE TRIGGER app_user_audit AFTER INSERT OR DELETE OR UPDATE ON auth.app_user FOR EACH ROW EXECUTE FUNCTION core.audit('id', 'password_hash');
+
+
+--
+-- Name: publication publication_audit; Type: TRIGGER; Schema: checks; Owner: -
+--
+
+CREATE TRIGGER publication_audit AFTER INSERT OR DELETE OR UPDATE ON checks.publication FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
+-- Name: publication publication_publishable; Type: TRIGGER; Schema: checks; Owner: -
+--
+
+CREATE TRIGGER publication_publishable BEFORE INSERT ON checks.publication FOR EACH ROW EXECUTE FUNCTION checks.publishable();
 
 
 --
@@ -1550,6 +1682,30 @@ ALTER TABLE ONLY checks.judgement
 
 ALTER TABLE ONLY checks.judgement
     ADD CONSTRAINT judgement_trial_record_id_fkey FOREIGN KEY (trial_record_id) REFERENCES core.trial_record(id);
+
+
+--
+-- Name: publication publication_published_by_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.publication
+    ADD CONSTRAINT publication_published_by_fkey FOREIGN KEY (published_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: publication publication_run_id_trial_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.publication
+    ADD CONSTRAINT publication_run_id_trial_id_fkey FOREIGN KEY (run_id, trial_id) REFERENCES checks.judgement(run_id, trial_id);
+
+
+--
+-- Name: publication publication_withdrawn_by_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.publication
+    ADD CONSTRAINT publication_withdrawn_by_fkey FOREIGN KEY (withdrawn_by) REFERENCES core.actor(id);
 
 
 --
@@ -2006,4 +2162,5 @@ ALTER TABLE ONLY core.trial_sponsor
 INSERT INTO public.schema_migrations (version) VALUES
     ('20261121120000'),
     ('20261121180000'),
-    ('20261121200000');
+    ('20261121200000'),
+    ('20261121220000');

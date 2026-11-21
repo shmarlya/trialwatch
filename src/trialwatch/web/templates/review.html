@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% from "macros.html" import label, when %}
+{% block title %}Review · TrialWatch{% endblock %}
+{% block content %}
+<h1>Review</h1>
+<p class="sub">Current judgements under <a href="/requirements?show={{ requirements }}#{{ requirements }}">{{ requirements }}</a> that are not public. A run publishes a judgement by itself when judgements of its kind agreed with gold labels at least {{ "%.0f" | format(auto_publish_at * 100) }}% of the time, over at least {{ min_gold_items }} gold items; these did not, so a person checks their quotes and publishes them on the trial page. Accusations ("not full") first.</p>
+
+<div class="table-wrap"><table>
+  <tr><th>Trial</th><th>Label</th><th>Run</th><th>Confidence</th><th>Why it waits</th></tr>
+  {% for row, decision in rows %}
+  <tr>
+    <td><a href="/trials/{{ row.trial_id }}?run={{ row.run_id }}">{{ row.name }}</a>{% if row.outdated %} <span class="flag" title="its documents or record changed since">outdated</span>{% endif %}</td>
+    <td>{{ label(row.label) }}</td>
+    <td class="small"><a href="/runs/{{ row.run_id }}">run {{ row.run_id }}</a> · {{ when(row.started_at) }}</td>
+    <td>{% if decision and decision.confidence is not none %}{{ "%.0f" | format(decision.confidence * 100) }}%{% else %}<span class="muted">not measured</span>{% endif %}</td>
+    <td class="small muted">{% if decision %}{{ decision.reason }}{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="5" class="muted">Nothing waits for review.</td></tr>{% endfor %}
+</table></div>
+
+<h2>Confidence by kind of judgement</h2>
+<p class="small muted">A kind is the exact check (model, prompt text, requirement set), the label, and how the evidence came in. Measured against {% if calibration.datasets %}{{ calibration.datasets | join(", ") }}{% else %}no gold dataset (none answers this requirement set){% endif %}: one judgement per trial and check, set aside when it read a document posted after the reviewers' day.</p>
+<div class="table-wrap"><table>
+  <tr><th>Kind</th><th class="num">Agreed</th><th class="num">Compared</th><th class="num">Share</th><th>Published by a run</th></tr>
+  {% for kind, tally in kinds %}
+  <tr>
+    <td class="small">{{ kind.describe() }}</td>
+    <td class="num">{{ tally.agreed }}</td><td class="num">{{ tally.compared }}</td>
+    <td class="num">{{ "%.0f" | format(tally.share * 100) }}%</td>
+    <td class="small">{% if kind.label in ("full", "not full") and tally.compared >= min_gold_items and tally.share >= auto_publish_at %}<span class="label full">yes</span>{% elif tally.compared < min_gold_items %}<span class="muted">not yet: fewer than {{ min_gold_items }} items</span>{% else %}<span class="muted">no</span>{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="5" class="muted">No judgement of a gold item yet: every result waits for a person.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

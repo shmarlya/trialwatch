@@ -151,9 +151,11 @@ def post_as(client, path, data=None):
 def test_anyone_may_browse_but_not_act(app_conn):
     trial_id = listed_only(app_conn)
     client = TestClient(web.app)
-    for path in ("/", "/trials", f"/trials/{trial_id}", "/sponsors", "/sources", "/sources/ctis", "/prompts",
-                 "/requirements", "/gold"):
+    for path in ("/", "/trials", f"/trials/{trial_id}", "/sponsors", "/prompts", "/requirements"):
         assert client.get(path).status_code == 200, path
+    # sources, transfers and gold datasets are for staff (ADR-007)
+    for path in ("/sources", "/sources/ctis", "/gold"):
+        assert client.get(path).status_code == 401, path
     # a browser is sent to sign in, and back to the page afterwards
     page = client.get("/trials/new", headers={"accept": "text/html"}, follow_redirects=False)
     assert (page.status_code, page.headers["location"]) == (303, "/login?next=/trials/new")
@@ -161,7 +163,8 @@ def test_anyone_may_browse_but_not_act(app_conn):
     for path, data in (("/jobs", {"step": "evidence", "dry_run": "true"}), ("/trials/new", {"title": "x"}),
                        (f"/trials/{trial_id}/sponsors", {"name": "x"}), ("/sources", {"adapter": "manual"}),
                        ("/sources/ctis/config", {"config": "{}"}), ("/jobs/1/stop", None),
-                       ("/admin/users", {"email": "x", "password": "y", "role": "admin"})):
+                       ("/admin/users", {"email": "x", "password": "y", "role": "admin"}),
+                       (f"/trials/{trial_id}/judgements/1/publish", None)):
         assert post_as(client, path, data).status_code == 401, path
     assert client.get("/jobs/1/progress").status_code == 401
     assert client.get("/admin/roles").status_code == 401

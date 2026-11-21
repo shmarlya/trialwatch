@@ -66,7 +66,7 @@ def evidence_day(dataset: Dataset) -> date | None:
     return date.fromisoformat(as_of)
 
 
-def _trial_of_item(conn: psycopg.Connection, item: datasets.Item) -> int | None:
+def trial_of_item(conn: psycopg.Connection, item: datasets.Item) -> int | None:
     """The trial (after merges) one of the item's identifiers belongs to, if any."""
     wanted = []
     for identifier in item.identifiers:
@@ -98,7 +98,7 @@ def compare_run(conn: psycopg.Connection, run_id: int, dataset: Dataset) -> Scor
         if item.expected_label is None:
             continue
         scored.labelled += 1
-        trial_id = _trial_of_item(conn, item)
+        trial_id = trial_of_item(conn, item)
         if trial_id is None or trial_id not in judgements:
             scored.not_in_run.append(item.key)
             continue

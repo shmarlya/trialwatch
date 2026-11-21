@@ -1,0 +1,7 @@
+{
+  "description": "What a gold evaluation (trialwatch gold eval) must reach, or its pipeline fails. Shares are of the labelled items in the run's sample.",
+  "min_label_agreement": 0.90,
+  "max_false_accusations": 0,
+  "min_decided": 0.80,
+  "max_missing": 0.10
+}

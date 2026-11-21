@@ -16,7 +16,7 @@
     <td class="small">{{ row.kind or "—" }}{% if row.country %} · {{ row.country }}{% endif %}</td>
     <td class="small">{{ row.identifiers | join(", ") or "—" }}</td>
     <td class="num">{{ row.trials }}</td>
-    <td class="small muted">{{ row.created_at.strftime("%Y-%m-%d") }} · {{ row.created_by }} · from {{ row.first_source }}</td>
+    <td class="small muted">{{ row.created_at.strftime("%Y-%m-%d") }} · {{ who(row.created_by) }} · from {{ row.first_source }}</td>
   </tr>
   {% else %}
   <tr><td colspan="5" class="muted">No sponsors yet: they come in with trials synced from CTIS or added by hand.</td></tr>

@@ -88,11 +88,12 @@ def test_form_posts_are_taken_only_from_the_interfaces_own_pages(admin_client):
     assert web._redirect_back("https://evil.example/x", "no").headers["location"] == "/?error=no"
 
 
-def test_a_stored_pdf_is_shown_and_anything_else_is_downloaded(app_conn):
+def test_a_stored_pdf_is_shown_and_anything_else_is_downloaded(app_conn, admin_client):
     core.act_as(app_conn, "test-person")
     pdf = store_file(app_conn, "upload-pdf", b"%PDF-1.7 results", "application/pdf")
     page = store_file(app_conn, "upload-html", b"<html><script>alert(document.cookie)</script></html>", "text/html")
-    client = TestClient(web.app)
+    # uploads by a person are for staff until a published judgement cites them (ADR-007)
+    client = admin_client
     shown = client.get(f"/files/{pdf.hex()}/raw")
     assert (shown.status_code, shown.content) == (200, b"%PDF-1.7 results")
     assert shown.headers["content-type"] == "application/pdf"

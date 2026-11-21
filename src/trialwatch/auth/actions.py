@@ -2,7 +2,10 @@
 
 Every route that changes something names one of these actions, and tests/test_auth.py fails if one
 doesn't. A role is stored per user (auth.app_user.role); what it allows is only here. "public" is
-anyone not signed in: they may only browse. /admin/roles shows this chart as a table.
+anyone not signed in: they may only browse what is public (ADR-007): trials, sponsors, documents, the
+judgements staff published with their quotes, runs, prompts and requirement sets. Staff (moderators
+and admins) also see "view.internal": unpublished judgements and their traces, sources and transfers,
+gold datasets and who did what. /admin/roles shows this chart as a table.
 """
 
 from dataclasses import dataclass
@@ -23,8 +26,11 @@ class Action:
 
 
 ACTIONS = (
-    Action("view", "Browse trials, sponsors, sources, files, runs, prompts, requirements and gold",
+    Action("view", "Browse trials, sponsors, their documents, published judgements, runs, prompts and requirements",
            (PUBLIC, MODERATOR, ADMIN)),
+    Action("view.internal", "See unpublished judgements and their traces, sources and transfers, gold datasets, "
+           "and staff names in history", (MODERATOR, ADMIN)),
+    Action("judgement.publish", "Publish a judgement so the public sees it, or withdraw it", (MODERATOR, ADMIN)),
     Action("job.view", "See a job's page and its live progress", (MODERATOR, ADMIN)),
     Action("trial.create", "Add a trial by hand with uploaded documents", (MODERATOR, ADMIN)),
     Action("trial.document.upload", "Upload a document to a trial", (MODERATOR, ADMIN)),

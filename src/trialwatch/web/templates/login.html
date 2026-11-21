@@ -2,7 +2,7 @@
 {% block title %}Sign in · TrialWatch{% endblock %}
 {% block content %}
 <h1>Sign in</h1>
-<p class="sub">Anyone can browse. Signing in lets admins and moderators start steps and change data, as their role allows (see ADR-006). There is no sign-up: an admin adds users.</p>
+<p class="sub">Anyone can browse what is published. Signing in lets admins and moderators see drafts, sources and gold datasets, start steps and change data, as their role allows (see ADR-006 and ADR-007). There is no sign-up: an admin adds users.</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <form class="panel step" method="post" action="/login" style="max-width:360px">
   <input type="hidden" name="next" value="{{ next }}">

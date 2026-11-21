@@ -424,8 +424,8 @@ def test_the_client_searches_ctis_in_ct_number_order():
 
 
 def test_the_source_pages_render(admin_client):
-    public = TestClient(web.app).get("/sources/ctis")
-    assert public.status_code == 200 and "Transfer ticked" not in public.text and "Save config" not in public.text
+    # sources are for staff (ADR-007); a moderator sees them without the admin's forms
+    assert TestClient(web.app).get("/sources/ctis").status_code == 401
     client = admin_client
     page = client.get("/sources")
     assert page.status_code == 200 and "Sync" in page.text and "/sources/ctis" in page.text

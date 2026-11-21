@@ -10,12 +10,12 @@
   <dl class="kv">
     <dt>Our id</dt><dd>organisation {{ row.id }}</dd>
     <dt>Identifiers</dt><dd>{{ row.identifiers | join(", ") or "—" }}</dd>
-    <dt>Added</dt><dd class="small">{{ when(row.created_at) }} by {{ row.created_by }}, from {{ row.first_source }}</dd>
+    <dt>Added</dt><dd class="small">{{ when(row.created_at) }} by {{ who(row.created_by) }}, from {{ row.first_source }}</dd>
   </dl>
 </div>
 <h2>Trials</h2>
 <div class="table-wrap"><table>
-  <tr><th>Trial</th><th>Title</th><th>Role</th><th>Our label</th></tr>
+  <tr><th>Trial</th><th>Title</th><th>Role</th><th>{% if can("view.internal") %}Our label{% else %}Published result{% endif %}</th></tr>
   {% for trial in trials %}
   <tr {% if trial.removed_at %}class="muted"{% endif %}>
     <td><a href="/trials/{{ trial.trial_id }}">{{ trial.name }}</a></td>

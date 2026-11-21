@@ -1,7 +1,24 @@
 {% extends "base.html" %}
 {% from "macros.html" import when, run_status, setup_select %}
-{% block title %}Workflow · TrialWatch{% endblock %}
+{% block title %}{% if can("view.internal") %}Workflow · {% endif %}TrialWatch{% endblock %}
 {% block content %}
+{% if not can("view.internal") %}
+<h1>TrialWatch</h1>
+<p class="sub">We follow clinical trials in the EU register and check whether their sponsors posted the results the law requires. A model reads each trial's results documents and quotes what it finds; a person on our team checks every result before it is published here.</p>
+<div class="grid">
+  <div class="panel">
+    <h3 class="panel-title">So far</h3>
+    {% for name, count in coverage %}
+      <div class="stat"><span>{{ name }}</span><b>{{ "{:,}".format(count) }}</b></div>
+    {% endfor %}
+    <p class="small" style="margin:10px 0 0"><a href="/trials">Browse the trials →</a> · <a href="/sponsors">sponsors →</a></p>
+  </div>
+  <div class="panel">
+    <h3 class="panel-title">How we check</h3>
+    <p class="small">What a trial must report is a <a href="/requirements">requirement set</a>; what the model is asked is in <a href="/prompts">its prompt</a>. Every quote is checked against the document's page before it counts.</p>
+  </div>
+</div>
+{% else %}
 <h1>Workflow</h1>
 <p class="sub">Sync a source's list → transfer the evidence of the trials you want (or add a trial by hand) → check each trial against every results document linked to it. Only trials whose evidence came in completely can be checked.{% if user %} Changes are recorded as <b>{{ user.email }}</b>.{% else %} <a href="/login">Sign in</a> to start a step.{% endif %}</p>
 
@@ -91,7 +108,7 @@
   <tr>
     <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
     <td class="small">{{ when(run.started_at) }}</td>
-    <td class="small">{{ run.actor }}</td>
+    <td class="small">{{ who(run.actor) }}</td>
     <td class="small">{{ run.model }} · {{ run.effort }}</td>
     <td class="small">{{ run.prompt }} · {{ run.requirements }}</td>
     <td>{{ run_status(run.status) }}</td>
@@ -118,4 +135,5 @@
   {% endfor %}
 </table></div>
 {% else %}<p class="muted">None since the server started.</p>{% endif %}
+{% endif %}
 {% endblock %}

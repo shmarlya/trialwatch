@@ -8,8 +8,12 @@ Started by `trialwatch web`. Pages are rendered on the server from templates/; t
 the job page's polling of its own progress and small conveniences (scroll to a quote). All SQL is in
 trialwatch.db (db/overview.py for these pages).
 
-Who may do what is the action → role chart in trialwatch.auth.actions (ADR-006): anyone may browse,
-and every action needs a signed-in admin or moderator whose role the chart allows. Each route that
+Who may do what is the action → role chart in trialwatch.auth.actions (ADR-006): anyone may browse
+what is public, and every action needs a signed-in admin or moderator whose role the chart allows.
+What is public (ADR-007): trials, sponsors and their documents, the judgements staff published (with
+their quotes, not their traces), runs, prompts and requirement sets; people are shown only as staff.
+Pages that show both decide once with staff_view() and load staff-only data only for staff, so a
+template can't show the public what it was never given. Each route that
 changes something names its action (`Depends(Requires(...))`), and its writes are recorded as the
 signed-in person. It also answers only requests addressed to this machine's names (a web page can't
 reach it through a domain name pointing here) and takes form posts only from its own pages (a web
@@ -37,10 +41,11 @@ import psycopg
 
 from trialwatch import db
 from trialwatch.auth import accounts, actions, passwords, sessions
-from trialwatch.checks import evidence, model
+from trialwatch.checks import evidence, model, publishing
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
 from trialwatch.db import auth as auth_db
+from trialwatch.db import checks as checks_db
 from trialwatch.db import core, overview
 from trialwatch.db.core import Identifier, normalised
 from trialwatch.gold import datasets as gold_datasets
@@ -50,9 +55,11 @@ from trialwatch.web.jobs import STEPS, JobBusy, JobRequest, Jobs
 
 
 def auth_context(request: Request) -> dict:
-    """What every page gets: who is signed in, and can(action) to show only the forms they may use."""
+    """What every page gets: who is signed in, can(action) to show only the forms they may use, and
+    who(name) to show a writer's name (to the public, a person is only "TrialWatch staff")."""
     user = signed_in(request)
-    return {"user": user, "can": Permissions(user), "chart_roles": actions.ROLES}
+    return {"user": user, "can": Permissions(user), "chart_roles": actions.ROLES,
+            "who": Who(staff_view(request))}
 
 
 TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates", context_processors=[auth_context])
@@ -160,6 +167,38 @@ class Permissions:
         if self.user is not None:
             role = self.user.role
         return actions.allowed(role, action)
+
+
+# How the public sees a person who wrote something (ADR-007): never their email
+STAFF = "TrialWatch staff"
+
+
+class Who:
+    """`who(row.created_by)` in a template: the actor's name for staff; for the public a process
+    (a source's adapter, the migration) keeps its name and a person is shown as STAFF."""
+
+    def __init__(self, staff: bool) -> None:
+        self.staff = staff
+        self._processes: set[str] | None = None
+
+    def __call__(self, name: str | None) -> str | None:
+        if self.staff or name is None:
+            return name
+        if self._processes is None:
+            with db.connect() as conn:
+                self._processes = overview.process_actor_names(conn)
+        if name in self._processes:
+            return name
+        return STAFF
+
+
+def staff_view(request: Request) -> bool:
+    """Whether the viewer sees what only staff see (the chart's view.internal)."""
+    user = signed_in(request)
+    role = None
+    if user is not None:
+        role = user.role
+    return actions.allowed(role, "view.internal")
 
 
 def signed_in(request: Request) -> auth_db.User | None:
@@ -556,6 +595,11 @@ def call_view(data: dict) -> CallView:
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, error: str | None = None) -> HTMLResponse:
     defaults = default_settings()
+    if not staff_view(request):
+        # the public's front page: counts of what is published, nothing of the workflow
+        with db.connect() as conn:
+            coverage = overview.public_coverage(conn, defaults.requirements)
+        return TEMPLATES.TemplateResponse(request, "dashboard.html", {"coverage": coverage, "defaults": defaults})
     with db.connect() as conn:
         coverage = overview.coverage(conn)
         runs = overview.runs(conn)
@@ -708,17 +752,20 @@ TRIALS_PER_PAGE = 100
 
 @app.get("/trials", response_class=HTMLResponse)
 def trials_page(request: Request, q: str = "", evidence_state: str = "", page: int = 1) -> HTMLResponse:
+    staff = staff_view(request)
     search = q.strip()
     if not search:
         search = None
     state = None
-    if evidence_state in overview.EVIDENCE_FILTERS:
+    # the evidence state is the workflow's, for staff only
+    if staff and evidence_state in overview.EVIDENCE_FILTERS:
         state = evidence_state
     page = max(page, 1)
     with db.connect() as conn:
         total = overview.trial_count(conn, search, state)
         rows = overview.trial_rows(conn, default_settings().requirements, search, state,
-                                   offset=(page - 1) * TRIALS_PER_PAGE, limit=TRIALS_PER_PAGE)
+                                   offset=(page - 1) * TRIALS_PER_PAGE, limit=TRIALS_PER_PAGE,
+                                   published_only=not staff)
     context = {"rows": rows, "q": q, "evidence_state": evidence_state, "filters": overview.EVIDENCE_FILTERS,
                "total": total, "page": page, "pages": max(1, -(-total // TRIALS_PER_PAGE))}
     return TEMPLATES.TemplateResponse(request, "trials.html", context)
@@ -851,6 +898,50 @@ def remove_sponsor(trial_id: int, organisation_id: int,
     return RedirectResponse(f"/trials/{trial_id}#sponsors", status_code=303)
 
 
+@app.post("/trials/{trial_id}/judgements/{run_id}/publish")
+def publish_judgement(trial_id: int, run_id: int,
+                      user: auth_db.User = Depends(Requires("judgement.publish"))) -> Response:
+    """Make this judgement public (ADR-007): the public then sees its label, answers and quotes."""
+    try:
+        with db.connect(actor=user.email) as conn:
+            checks_db.publish_judgement(conn, run_id, trial_id)
+    except psycopg.Error as exc:  # no such judgement, an error, a run still running
+        return RedirectResponse(f"/trials/{trial_id}?run={run_id}&error={url_quote(_short_error(exc))}", status_code=303)
+    return RedirectResponse(f"/trials/{trial_id}?run={run_id}", status_code=303)
+
+
+@app.post("/trials/{trial_id}/judgements/{run_id}/withdraw")
+def withdraw_judgement(trial_id: int, run_id: int, note: Annotated[str, Form()] = "",
+                       user: auth_db.User = Depends(Requires("judgement.publish"))) -> Response:
+    """Take a published judgement back from the public; its publication is kept, marked withdrawn."""
+    with db.connect(actor=user.email) as conn:
+        checks_db.withdraw_publication(conn, run_id, trial_id, _or_none(note))
+    return RedirectResponse(f"/trials/{trial_id}?run={run_id}", status_code=303)
+
+
+@app.get("/review", response_class=HTMLResponse)
+def review_page(request: Request, user: auth_db.User = Depends(Requires("view.internal"))) -> HTMLResponse:
+    """What waits for a person (ADR-007): current judgements no run published, each with its measured
+    confidence and why it was not published by itself; and how each kind of judgement did on gold."""
+    requirements = default_settings().requirements
+    rows = []
+    with db.connect() as conn:
+        calibration = publishing.calibrate(conn, requirements)
+        for row in overview.awaiting_review(conn, requirements):
+            kind = checks_db.judgement_kind(conn, row.run_id, row.trial_id)
+            decision = None
+            if kind is not None:
+                decision = publishing.decide(kind, calibration)
+            rows.append((row, decision))
+    kinds = []
+    for kind, tally in calibration.tallies.items():
+        kinds.append((kind, tally))
+    kinds.sort(key=lambda pair: -pair[1].compared)
+    context = {"rows": rows, "kinds": kinds, "calibration": calibration, "requirements": requirements,
+               "auto_publish_at": publishing.AUTO_PUBLISH_AT, "min_gold_items": publishing.MIN_GOLD_ITEMS}
+    return TEMPLATES.TemplateResponse(request, "review.html", context)
+
+
 @app.get("/sponsors", response_class=HTMLResponse)
 def sponsors_page(request: Request, q: str = "") -> HTMLResponse:
     search = q.strip()
@@ -867,28 +958,37 @@ def sponsor_page(request: Request, organisation_id: int) -> HTMLResponse:
         row = overview.organisation_row(conn, organisation_id)
         if row is None:
             raise HTTPException(404, f"no organisation {organisation_id}")
-        trials = overview.sponsored_trials(conn, organisation_id, default_settings().requirements)
+        trials = overview.sponsored_trials(conn, organisation_id, default_settings().requirements,
+                                           published_only=not staff_view(request))
     return TEMPLATES.TemplateResponse(request, "sponsor.html", {"row": row, "trials": trials})
 
 
 @app.get("/trials/{trial_id}", response_class=HTMLResponse)
 def trial_page(request: Request, trial_id: int, run: int | None = None, error: str | None = None) -> HTMLResponse:
+    staff = staff_view(request)
     with db.connect() as conn:
-        row = overview.trial_row(conn, trial_id, default_settings().requirements)
+        row = overview.trial_row(conn, trial_id, default_settings().requirements, published_only=not staff)
         if row is None:
             raise HTTPException(404, f"no trial {trial_id}")
         registered = overview.trial_registered(conn, trial_id)
         identifiers = overview.trial_identifiers(conn, trial_id)
-        sources = overview.trial_sources(conn, trial_id)
         documents = overview.trial_documents(conn, trial_id)
-        judgements = overview.trial_judgements(conn, trial_id)
+        # the public sees only published judgements, with their answers and quotes but no trace
+        judgements = overview.trial_judgements(conn, trial_id, published_only=not staff)
         history = overview.trial_history(conn, trial_id)
-        transfers = overview.trial_transfers(conn, trial_id)
         sponsors = overview.trial_sponsors(conn, trial_id)
-        kinds = core.document_kinds(conn)
-        gold_items = _gold_items_for(identifiers, judgements)
-        default_set = requirement_sets.load(default_settings().requirements)
-        blocked = stages.not_ready(conn, [trial_id], default_set.document_kinds)
+        sources = []
+        transfers = []
+        kinds = []
+        gold_items = []
+        blocked = {}
+        if staff:
+            sources = overview.trial_sources(conn, trial_id)
+            transfers = overview.trial_transfers(conn, trial_id)
+            kinds = core.document_kinds(conn)
+            gold_items = _gold_items_for(identifiers, judgements)
+            default_set = requirement_sets.load(default_settings().requirements)
+            blocked = stages.not_ready(conn, [trial_id], default_set.document_kinds)
         chosen = None
         for judgement in judgements:
             if run is None or judgement.run_id == run:
@@ -898,10 +998,15 @@ def trial_page(request: Request, trial_id: int, run: int | None = None, error: s
         steps = []
         prompt_text = None
         prompt_params = {}
+        decision = None
         if chosen is not None:
             questions = overview.run_questions(conn, chosen.run_id, trial_id)
-            steps = overview.run_steps(conn, chosen.run_id, trial_id)
-            prompt_text, prompt_params = overview.run_prompt(conn, chosen.run_id)
+            if staff:
+                steps = overview.run_steps(conn, chosen.run_id, trial_id)
+                prompt_text, prompt_params = overview.run_prompt(conn, chosen.run_id)
+                kind = checks_db.judgement_kind(conn, chosen.run_id, trial_id)
+                if kind is not None:
+                    decision = publishing.decide(kind, publishing.calibrate(conn, kind.requirements))
     calls = {}
     for step in steps:
         if step.name == "call":
@@ -917,7 +1022,8 @@ def trial_page(request: Request, trial_id: int, run: int | None = None, error: s
         "defaults": default_settings(), "running": jobs.running(), "error": error, "transfers": transfers,
         "ready": trial_id not in blocked, "not_ready": blocked.get(trial_id), "transferable": _transferable(transfers),
         "kinds": kinds, "configs": check_settings.load_all(), "judgement_config": judgement_config,
-        "gold_items": gold_items, "sponsors": sponsors,
+        "gold_items": gold_items, "sponsors": sponsors, "decision": decision,
+        "auto_publish_at": publishing.AUTO_PUBLISH_AT,
     }
     return TEMPLATES.TemplateResponse(request, "trial.html", context)
 
@@ -950,7 +1056,8 @@ def _unregistered_adapters(rows: list[overview.SourceRow]) -> list[str]:
 
 
 @app.get("/sources", response_class=HTMLResponse)
-def sources_page(request: Request, error: str | None = None) -> HTMLResponse:
+def sources_page(request: Request, error: str | None = None,
+                 user: auth_db.User = Depends(Requires("view.internal"))) -> HTMLResponse:
     with db.connect() as conn:
         rows = overview.source_rows(conn)
     context = {"rows": rows, "free_adapters": _unregistered_adapters(rows), "error": error, "running": jobs.running(),
@@ -990,7 +1097,8 @@ def register_source(adapter: Annotated[str, Form()], code: Annotated[str, Form()
 
 @app.get("/sources/{code}", response_class=HTMLResponse)
 def source_page(request: Request, code: str, state: str = "", q: str = "", page: int = 1,
-                error: str | None = None, saved: bool = False) -> HTMLResponse:
+                error: str | None = None, saved: bool = False,
+                user: auth_db.User = Depends(Requires("view.internal"))) -> HTMLResponse:
     chosen_state = None
     if state in overview.SOURCE_TRIAL_FILTERS:
         chosen_state = state
@@ -1042,7 +1150,7 @@ def file_page(request: Request, sha_hex: str, page: int | None = None, quote: st
     sha = _file_hash(sha_hex)
     with db.connect() as conn:
         owner = overview.file_owner(conn, sha)
-        if owner is None:
+        if owner is None or not (staff_view(request) or overview.file_is_public(conn, sha)):
             raise HTTPException(404, "no such file")
         pages = overview.file_pages(conn, sha)
     shown = []
@@ -1057,11 +1165,13 @@ def file_page(request: Request, sha_hex: str, page: int | None = None, quote: st
 
 
 @app.get("/files/{sha_hex}/raw")
-def file_raw(sha_hex: str) -> Response:
+def file_raw(request: Request, sha_hex: str) -> Response:
     """The stored bytes, to open the document itself in the browser."""
     sha = _file_hash(sha_hex)
     with db.connect() as conn:
-        stored = overview.file_content(conn, sha)
+        stored = None
+        if staff_view(request) or overview.file_is_public(conn, sha):
+            stored = overview.file_content(conn, sha)
     if stored is None:
         raise HTTPException(404, "no such file")
     content = stored[0]
@@ -1118,7 +1228,8 @@ def run_page(request: Request, run_id: int) -> HTMLResponse:
         if run is None:
             raise HTTPException(404, f"no run {run_id}")
         prompt_text, params = overview.run_prompt(conn, run_id)
-        judgements = overview.run_judgements(conn, run_id)
+        # the run's setup is public; its judgements only once published, and its tallies only for staff
+        judgements = overview.run_judgements(conn, run_id, published_only=not staff_view(request))
     context = {"run": run, "prompt_text": prompt_text, "params": params, "judgements": judgements}
     return TEMPLATES.TemplateResponse(request, "run.html", context)
 
@@ -1266,7 +1377,7 @@ def _load_dataset(ref: str) -> gold_datasets.Dataset:
 
 @app.get("/gold", response_class=HTMLResponse)
 def gold_page(request: Request, dataset: str = "", q: str = "", label: str = "", reviewers: str = "",
-              ours: str = "") -> HTMLResponse:
+              ours: str = "", user: auth_db.User = Depends(Requires("view.internal"))) -> HTMLResponse:
     refs = gold_datasets.dataset_refs()
     context = {"refs": refs, "dataset": None, "rows": [], "summary": None, "q": q, "label_filter": label,
                "reviewers": reviewers, "ours": ours, "ours_filters": GOLD_OURS_FILTERS,
@@ -1291,7 +1402,8 @@ def gold_page(request: Request, dataset: str = "", q: str = "", label: str = "",
 
 
 @app.get("/gold/{name}/{version}/{key}", response_class=HTMLResponse)
-def gold_item_page(request: Request, name: str, version: str, key: str, error: str | None = None) -> HTMLResponse:
+def gold_item_page(request: Request, name: str, version: str, key: str, error: str | None = None,
+                   user: auth_db.User = Depends(Requires("view.internal"))) -> HTMLResponse:
     dataset = _load_dataset(f"{name}/{version}")
     item = gold_datasets.find_item(dataset, key)
     if item is None:

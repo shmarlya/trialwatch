@@ -13,7 +13,7 @@ from trialwatch.auth import accounts, actions, passwords, sessions
 from trialwatch.db import auth as auth_db
 from trialwatch.db import core
 from trialwatch.web import app as web
-from trialwatch.web.jobs import Job, JobRequest
+from trialwatch.db import jobs as jobs_db
 
 CHANGING = ("POST", "PUT", "PATCH", "DELETE")
 # The routes that need no action: signing in and out
@@ -31,7 +31,8 @@ def test_the_chart_gives_the_public_only_browsing():
 
 
 def test_an_admin_may_do_everything_and_a_moderator_curates():
-    admin_only = ["check.run", "source.sync", "source.register", "source.configure", "job.stop.any", "user.manage"]
+    admin_only = ["check.run", "source.sync", "source.register", "source.configure", "job.stop.any", "job.retry",
+                  "schedule.edit", "spend.cap.set", "user.manage"]
     for action in actions.ACTIONS:
         assert actions.allowed("admin", action.name), action.name
         if action.name in admin_only:
@@ -195,17 +196,22 @@ def test_a_moderator_curates_but_does_not_spend_or_configure(app_conn):
     assert "Save config" not in source and "Sync list" not in source
 
 
-def test_stopping_a_job_someone_else_started_needs_an_admin(app_conn, monkeypatch):
+def test_stopping_a_job_someone_else_started_needs_an_admin(app_conn):
     moderator = signed_in_client(app_conn, "moderator", "mona@test.example")
     admin = signed_in_client(app_conn, "admin", "ada@test.example")
-    jobs = web.Jobs()
-    monkeypatch.setattr(web, "jobs", jobs)
-    theirs = Job(id=1, request=JobRequest(step="transfer", source="ctis", keys=["x"]), actor="ada@test.example")
-    mine = Job(id=2, request=JobRequest(step="transfer", source="ctis", keys=["x"]), actor="mona@test.example")
-    jobs._jobs.extend([theirs, mine])
-    assert post_as(moderator, "/jobs/1/stop").status_code == 403
-    assert post_as(moderator, "/jobs/2/stop").status_code == 303 and mine.stop_requested
-    assert post_as(admin, "/jobs/1/stop").status_code == 303 and theirs.stop_requested
+    core.act_as(app_conn, "ada@test.example")
+    theirs = jobs_db.enqueue(app_conn, "transfer", {"source": "ctis", "keys": ["x"]}, max_attempts=1)
+    core.act_as(app_conn, "mona@test.example")
+    mine = jobs_db.enqueue(app_conn, "transfer", {"source": "ctis", "keys": ["x"]}, max_attempts=1)
+    assert post_as(moderator, f"/jobs/{theirs}/stop").status_code == 403
+    assert post_as(moderator, f"/jobs/{mine}/stop").status_code == 303
+    assert jobs_db.job(app_conn, mine).status == "cancelled"
+    assert post_as(admin, f"/jobs/{theirs}/stop").status_code == 303
+    assert jobs_db.job(app_conn, theirs).status == "cancelled"
+    # trying it again is an admin's
+    assert post_as(moderator, f"/jobs/{mine}/retry").status_code == 403
+    assert post_as(admin, f"/jobs/{mine}/retry").status_code == 303
+    assert jobs_db.job(app_conn, mine).status == "queued"
 
 
 def test_an_admin_manages_users_and_the_last_admin_stays(app_conn):

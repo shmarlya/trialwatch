@@ -20,8 +20,8 @@ ADMIN_PASSWORD = "TRIALWATCH_ADMIN_PASSWORD"
 # The same rule as the auth.app_user check: something@something.something, no spaces or slashes
 EMAIL = re.compile(r"[^@\s/]+@[^@\s/]+\.[^@\s/]+")
 LONGEST_EMAIL = 254
-# Who the audit log names for the seeded admin's row
-SEED_ACTOR = "admin-seed"
+# Who the audit log names for the seeded admin's row: TrialWatch itself
+SEED_ACTOR = "trialwatch"
 
 log = logging.getLogger("trialwatch.auth")
 

@@ -25,7 +25,7 @@
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 {% if running %}
 <div class="panel notice">
-  Running: <a href="/jobs/{{ running.id }}">job {{ running.id }} · {{ steps[running.request.step] }}</a>. Steps run one at a time.
+  Running: <a href="/jobs/{{ running.id }}">job {{ running.id }} · {{ steps[running.kind] }}</a>. Jobs run one at a time; the others wait in the <a href="/admin/jobs?tab=queued">queue</a>.
 </div>
 {% endif %}
 
@@ -54,7 +54,7 @@
     <input type="hidden" name="step" value="transfer">
     <input type="hidden" name="source" value="ctis">
     <label>EU CT numbers<textarea name="key_text" placeholder="2022-500044-38-01, …" required></textarea></label>
-    <button {% if running %}disabled{% endif %}>Transfer</button>
+    <button>Transfer</button>
   </form>
   {% endif %}
 
@@ -93,7 +93,7 @@
   </div>
   <div class="row end">
     {% if can("check.run") %}<label class="check"><input type="checkbox" name="dry_run" value="true" checked> dry run (send nothing)</label>{% else %}<input type="hidden" name="dry_run" value="true"><span class="small muted">dry run: only an admin can send model calls</span>{% endif %}
-    <button {% if running %}disabled{% endif %}>Start</button>
+    <button>Start</button>
   </div>
 </form>
 {% else %}<p class="muted">Sign in as a moderator or admin to start a check.</p>{% endif %}
@@ -103,7 +103,7 @@
 <div class="table-wrap"><table>
   <tr><th>Run</th><th>Started</th><th>By</th><th>Model · effort</th><th>Prompt · requirements</th><th>Status</th>
       <th class="num">Trials</th><th class="num">Full</th><th class="num">Not full</th><th class="num">Undecided</th>
-      <th class="num">Errors</th><th class="num">Tokens in</th></tr>
+      <th class="num">Errors</th><th class="num">Tokens in</th><th class="num">Cost</th></tr>
   {% for run in runs %}
   <tr>
     <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
@@ -115,25 +115,30 @@
     <td class="num">{{ run.trials }}</td><td class="num">{{ run.full }}</td><td class="num">{{ run.not_full }}</td>
     <td class="num">{{ run.undecided }}</td><td class="num">{{ run.errors }}</td>
     <td class="num">{{ "{:,}".format(run.input_tokens) }}</td>
+    <td class="num">{{ dollars(run.cost_usd) }}</td>
   </tr>
   {% endfor %}
 </table></div>
 {% else %}<p class="muted">No check runs yet.</p>{% endif %}
 
-<h2>Jobs started here</h2>
+<h2>Jobs</h2>
 {% if jobs %}
 <div class="table-wrap"><table>
-  <tr><th>Job</th><th>Step</th><th>Started</th><th>Status</th><th>Last line</th></tr>
+  <tr><th>Job</th><th>What</th><th>By</th><th>Created</th><th>Status</th><th class="num">Attempts</th><th class="num">Cost</th><th>Last error</th></tr>
   {% for job in jobs %}
   <tr>
-    <td><a href="/jobs/{{ job.id }}">{{ job.id }}</a></td>
-    <td>{{ steps[job.request.step] }}{% if job.request.dry_run %} <span class="muted">(dry run)</span>{% endif %}</td>
-    <td class="small">{{ when(job.started_at) }}</td>
+    <td><a href="/jobs/{{ job.id }}">{{ job.id }}</a>{% if job.parent_id %} <span class="small muted">of {{ job.parent_id }}</span>{% endif %}</td>
+    <td>{{ steps[job.kind] }}{% if job.params.dry_run %} <span class="muted">(dry run)</span>{% endif %}</td>
+    <td class="small">{{ who(job.actor) }}</td>
+    <td class="small">{{ when(job.created_at) }}</td>
     <td>{{ run_status(job.status) }}</td>
-    <td class="small muted">{% if job.lines %}{{ job.lines[-1][:140] }}{% endif %}</td>
+    <td class="num">{{ job.attempts }}/{{ job.max_attempts }}</td>
+    <td class="num">{{ dollars(job_costs.get(job.id)) }}</td>
+    <td class="small muted">{% if job.last_error %}{{ job.last_error[:140] }}{% endif %}</td>
   </tr>
   {% endfor %}
 </table></div>
-{% else %}<p class="muted">None since the server started.</p>{% endif %}
+<p class="small"><a href="/admin/jobs">All jobs, failures and schedules →</a></p>
+{% else %}<p class="muted">No jobs yet.</p>{% endif %}
 {% endif %}
 {% endblock %}

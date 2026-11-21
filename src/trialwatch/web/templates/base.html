@@ -149,6 +149,8 @@
     <a href="/prompts">Prompts</a>
     <a href="/requirements">Requirements</a>
     {% if can("view.internal") %}<a href="/review">Review</a><a href="/gold">Gold</a>{% endif %}
+    {% if can("job.view") %}<a href="/admin/jobs">Jobs</a>{% endif %}
+    {% if can("spend.view") %}<a href="/admin/spend">Spend</a>{% endif %}
     {% if can("user.manage") %}<a href="/admin/users">Users</a>{% endif %}
   </nav>
   {% block header_extra %}{% endblock %}
@@ -162,6 +164,7 @@
   </div>
 </header>
 <main>
+{% if jobs_needing_attention %}<div class="alert"><a href="/admin/jobs?tab=attention">{{ jobs_needing_attention }} job{% if jobs_needing_attention != 1 %}s{% endif %} need{% if jobs_needing_attention == 1 %}s{% endif %} attention</a>: failed after every attempt, or held by the spending cap.</div>{% endif %}
 {% block content %}{% endblock %}
 </main>
 </body>

@@ -7,7 +7,7 @@
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="actions">
   {% if can("trial.transfer") %}{% for transfer in transferable %}
-  <form method="post" action="/trials/{{ row.id }}/transfer"><input type="hidden" name="source" value="{{ transfer.source }}"><button class="secondary" {% if running %}disabled{% endif %}>{% if transfer.status == "not transferred" %}Transfer evidence{% else %}Transfer again{% endif %} from {{ transfer.source }}</button></form>
+  <form method="post" action="/trials/{{ row.id }}/transfer"><input type="hidden" name="source" value="{{ transfer.source }}"><button class="secondary">{% if transfer.status == "not transferred" %}Transfer evidence{% else %}Transfer again{% endif %} from {{ transfer.source }}</button></form>
   {% endfor %}
   {% if transferable %}<span class="small muted">fetches the record and the source's configured documents, then reads their page text</span>{% endif %}{% endif %}
   {% if can("trial.document.upload") %}<a class="button secondary" href="#upload">Upload a document</a>{% endif %}
@@ -97,7 +97,7 @@
     </div>
     {% endif %}
     <p class="small muted">Run <a href="/runs/{{ judgement.run_id }}">{{ judgement.run_id }}</a> · {{ judgement.model }}{% if judgement.served_by %}{% for served in judgement.served_by %}{% if served != judgement.model %} (answered by {{ served }}){% endif %}{% endfor %}{% endif %} · requirements <a href="/requirements?show={{ judgement.requirements }}#{{ judgement.requirements }}">{{ judgement.requirements }}</a> · prompt <a href="/prompts?show={{ judgement.prompt }}#{{ judgement.prompt }}">{{ judgement.prompt }}</a> · {{ when(judgement.started_at) }}
-      {% if judgement.input_tokens %} · tokens in {{ "{:,}".format(judgement.input_tokens) }}, out {{ "{:,}".format(judgement.output_tokens) }}{% endif %}
+      {% if judgement.input_tokens %} · tokens in {{ "{:,}".format(judgement.input_tokens) }}, out {{ "{:,}".format(judgement.output_tokens) }}{% endif %}{% if judgement.cost_usd is not none and can("spend.view") %} · {{ dollars(judgement.cost_usd) }}{% endif %}
       {% if judgement.duration_ms %} · {{ "%.1f" | format(judgement.duration_ms / 1000) }} s{% endif %}</p>
     {% if can("view.internal") %}
     <div class="actions">
@@ -148,7 +148,7 @@
         <details {% if step.name in ("rules", "error") %}open{% endif %}>
           <summary><b>{{ step_titles.get(step.name, step.name) }}{% if step.name == "call" %} {{ step.data.call }}{% endif %}</b>
             <span class="small muted">{{ step.at.strftime("%H:%M:%S") }}{% if step.duration_ms %} · {{ "%.1f" | format(step.duration_ms / 1000) }} s{% endif %}</span>
-            {% if step.name == "call" %}<span class="small muted"> · {{ step.data.pages | length }} pages · {{ step.data.questions | length }} questions · tokens {{ step.data.input_tokens }} in, {{ step.data.output_tokens }} out{% if step.data.error %} · <span class="flag">{{ step.data.error }}</span>{% endif %}</span>{% endif %}
+            {% if step.name == "call" %}<span class="small muted"> · {{ step.data.pages | length }} pages · {{ step.data.questions | length }} questions · tokens {{ step.data.input_tokens }} in, {{ step.data.output_tokens }} out{% if step.data.cost_usd and can("spend.view") %} · {{ dollars(step.data.cost_usd) }}{% endif %}{% if step.data.error %} · <span class="flag">{{ step.data.error }}</span>{% endif %}</span>{% endif %}
             {% if step.name == "retrieval" %}<span class="small muted"> · {% if step.data.method == "files" %}{{ step.data.reason }}{% if step.data.not_sent %}; not sent: {% for item in step.data.not_sent %}{{ item.title }} ({{ item.reason }}) {% endfor %}{% endif %}{% elif step.data.whole %}whole document ({{ step.data.reason }}){% else %}search, top {{ step.data.top_k }} per question{% endif %}</span>{% endif %}
           </summary>
           <div class="trace-body">
@@ -276,7 +276,7 @@
     <input type="hidden" name="back" value="/trials/{{ row.id }}">
     {{ setup_select(configs, judgement_config or defaults.config) }}
     {% if can("check.run") %}<label class="check"><input type="checkbox" name="dry_run" value="true"> dry run (send nothing)</label>{% else %}<input type="hidden" name="dry_run" value="true"><span class="small muted">dry run: only an admin can send model calls</span>{% endif %}
-    <button {% if running %}disabled{% endif %}>Check</button>
+    <button>Check</button>
   </form>
   {% endif %}
 </div>

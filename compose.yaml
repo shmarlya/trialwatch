@@ -22,6 +22,26 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # Runs queued jobs (web forms, the weekly refresh) one at a time and tries failed ones again
+  # (`trialwatch worker`, src/trialwatch/jobs/). Same image and settings as app.
+  worker:
+    image: trialwatch:dev
+    command: ["worker"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      TZ: UTC
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      TRIALWATCH_GOLD_DIR: /app/data/gold
+    volumes:
+      - ./data:/app/data:ro
+      - ./data/ctis:/app/data/ctis
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      app:
+        condition: service_started
+
   # Applies db/migrations/*.sql and writes db/schema.sql, then exits; the app starts only if this
   # succeeds. Takes dbmate's arguments (`docker compose run --rm migrate status`).
   migrate:

@@ -10,7 +10,8 @@ merged automatically: the record goes to the oldest of them and the pair is reco
 core.possible_duplicate for a person to decide.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
@@ -37,6 +38,21 @@ def act_as(conn: psycopg.Connection, name: str, kind: str = "person") -> int:
     # Session-wide (not just this transaction): the connections run in autocommit
     conn.execute("SELECT set_config('trialwatch.actor', %s, false)", (str(actor_id_found),))
     return actor_id_found
+
+
+@contextmanager
+def acting_as_system(conn: psycopg.Connection) -> Iterator[None]:
+    """Within the block, this session writes as TrialWatch itself (core.actor 1), e.g. publishing a
+    run's judgements by itself; afterwards it writes as whoever it wrote as before."""
+    before = current_actor(conn)
+    conn.execute("SELECT set_config('trialwatch.actor', '1', false)")
+    try:
+        yield
+    finally:
+        previous = ""
+        if before is not None:
+            previous = str(before)
+        conn.execute("SELECT set_config('trialwatch.actor', %s, false)", (previous,))
 
 
 def current_actor(conn: psycopg.Connection) -> int | None:

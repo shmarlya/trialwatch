@@ -4,6 +4,7 @@ traces (see db/migrations/*_init.sql). Trials are core.trial ids (ADR-003)."""
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 import psycopg
 from psycopg.rows import class_row
@@ -43,12 +44,15 @@ def start_run(conn: psycopg.Connection, *, check_name: str, model: str, effort: 
 
 
 def finish_run(conn: psycopg.Connection, run_id: int, *, status: str, error: str | None, trials: int, errors: int,
-               input_tokens: int, output_tokens: int) -> None:
+               input_tokens: int, output_tokens: int, cache_write_tokens: int = 0, cache_read_tokens: int = 0) -> None:
+    """Close the run; its cost is the sum of its billed calls (core.api_call)."""
     with conn.transaction():
         conn.execute(
             "UPDATE checks.run SET status = %s, error = %s, finished_at = clock_timestamp(), trials = %s, errors = %s, "
-            "input_tokens = %s, output_tokens = %s WHERE id = %s",
-            (status, error, trials, errors, input_tokens, output_tokens, run_id),
+            "input_tokens = %s, output_tokens = %s, cache_write_tokens = %s, cache_read_tokens = %s, "
+            "cost_usd = (SELECT coalesce(sum(cost_usd), 0) FROM core.api_call WHERE check_run_id = %s) WHERE id = %s",
+            (status, error, trials, errors, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+             run_id, run_id),
         )
     unlock(conn, LOCK_CHECK_RUN, run_id)
 
@@ -72,7 +76,8 @@ def close_abandoned_runs(conn: psycopg.Connection) -> list[int]:
                     errors = (SELECT count(*) FROM checks.judgement j WHERE j.run_id = r.id AND j.error IS NOT NULL),
                     input_tokens = (SELECT coalesce(sum(j.input_tokens), 0) FROM checks.judgement j WHERE j.run_id = r.id),
                     output_tokens = (SELECT coalesce(sum(j.output_tokens), 0) FROM checks.judgement j
-                                     WHERE j.run_id = r.id)
+                                     WHERE j.run_id = r.id),
+                    cost_usd = (SELECT coalesce(sum(c.cost_usd), 0) FROM core.api_call c WHERE c.check_run_id = r.id)
                 WHERE r.id = %s AND r.status = 'running'
                 """,
                 (ABANDONED, run_id),
@@ -114,17 +119,19 @@ def save_evidence(conn: psycopg.Connection, run_id: int, trial_id: int, key: str
 
 def save_judgement(conn: psycopg.Connection, run_id: int, trial_id: int, *, parts: dict, label: str | None,
                    trace: dict | None, served_by: list[str], record_id: int | None, document_versions: list[int],
-                   input_tokens: int, output_tokens: int, duration_ms: int, error: str | None) -> None:
+                   input_tokens: int, output_tokens: int, duration_ms: int, error: str | None,
+                   cache_write_tokens: int = 0, cache_read_tokens: int = 0, cost_usd: Decimal | None = None) -> None:
     # An empty or missing trace is stored as NULL, not as an empty JSON object
     trace_json = None
     if trace:
         trace_json = Jsonb(trace)
     conn.execute(
         "INSERT INTO checks.judgement (run_id, trial_id, parts, label, trace, served_by, trial_record_id, "
-        "document_versions, input_tokens, output_tokens, duration_ms, error) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "document_versions, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, "
+        "duration_ms, error) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (run_id, trial_id, Jsonb(parts), label, trace_json, served_by, record_id, list(document_versions),
-         input_tokens, output_tokens, duration_ms, error),
+         input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, duration_ms, error),
     )
 
 
@@ -149,6 +156,7 @@ class RunJudgement:
     error: str | None
     input_tokens: int | None
     output_tokens: int | None
+    cost_usd: Decimal | None
     # when the newest document version it read was published, as its source says (None: unknown)
     latest_published_at: datetime | None
 
@@ -158,7 +166,7 @@ def judgements(conn: psycopg.Connection, run_id: int) -> dict[int, RunJudgement]
     with conn.cursor(row_factory=class_row(RunJudgement)) as cur:
         rows = cur.execute(
             """
-            SELECT j.trial_id, j.parts, j.label, j.error, j.input_tokens, j.output_tokens,
+            SELECT j.trial_id, j.parts, j.label, j.error, j.input_tokens, j.output_tokens, j.cost_usd,
                    (SELECT max(v.published_at) FROM core.document_version v WHERE v.id = ANY(j.document_versions))
                        AS latest_published_at
             FROM checks.judgement j WHERE j.run_id = %s
@@ -303,3 +311,21 @@ def retrieval_rows(conn: psycopg.Connection, run_id: int) -> list[RetrievalRow]:
             """,
             (run_id,),
         ).fetchall()
+
+
+def trials_needing_check(conn: psycopg.Connection, trial_ids: list[int], requirements: str) -> list[int]:
+    """The trials among these that have never been judged against the requirement set, or whose current
+    judgement is outdated (checks.judgement_current: a record or document it read changed since)."""
+    rows = conn.execute(
+        """
+        SELECT t.id FROM unnest(%(ids)s::bigint[]) AS t(id)
+         WHERE NOT EXISTS (SELECT FROM checks.judgement_current c
+                            WHERE c.trial_id = t.id AND c.requirements = %(requirements)s AND NOT c.outdated)
+         ORDER BY t.id
+        """,
+        {"ids": trial_ids, "requirements": requirements},
+    ).fetchall()
+    found = []
+    for row in rows:
+        found.append(row[0])
+    return found

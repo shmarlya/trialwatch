@@ -28,6 +28,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote as url_quote
@@ -50,7 +51,12 @@ from trialwatch.db import core, overview
 from trialwatch.db.core import Identifier, normalised
 from trialwatch.gold import datasets as gold_datasets
 from trialwatch.sources import manual, registry, stages
-from trialwatch.web.jobs import STEPS, JobBusy, JobRequest, Jobs
+from trialwatch.costs import dollars
+from trialwatch.db import costs as costs_db
+from trialwatch.db import jobs as jobs_db
+from trialwatch.jobs import MAX_ATTEMPTS, PRIORITY_AUTOMATIC
+from trialwatch.web import jobs as web_jobs
+from trialwatch.web.jobs import STEPS, JobRequest
 
 
 
@@ -58,11 +64,17 @@ def auth_context(request: Request) -> dict:
     """What every page gets: who is signed in, can(action) to show only the forms they may use, and
     who(name) to show a writer's name (to the public, a person is only "TrialWatch staff")."""
     user = signed_in(request)
+    attention = 0
+    if user is not None and actions.allowed(user.role, "job.view"):
+        with db.connect_system() as conn:
+            attention = jobs_db.needing_attention(conn)
     return {"user": user, "can": Permissions(user), "chart_roles": actions.ROLES,
-            "who": Who(staff_view(request))}
+            "who": Who(staff_view(request)), "jobs_needing_attention": attention}
 
 
 TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates", context_processors=[auth_context])
+# `dollars(amount)` in a template: money as pages show it ($1.23, $0.0042)
+TEMPLATES.env.globals["dollars"] = dollars
 CT_NUMBER = re.compile(r"\d{4}-\d{6}-\d{2}-\d{2}")
 # Names of the trace steps as the trial page shows them
 STEP_TITLES = {
@@ -85,7 +97,6 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(title="TrialWatch", lifespan=lifespan)
-jobs = Jobs()
 
 # The names this machine answers to; TRIALWATCH_HOSTS adds others (comma-separated), e.g. when
 # `trialwatch web --host` serves it on a network
@@ -171,6 +182,8 @@ class Permissions:
 
 # How the public sees a person who wrote something (ADR-007): never their email
 STAFF = "TrialWatch staff"
+# How everyone sees TrialWatch's own writes (db.SYSTEM_ACTOR)
+SYSTEM = "TrialWatch (automatic)"
 
 
 class Who:
@@ -182,10 +195,12 @@ class Who:
         self._processes: set[str] | None = None
 
     def __call__(self, name: str | None) -> str | None:
+        if name == db.SYSTEM_ACTOR:
+            return SYSTEM
         if self.staff or name is None:
             return name
         if self._processes is None:
-            with db.connect() as conn:
+            with db.connect_system() as conn:
                 self._processes = overview.process_actor_names(conn)
         if name in self._processes:
             return name
@@ -208,7 +223,7 @@ def signed_in(request: Request) -> auth_db.User | None:
     user = None
     token = request.cookies.get(sessions.COOKIE)
     if token:
-        with db.connect() as conn:
+        with db.connect_system() as conn:
             user = sessions.user_of(conn, token)
     request.scope["user_looked_up"] = True
     request.scope["user"] = user
@@ -337,7 +352,7 @@ def login(request: Request, email: Annotated[str, Form()], password: Annotated[s
     if login_throttle.blocked(keys):
         message = "too many wrong tries: wait a few minutes"
         return RedirectResponse(f"/login?next={url_quote(target)}&error={url_quote(message)}", status_code=303)
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         token = sessions.sign_in(conn, email, password)
     if token is None:
         login_throttle.failed(keys)
@@ -352,7 +367,7 @@ def login(request: Request, email: Annotated[str, Form()], password: Annotated[s
 
 @app.post("/logout")
 def logout(request: Request) -> Response:
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         sessions.sign_out(conn, request.cookies.get(sessions.COOKIE))
     response = RedirectResponse("/", status_code=303)
     response.delete_cookie(sessions.COOKIE, path="/")
@@ -364,7 +379,7 @@ def logout(request: Request) -> Response:
 @app.get("/admin/users", response_class=HTMLResponse)
 def users_page(request: Request, error: str | None = None,
                user: auth_db.User = Depends(Requires("user.manage"))) -> HTMLResponse:
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         rows = auth_db.users(conn)
     context = {"rows": rows, "roles": actions.ROLES, "error": error, "minimum": passwords.MINIMUM_LENGTH}
     return TEMPLATES.TemplateResponse(request, "admin_users.html", context)
@@ -597,17 +612,20 @@ def dashboard(request: Request, error: str | None = None) -> HTMLResponse:
     defaults = default_settings()
     if not staff_view(request):
         # the public's front page: counts of what is published, nothing of the workflow
-        with db.connect() as conn:
+        with db.connect_system() as conn:
             coverage = overview.public_coverage(conn, defaults.requirements)
         return TEMPLATES.TemplateResponse(request, "dashboard.html", {"coverage": coverage, "defaults": defaults})
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         coverage = overview.coverage(conn)
         runs = overview.runs(conn)
         default_set = requirement_sets.load(defaults.requirements)
         kinds = list(default_set.document_kinds)
         choices = overview.trial_choices(conn, stages.ready_trials(conn, kinds), kinds, default_set.name)
         sources = overview.source_rows(conn)
-    context = {"sources": sources, "coverage": coverage, "runs": runs[:10], "jobs": jobs.all(), "running": jobs.running(),
+        recent = jobs_db.recent_jobs(conn, 15)
+        job_costs = jobs_db.job_costs(conn, _ids_of(recent))
+    context = {"sources": sources, "coverage": coverage, "runs": runs[:10], "jobs": recent, "job_costs": job_costs,
+               "running": _running(),
                "steps": STEPS, "error": error, "defaults": defaults,
                "choices": choices, "configs": check_settings.load_all()}
     return TEMPLATES.TemplateResponse(request, "dashboard.html", context)
@@ -674,7 +692,7 @@ def start_job(
         return _redirect_back(back, str(exc))
     if step == "evidence" and given:
         # trials ticked on a source's page: their keys at that source
-        with db.connect() as conn:
+        with db.connect_system() as conn:
             for trial_id in overview.trials_of_keys(conn, source, given):
                 if trial_id not in chosen_trials:
                     chosen_trials.append(trial_id)
@@ -682,13 +700,13 @@ def start_job(
     if step == "evidence" and chosen_trials:
         try:
             requirement_set = requirement_sets.load(check_settings.load(config.strip()).requirements)
-            with db.connect() as conn:
+            with db.connect_system() as conn:
                 evidence.refuse_unready(conn, chosen_trials, requirement_set)
         except (FileNotFoundError, ValueError) as exc:
             # an unknown setup, or trials whose evidence is not complete (evidence.NotReady)
             return _redirect_back(back, str(exc))
     if step == "transfer" and given:
-        with db.connect() as conn:
+        with db.connect_system() as conn:
             registered = core.registered_source(conn, source)
         if registered is not None and registered.adapter is not None:
             adapter = registry.adapter_class(registered.adapter)()
@@ -700,49 +718,187 @@ def start_job(
                              trial_ids=chosen_trials, every=every, limit=chosen_limit, config=config.strip(),
                              dry_run=dry_run)
     try:
-        job = jobs.start(job_request, actor=user.email)
-    except (ValueError, JobBusy) as exc:
+        with db.connect(actor=user.email) as conn:
+            job_id = web_jobs.enqueue(conn, job_request)
+    except ValueError as exc:
         return _redirect_back(back, str(exc))
-    return RedirectResponse(f"/jobs/{job.id}", status_code=303)
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+def _running() -> jobs_db.Job | None:
+    """The job a worker runs now, for pages that say so."""
+    with db.connect_system() as conn:
+        return jobs_db.running_job(conn)
+
+
+def _ids_of(found: list[jobs_db.Job]) -> list[int]:
+    ids = []
+    for job in found:
+        ids.append(job.id)
+    return ids
+
+
+def _job_or_404(conn: psycopg.Connection, job_id: int) -> jobs_db.Job:
+    job = jobs_db.job(conn, job_id)
+    if job is None:
+        raise HTTPException(404, "no such job")
+    return job
 
 
 @app.post("/jobs/{job_id}/stop")
 def stop_job(job_id: int, user: auth_db.User = Depends(Requires("job.stop.own", "job.stop.any"))) -> Response:
-    """Ask a running job to stop after the trial it is on; what it did so far is kept."""
-    job = jobs.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
-    if job.actor == user.email:
-        require(user, "job.stop.own")
-    else:
-        require(user, "job.stop.any")
-    jobs.stop(job_id)
+    """Cancel a job: one waiting in the queue ends now; a running one stops after the trial or page it
+    is on, and what it did so far is kept."""
+    with db.connect(actor=user.email) as conn:
+        job = _job_or_404(conn, job_id)
+        if job.actor == user.email:
+            require(user, "job.stop.own")
+        else:
+            require(user, "job.stop.any")
+        jobs_db.request_cancel(conn, job_id)
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+@app.post("/jobs/{job_id}/retry")
+def retry_job(job_id: int, user: auth_db.User = Depends(Requires("job.retry"))) -> Response:
+    """Queue a failed, cancelled or held job again now, with one more attempt."""
+    with db.connect(actor=user.email) as conn:
+        _job_or_404(conn, job_id)
+        if not jobs_db.retry_now(conn, job_id):
+            return RedirectResponse(f"/jobs/{job_id}?error={url_quote('only a failed, cancelled or held job can be tried again')}",
+                                    status_code=303)
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
-def job_page(request: Request, job_id: int,
+def job_page(request: Request, job_id: int, error: str | None = None,
              user: auth_db.User = Depends(Requires("job.view"))) -> HTMLResponse:
-    job = jobs.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job (jobs are kept until the server restarts)")
-    # one copy of the lines, so the page shows exactly the lines it then counts as seen while the job
-    # thread appends more
-    lines = list(job.lines)
-    return TEMPLATES.TemplateResponse(request, "job.html", {"job": job, "lines": lines, "steps": STEPS})
+    with db.connect_system() as conn:
+        job = _job_or_404(conn, job_id)
+        lines = jobs_db.lines(conn, job_id)
+        children = jobs_db.children(conn, job_id)
+        runs = jobs_db.runs_of(conn, job_id)
+        cost = jobs_db.job_cost(conn, job_id)
+        parent = None
+        if job.parent_id is not None:
+            parent = jobs_db.job(conn, job.parent_id)
+    context = {"job": job, "lines": lines, "children": children, "runs": runs, "cost": cost, "parent": parent,
+               "steps": STEPS, "error": error, "dollars": dollars}
+    return TEMPLATES.TemplateResponse(request, "job.html", context)
 
 
 @app.get("/jobs/{job_id}/progress")
 def job_progress(job_id: int, after: int = 0,
                  user: auth_db.User = Depends(Requires("job.view"))) -> JSONResponse:
-    """The job's status and its lines from number `after` on, for the job page to poll."""
-    job = jobs.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
-    # one copy, so the lines sent and their count agree while the job thread appends more
-    lines = list(job.lines)
-    return JSONResponse({"status": job.status, "lines": lines[after:], "total": len(lines),
-                         "run_id": job.run_id, "step": job.request.step})
+    """The job's status and its lines after line id `after`, for the job page to poll."""
+    with db.connect_system() as conn:
+        job = _job_or_404(conn, job_id)
+        new_lines = jobs_db.lines(conn, job_id, after)
+        cost = jobs_db.job_cost(conn, job_id)
+    texts = []
+    last = after
+    for line in new_lines:
+        texts.append(line.line)
+        last = line.id
+    return JSONResponse({"status": job.status, "lines": texts, "last": last, "attempts": job.attempts,
+                         "cost": dollars(cost)})
+
+
+# --- jobs, schedules and spend (admin) -----------------------------------------------------------
+
+JOB_TABS = {
+    "attention": ("Need attention", ("failed", "held")),
+    "active": ("Running or waiting", ("running", "waiting")),
+    "queued": ("Queued", ("queued",)),
+    "ended": ("Ended", ("succeeded", "cancelled", "failed")),
+}
+
+
+@app.get("/admin/jobs", response_class=HTMLResponse)
+def jobs_page(request: Request, tab: str = "attention", error: str | None = None,
+              user: auth_db.User = Depends(Requires("job.view"))) -> HTMLResponse:
+    if tab not in JOB_TABS:
+        tab = "attention"
+    with db.connect_system() as conn:
+        counts = jobs_db.status_counts(conn)
+        found = jobs_db.jobs_with_status(conn, JOB_TABS[tab][1])
+        costs = jobs_db.job_costs(conn, _ids_of(found))
+        schedules = jobs_db.schedules(conn)
+    tab_counts = {}
+    for name, tab_info in JOB_TABS.items():
+        total = 0
+        for status in tab_info[1]:
+            total += counts.get(status, 0)
+        tab_counts[name] = total
+    context = {"tab": tab, "tabs": JOB_TABS, "tab_counts": tab_counts, "jobs": found, "costs": costs,
+               "schedules": schedules, "steps": STEPS, "error": error, "dollars": dollars,
+               "weekdays": WEEKDAYS}
+    return TEMPLATES.TemplateResponse(request, "admin_jobs.html", context)
+
+
+WEEKDAYS = ("", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+@app.post("/admin/schedules/{schedule_id}")
+def edit_schedule(schedule_id: int, weekday: Annotated[int, Form()], hour_utc: Annotated[int, Form()],
+                  enabled: Annotated[bool, Form()] = False,
+                  user: auth_db.User = Depends(Requires("schedule.edit"))) -> Response:
+    if weekday < 1 or weekday > 7 or hour_utc < 0 or hour_utc > 23:
+        return RedirectResponse(f"/admin/jobs?error={url_quote('a day from Monday to Sunday and an hour 0-23')}",
+                                status_code=303)
+    with db.connect(actor=user.email) as conn:
+        if jobs_db.schedule(conn, schedule_id) is None:
+            raise HTTPException(404, "no such schedule")
+        jobs_db.set_schedule(conn, schedule_id, weekday=weekday, hour_utc=hour_utc, enabled=enabled)
+    return RedirectResponse("/admin/jobs#schedules", status_code=303)
+
+
+@app.post("/admin/schedules/{schedule_id}/run")
+def run_schedule_now(schedule_id: int, user: auth_db.User = Depends(Requires("schedule.edit"))) -> Response:
+    """Start a schedule's job now (as TrialWatch, like the schedule would), its next time unchanged."""
+    with db.connect(actor=user.email) as conn:
+        schedule = jobs_db.schedule(conn, schedule_id)
+    if schedule is None:
+        raise HTTPException(404, "no such schedule")
+    with db.connect_system() as conn:
+        job_id = jobs_db.enqueue(conn, schedule.kind, schedule.params, max_attempts=MAX_ATTEMPTS[schedule.kind],
+                                 automatic=True, schedule_id=schedule.id, priority=PRIORITY_AUTOMATIC)
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+@app.get("/admin/spend", response_class=HTMLResponse)
+def spend_page(request: Request, error: str | None = None,
+               user: auth_db.User = Depends(Requires("spend.view"))) -> HTMLResponse:
+    with db.connect_system() as conn:
+        totals = costs_db.spend_totals(conn)
+        cap = costs_db.monthly_cap(conn)
+        groups = {}
+        for group in ("month", "model", "operation", "actor"):
+            groups[group] = costs_db.spend_by(conn, group)
+        costliest = costs_db.costliest_runs(conn)
+        held = jobs_db.jobs_with_status(conn, ("held",))
+    context = {"totals": totals, "cap": cap, "groups": groups, "costliest": costliest, "held": held,
+               "error": error, "dollars": dollars}
+    return TEMPLATES.TemplateResponse(request, "admin_spend.html", context)
+
+
+@app.post("/admin/spend/cap")
+def set_spend_cap(cap: Annotated[str, Form()] = "",
+                  user: auth_db.User = Depends(Requires("spend.cap.set"))) -> Response:
+    """Set the monthly cap for automatic checks (empty: no cap). Held jobs resume when the worker next
+    finds the cap allows spending."""
+    text = cap.strip().removeprefix("$").replace(",", "")
+    chosen = None
+    if text:
+        try:
+            chosen = Decimal(text)
+        except InvalidOperation:
+            return RedirectResponse(f"/admin/spend?error={url_quote(f'not an amount: {cap!r}')}", status_code=303)
+        if chosen < 0 or not chosen.is_finite():
+            return RedirectResponse(f"/admin/spend?error={url_quote('the cap must be 0 or more')}", status_code=303)
+    with db.connect(actor=user.email) as conn:
+        costs_db.set_monthly_cap(conn, chosen)
+    return RedirectResponse("/admin/spend", status_code=303)
 
 
 # --- trials --------------------------------------------------------------------------------------
@@ -761,7 +917,7 @@ def trials_page(request: Request, q: str = "", evidence_state: str = "", page: i
     if staff and evidence_state in overview.EVIDENCE_FILTERS:
         state = evidence_state
     page = max(page, 1)
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         total = overview.trial_count(conn, search, state)
         rows = overview.trial_rows(conn, default_settings().requirements, search, state,
                                    offset=(page - 1) * TRIALS_PER_PAGE, limit=TRIALS_PER_PAGE,
@@ -774,7 +930,7 @@ def trials_page(request: Request, q: str = "", evidence_state: str = "", page: i
 @app.get("/trials/new", response_class=HTMLResponse)
 def new_trial_page(request: Request, error: str | None = None,
                    user: auth_db.User = Depends(Requires("trial.create"))) -> HTMLResponse:
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         schemes = core.identifier_schemes(conn)
         kinds = core.document_kinds(conn)
     context = {"schemes": schemes, "kinds": kinds, "error": error}
@@ -864,16 +1020,17 @@ def upload_document(
 def transfer_trial(trial_id: int, source: Annotated[str, Form()],
                    user: auth_db.User = Depends(Requires("trial.transfer"))) -> Response:
     """Transfer this trial's evidence again from a source (its record, new document versions, page text)."""
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         keys = overview.trial_source_keys(conn, trial_id, source)
     if not keys:
         message = f"this trial has no key at {source} to transfer"
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote(message)}", status_code=303)
     try:
-        job = jobs.start(JobRequest(step="transfer", source=source, keys=keys), actor=user.email)
-    except (ValueError, JobBusy) as exc:
+        with db.connect(actor=user.email) as conn:
+            job_id = web_jobs.enqueue(conn, JobRequest(step="transfer", source=source, keys=keys))
+    except ValueError as exc:
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote(str(exc))}", status_code=303)
-    return RedirectResponse(f"/jobs/{job.id}", status_code=303)
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
 @app.post("/trials/{trial_id}/sponsors")
@@ -925,7 +1082,7 @@ def review_page(request: Request, user: auth_db.User = Depends(Requires("view.in
     confidence and why it was not published by itself; and how each kind of judgement did on gold."""
     requirements = default_settings().requirements
     rows = []
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         calibration = publishing.calibrate(conn, requirements)
         for row in overview.awaiting_review(conn, requirements):
             kind = checks_db.judgement_kind(conn, row.run_id, row.trial_id)
@@ -947,14 +1104,14 @@ def sponsors_page(request: Request, q: str = "") -> HTMLResponse:
     search = q.strip()
     if not search:
         search = None
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         rows = overview.organisation_rows(conn, search)
     return TEMPLATES.TemplateResponse(request, "sponsors.html", {"rows": rows, "q": q})
 
 
 @app.get("/sponsors/{organisation_id}", response_class=HTMLResponse)
 def sponsor_page(request: Request, organisation_id: int) -> HTMLResponse:
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         row = overview.organisation_row(conn, organisation_id)
         if row is None:
             raise HTTPException(404, f"no organisation {organisation_id}")
@@ -966,7 +1123,7 @@ def sponsor_page(request: Request, organisation_id: int) -> HTMLResponse:
 @app.get("/trials/{trial_id}", response_class=HTMLResponse)
 def trial_page(request: Request, trial_id: int, run: int | None = None, error: str | None = None) -> HTMLResponse:
     staff = staff_view(request)
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         row = overview.trial_row(conn, trial_id, default_settings().requirements, published_only=not staff)
         if row is None:
             raise HTTPException(404, f"no trial {trial_id}")
@@ -1019,7 +1176,7 @@ def trial_page(request: Request, trial_id: int, run: int | None = None, error: s
         "row": row, "registered": registered, "identifiers": identifiers, "sources": sources,
         "documents": documents, "judgements": judgements, "judgement": chosen, "questions": questions,
         "steps": steps, "step_titles": STEP_TITLES, "calls": calls, "prompt_text": prompt_text, "files": _files_by_hex(steps), "history": history,
-        "defaults": default_settings(), "running": jobs.running(), "error": error, "transfers": transfers,
+        "defaults": default_settings(), "running": _running(), "error": error, "transfers": transfers,
         "ready": trial_id not in blocked, "not_ready": blocked.get(trial_id), "transferable": _transferable(transfers),
         "kinds": kinds, "configs": check_settings.load_all(), "judgement_config": judgement_config,
         "gold_items": gold_items, "sponsors": sponsors, "decision": decision,
@@ -1058,9 +1215,9 @@ def _unregistered_adapters(rows: list[overview.SourceRow]) -> list[str]:
 @app.get("/sources", response_class=HTMLResponse)
 def sources_page(request: Request, error: str | None = None,
                  user: auth_db.User = Depends(Requires("view.internal"))) -> HTMLResponse:
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         rows = overview.source_rows(conn)
-    context = {"rows": rows, "free_adapters": _unregistered_adapters(rows), "error": error, "running": jobs.running(),
+    context = {"rows": rows, "free_adapters": _unregistered_adapters(rows), "error": error, "running": _running(),
                "steps": STEPS}
     return TEMPLATES.TemplateResponse(request, "sources.html", context)
 
@@ -1104,7 +1261,7 @@ def source_page(request: Request, code: str, state: str = "", q: str = "", page:
         chosen_state = state
     search = q.strip() or None
     page = max(page, 1)
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         row = overview.source_row(conn, code)
         if row is None:
             raise HTTPException(404, f"no source {code}")
@@ -1120,7 +1277,7 @@ def source_page(request: Request, code: str, state: str = "", q: str = "", page:
         "row": row, "adapter": adapter, "config_text": json.dumps(row.config, indent=2), "trials": trials,
         "total": total, "page": page, "pages": max(1, -(-total // SOURCE_TRIALS_PER_PAGE)), "state": state, "q": q,
         "filters": overview.SOURCE_TRIAL_FILTERS, "choices": core.TRANSFER_CHOICES, "runs": runs,
-        "running": jobs.running(), "steps": STEPS, "error": error, "saved": saved, "here": here,
+        "running": _running(), "steps": STEPS, "error": error, "saved": saved, "here": here,
         "defaults": default_settings(),
     }
     return TEMPLATES.TemplateResponse(request, "source.html", context)
@@ -1148,7 +1305,7 @@ def save_source_config(code: str, config: Annotated[str, Form()], enabled: Annot
 def file_page(request: Request, sha_hex: str, page: int | None = None, quote: str | None = None) -> HTMLResponse:
     """The page text of one stored file, as retrieval and quote checks see it, with a quote marked."""
     sha = _file_hash(sha_hex)
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         owner = overview.file_owner(conn, sha)
         if owner is None or not (staff_view(request) or overview.file_is_public(conn, sha)):
             raise HTTPException(404, "no such file")
@@ -1168,7 +1325,7 @@ def file_page(request: Request, sha_hex: str, page: int | None = None, quote: st
 def file_raw(request: Request, sha_hex: str) -> Response:
     """The stored bytes, to open the document itself in the browser."""
     sha = _file_hash(sha_hex)
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         stored = None
         if staff_view(request) or overview.file_is_public(conn, sha):
             stored = overview.file_content(conn, sha)
@@ -1191,7 +1348,7 @@ def file_raw(request: Request, sha_hex: str) -> Response:
 def prompts_page(request: Request, show: str | None = None) -> HTMLResponse:
     """Every prompt file as it is now, and every prompt text check runs used (an edited file is a
     different text: the runs keep the one they sent)."""
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         uses = overview.prompt_uses(conn)
         used_texts = {}
         for use in uses:
@@ -1223,7 +1380,7 @@ def requirements_page(request: Request, show: str | None = None) -> HTMLResponse
 
 @app.get("/runs/{run_id}", response_class=HTMLResponse)
 def run_page(request: Request, run_id: int) -> HTMLResponse:
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         run = overview.run_row(conn, run_id)
         if run is None:
             raise HTTPException(404, f"no run {run_id}")
@@ -1389,7 +1546,7 @@ def gold_page(request: Request, dataset: str = "", q: str = "", label: str = "",
         # by default the last in name order: the newest version of the last-named dataset
         chosen_ref = refs[-1]
     chosen = _load_dataset(chosen_ref)
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         rows = _gold_rows(conn, chosen)
     shown = []
     for row in rows:
@@ -1408,7 +1565,7 @@ def gold_item_page(request: Request, name: str, version: str, key: str, error: s
     item = gold_datasets.find_item(dataset, key)
     if item is None:
         raise HTTPException(404, f"no item {key} in {dataset.ref}")
-    with db.connect() as conn:
+    with db.connect_system() as conn:
         found = overview.trials_for_identifiers(conn, _stored_identifiers(item))
         trial_id = None
         for identifier in _stored_identifiers(item):
@@ -1436,7 +1593,7 @@ def gold_item_page(request: Request, name: str, version: str, key: str, error: s
         if identifier.scheme == "eu-ct":
             ct_numbers.append(identifier.value)
     context = {"dataset": dataset, "item": item, "trial_id": trial_id, "compared": compared,
-               "documents": documents, "ct_numbers": ct_numbers, "running": jobs.running(), "error": error,
+               "documents": documents, "ct_numbers": ct_numbers, "running": _running(), "error": error,
                "ready": ready,
                "defaults": default_settings(), "reviewers_disagreed": gold_datasets.reviewers_disagreed(item)}
     return TEMPLATES.TemplateResponse(request, "gold_item.html", context)

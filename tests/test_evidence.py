@@ -577,7 +577,7 @@ def test_the_run_summary_says_what_happened():
     summary = ev.RunSummary(7, labels={"not full": 1, "full": 2}, failed={CT: "InternalServerError: overloaded"},
                             evidence=3, verified=2, widened=1, input_tokens=1500, output_tokens=60)
     assert summary.summary() == ("run 7: full 2, not full 1; failed 1; evidence quotes 3, verified on the page 2; "
-                                 "questions widened to every page 1; tokens in 1,500, out 60")
+                                 "questions widened to every page 1; tokens in 1,500, out 60; cost $0.00")
 
 
 def test_document_text_and_titles_cannot_close_or_open_the_tags_around_them():

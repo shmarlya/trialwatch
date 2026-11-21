@@ -37,6 +37,13 @@ CREATE SCHEMA core;
 
 
 --
+-- Name: jobs; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA jobs;
+
+
+--
 -- Name: publishable(); Type: FUNCTION; Schema: checks; Owner: -
 --
 
@@ -238,6 +245,9 @@ CREATE TABLE checks.judgement (
     output_tokens integer,
     duration_ms integer,
     error text,
+    cache_write_tokens integer,
+    cache_read_tokens integer,
+    cost_usd numeric(14,6),
     CONSTRAINT judgement_check CHECK (((label IS NULL) = (error IS NOT NULL))),
     CONSTRAINT judgement_label_check CHECK ((label = ANY (ARRAY['full'::text, 'not full'::text, 'undecided'::text])))
 );
@@ -268,6 +278,10 @@ CREATE TABLE checks.run (
     errors integer DEFAULT 0 NOT NULL,
     input_tokens bigint DEFAULT 0 NOT NULL,
     output_tokens bigint DEFAULT 0 NOT NULL,
+    cache_write_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cost_usd numeric(14,6) DEFAULT 0 NOT NULL,
+    job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint,
     CONSTRAINT run_check CHECK (((status = 'running'::text) = (finished_at IS NULL))),
     CONSTRAINT run_prompt_sha256_check CHECK ((length(prompt_sha256) = 32)),
     CONSTRAINT run_requirements_sha256_check CHECK ((length(requirements_sha256) = 32)),
@@ -587,6 +601,13 @@ CREATE TABLE core.actor (
 
 
 --
+-- Name: TABLE actor; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.actor IS 'a person, or a process; actor 1 (process trialwatch) is TrialWatch itself: migrations, scheduled jobs, automatic checks and publishing';
+
+
+--
 -- Name: actor_id_seq; Type: SEQUENCE; Schema: core; Owner: -
 --
 
@@ -597,6 +618,63 @@ ALTER TABLE core.actor ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
     NO MINVALUE
     NO MAXVALUE
     CACHE 1
+);
+
+
+--
+-- Name: api_call; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.api_call (
+    id bigint NOT NULL,
+    at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    actor_id bigint NOT NULL,
+    provider text DEFAULT 'anthropic'::text NOT NULL,
+    model text NOT NULL,
+    operation text NOT NULL,
+    check_run_id bigint,
+    trial_id bigint,
+    call_number integer,
+    input_tokens bigint DEFAULT 0 NOT NULL,
+    output_tokens bigint DEFAULT 0 NOT NULL,
+    cache_write_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cost_usd numeric(14,6),
+    prices jsonb,
+    request_id text,
+    job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint
+);
+
+
+--
+-- Name: TABLE api_call; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.api_call IS 'every billed call to a paid API, with its tokens and cost: the source of all spend totals';
+
+
+--
+-- Name: api_call_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.api_call ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.api_call_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: app_setting; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.app_setting (
+    key text NOT NULL,
+    value jsonb,
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
 );
 
 
@@ -789,6 +867,7 @@ CREATE TABLE core.ingest_run (
     finished_at timestamp with time zone,
     counts jsonb DEFAULT '{}'::jsonb NOT NULL,
     errors jsonb DEFAULT '{}'::jsonb NOT NULL,
+    job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint,
     CONSTRAINT ingest_run_check CHECK (((status = 'running'::text) = (finished_at IS NULL))),
     CONSTRAINT ingest_run_kind_check CHECK ((kind = ANY (ARRAY['list'::text, 'transfer'::text]))),
     CONSTRAINT ingest_run_status_check CHECK ((status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text])))
@@ -1015,6 +1094,112 @@ CREATE TABLE core.trial_sponsor (
 
 
 --
+-- Name: job; Type: TABLE; Schema: jobs; Owner: -
+--
+
+CREATE TABLE jobs.job (
+    id bigint NOT NULL,
+    kind text NOT NULL,
+    params jsonb DEFAULT '{}'::jsonb NOT NULL,
+    automatic boolean DEFAULT false NOT NULL,
+    parent_id bigint,
+    schedule_id integer,
+    priority smallint DEFAULT 100 NOT NULL,
+    status text DEFAULT 'queued'::text NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    max_attempts integer NOT NULL,
+    run_after timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    cancel_requested boolean DEFAULT false NOT NULL,
+    last_error text,
+    result jsonb DEFAULT '{}'::jsonb NOT NULL,
+    locked_by text,
+    heartbeat_at timestamp with time zone,
+    created_by bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    started_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    CONSTRAINT job_check CHECK (((status = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text])) = (finished_at IS NOT NULL))),
+    CONSTRAINT job_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text]))),
+    CONSTRAINT job_max_attempts_check CHECK ((max_attempts >= 1)),
+    CONSTRAINT job_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'waiting'::text, 'held'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
+);
+
+
+--
+-- Name: job_id_seq; Type: SEQUENCE; Schema: jobs; Owner: -
+--
+
+ALTER TABLE jobs.job ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME jobs.job_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: job_line; Type: TABLE; Schema: jobs; Owner: -
+--
+
+CREATE TABLE jobs.job_line (
+    id bigint NOT NULL,
+    job_id bigint NOT NULL,
+    attempt integer NOT NULL,
+    at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    line text NOT NULL
+);
+
+
+--
+-- Name: job_line_id_seq; Type: SEQUENCE; Schema: jobs; Owner: -
+--
+
+ALTER TABLE jobs.job_line ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME jobs.job_line_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: schedule; Type: TABLE; Schema: jobs; Owner: -
+--
+
+CREATE TABLE jobs.schedule (
+    id integer NOT NULL,
+    name text NOT NULL,
+    kind text NOT NULL,
+    params jsonb DEFAULT '{}'::jsonb NOT NULL,
+    weekday smallint NOT NULL,
+    hour_utc smallint NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    next_run_at timestamp with time zone NOT NULL,
+    CONSTRAINT schedule_hour_utc_check CHECK (((hour_utc >= 0) AND (hour_utc <= 23))),
+    CONSTRAINT schedule_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text]))),
+    CONSTRAINT schedule_weekday_check CHECK (((weekday >= 1) AND (weekday <= 7)))
+);
+
+
+--
+-- Name: schedule_id_seq; Type: SEQUENCE; Schema: jobs; Owner: -
+--
+
+ALTER TABLE jobs.schedule ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME jobs.schedule_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1117,6 +1302,22 @@ ALTER TABLE ONLY core.actor
 
 ALTER TABLE ONLY core.actor
     ADD CONSTRAINT actor_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: api_call api_call_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.api_call
+    ADD CONSTRAINT api_call_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: app_setting app_setting_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.app_setting
+    ADD CONSTRAINT app_setting_pkey PRIMARY KEY (key);
 
 
 --
@@ -1312,6 +1513,38 @@ ALTER TABLE ONLY core.trial_sponsor
 
 
 --
+-- Name: job_line job_line_pkey; Type: CONSTRAINT; Schema: jobs; Owner: -
+--
+
+ALTER TABLE ONLY jobs.job_line
+    ADD CONSTRAINT job_line_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: job job_pkey; Type: CONSTRAINT; Schema: jobs; Owner: -
+--
+
+ALTER TABLE ONLY jobs.job
+    ADD CONSTRAINT job_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: schedule schedule_name_key; Type: CONSTRAINT; Schema: jobs; Owner: -
+--
+
+ALTER TABLE ONLY jobs.schedule
+    ADD CONSTRAINT schedule_name_key UNIQUE (name);
+
+
+--
+-- Name: schedule schedule_pkey; Type: CONSTRAINT; Schema: jobs; Owner: -
+--
+
+ALTER TABLE ONLY jobs.schedule
+    ADD CONSTRAINT schedule_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: schema_migrations schema_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1355,6 +1588,34 @@ CREATE INDEX publication_trial_idx ON checks.publication USING btree (trial_id);
 
 
 --
+-- Name: run_job_idx; Type: INDEX; Schema: checks; Owner: -
+--
+
+CREATE INDEX run_job_idx ON checks.run USING btree (job_id);
+
+
+--
+-- Name: api_call_at_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX api_call_at_idx ON core.api_call USING btree (at);
+
+
+--
+-- Name: api_call_job_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX api_call_job_idx ON core.api_call USING btree (job_id);
+
+
+--
+-- Name: api_call_run_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX api_call_run_idx ON core.api_call USING btree (check_run_id, trial_id);
+
+
+--
 -- Name: audit_log_actor_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -1387,6 +1648,13 @@ CREATE INDEX document_version_file_idx ON core.document_version USING btree (fil
 --
 
 CREATE INDEX file_text_fingerprint_idx ON core.file USING btree (text_fingerprint) WHERE (text_fingerprint IS NOT NULL);
+
+
+--
+-- Name: ingest_run_job_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ingest_run_job_idx ON core.ingest_run USING btree (job_id);
 
 
 --
@@ -1453,6 +1721,34 @@ CREATE INDEX trial_sponsor_organisation_idx ON core.trial_sponsor USING btree (o
 
 
 --
+-- Name: job_line_job_idx; Type: INDEX; Schema: jobs; Owner: -
+--
+
+CREATE INDEX job_line_job_idx ON jobs.job_line USING btree (job_id, id);
+
+
+--
+-- Name: job_parent_idx; Type: INDEX; Schema: jobs; Owner: -
+--
+
+CREATE INDEX job_parent_idx ON jobs.job USING btree (parent_id);
+
+
+--
+-- Name: job_queue_idx; Type: INDEX; Schema: jobs; Owner: -
+--
+
+CREATE INDEX job_queue_idx ON jobs.job USING btree (priority, id) WHERE (status = 'queued'::text);
+
+
+--
+-- Name: job_status_idx; Type: INDEX; Schema: jobs; Owner: -
+--
+
+CREATE INDEX job_status_idx ON jobs.job USING btree (status, id DESC);
+
+
+--
 -- Name: app_user app_user_audit; Type: TRIGGER; Schema: auth; Owner: -
 --
 
@@ -1478,6 +1774,13 @@ CREATE TRIGGER publication_publishable BEFORE INSERT ON checks.publication FOR E
 --
 
 CREATE TRIGGER actor_audit AFTER DELETE OR UPDATE ON core.actor FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
+-- Name: app_setting app_setting_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER app_setting_audit AFTER INSERT OR DELETE OR UPDATE ON core.app_setting FOR EACH ROW EXECUTE FUNCTION core.audit('key');
 
 
 --
@@ -1621,6 +1924,20 @@ CREATE TRIGGER trial_sponsor_audit AFTER INSERT OR DELETE OR UPDATE ON core.tria
 
 
 --
+-- Name: job job_audit; Type: TRIGGER; Schema: jobs; Owner: -
+--
+
+CREATE TRIGGER job_audit AFTER INSERT OR DELETE OR UPDATE ON jobs.job FOR EACH ROW EXECUTE FUNCTION core.audit('id', 'heartbeat_at');
+
+
+--
+-- Name: schedule schedule_audit; Type: TRIGGER; Schema: jobs; Owner: -
+--
+
+CREATE TRIGGER schedule_audit AFTER INSERT OR DELETE OR UPDATE ON jobs.schedule FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
 -- Name: app_user app_user_actor_id_fkey; Type: FK CONSTRAINT; Schema: auth; Owner: -
 --
 
@@ -1733,6 +2050,14 @@ ALTER TABLE ONLY checks.run
 
 
 --
+-- Name: run run_job_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.run
+    ADD CONSTRAINT run_job_id_fkey FOREIGN KEY (job_id) REFERENCES jobs.job(id);
+
+
+--
 -- Name: step step_run_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
 --
 
@@ -1746,6 +2071,38 @@ ALTER TABLE ONLY checks.step
 
 ALTER TABLE ONLY checks.step
     ADD CONSTRAINT step_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: api_call api_call_actor_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.api_call
+    ADD CONSTRAINT api_call_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES core.actor(id);
+
+
+--
+-- Name: api_call api_call_check_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.api_call
+    ADD CONSTRAINT api_call_check_run_id_fkey FOREIGN KEY (check_run_id) REFERENCES checks.run(id);
+
+
+--
+-- Name: api_call api_call_job_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.api_call
+    ADD CONSTRAINT api_call_job_id_fkey FOREIGN KEY (job_id) REFERENCES jobs.job(id);
+
+
+--
+-- Name: api_call api_call_trial_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.api_call
+    ADD CONSTRAINT api_call_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
 
 
 --
@@ -1842,6 +2199,14 @@ ALTER TABLE ONLY core.file
 
 ALTER TABLE ONLY core.ingest_run
     ADD CONSTRAINT ingest_run_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES core.actor(id);
+
+
+--
+-- Name: ingest_run ingest_run_job_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.ingest_run
+    ADD CONSTRAINT ingest_run_job_id_fkey FOREIGN KEY (job_id) REFERENCES jobs.job(id);
 
 
 --
@@ -2149,6 +2514,38 @@ ALTER TABLE ONLY core.trial_sponsor
 
 
 --
+-- Name: job job_created_by_fkey; Type: FK CONSTRAINT; Schema: jobs; Owner: -
+--
+
+ALTER TABLE ONLY jobs.job
+    ADD CONSTRAINT job_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: job_line job_line_job_id_fkey; Type: FK CONSTRAINT; Schema: jobs; Owner: -
+--
+
+ALTER TABLE ONLY jobs.job_line
+    ADD CONSTRAINT job_line_job_id_fkey FOREIGN KEY (job_id) REFERENCES jobs.job(id) ON DELETE CASCADE;
+
+
+--
+-- Name: job job_parent_id_fkey; Type: FK CONSTRAINT; Schema: jobs; Owner: -
+--
+
+ALTER TABLE ONLY jobs.job
+    ADD CONSTRAINT job_parent_id_fkey FOREIGN KEY (parent_id) REFERENCES jobs.job(id);
+
+
+--
+-- Name: job job_schedule_id_fkey; Type: FK CONSTRAINT; Schema: jobs; Owner: -
+--
+
+ALTER TABLE ONLY jobs.job
+    ADD CONSTRAINT job_schedule_id_fkey FOREIGN KEY (schedule_id) REFERENCES jobs.schedule(id);
+
+
+--
 -- PostgreSQL database dump complete
 --
 
@@ -2163,4 +2560,7 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261121120000'),
     ('20261121180000'),
     ('20261121200000'),
-    ('20261121220000');
+    ('20261121220000'),
+    ('20261122100000'),
+    ('20261122110000'),
+    ('20261122120000');

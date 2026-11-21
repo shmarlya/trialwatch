@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import psycopg
 
 from trialwatch.db import checks as checks_db
+from trialwatch.db import core
 from trialwatch.db.checks import JudgementKind
 from trialwatch.gold import compare, datasets
 
@@ -163,7 +164,7 @@ def basis_text(decision: Decision, calibration: Calibration) -> str:
 
 
 def auto_publish(conn: psycopg.Connection, run_id: int) -> list[int]:
-    """Publish, as the session's actor, the run's judgements whose kind agreed with gold labels at
+    """Publish, as TrialWatch itself (not the person who started the run), the run's judgements whose kind agreed with gold labels at
     least AUTO_PUBLISH_AT of the time; the others wait for a person. Returns the trials published."""
     judgements = checks_db.judgement_kinds_of_run(conn, run_id)
     if not judgements:
@@ -174,7 +175,9 @@ def auto_publish(conn: psycopg.Connection, run_id: int) -> list[int]:
         decision = decide(judgement, calibration)
         if not decision.automatic:
             continue
-        if checks_db.publish_judgement(conn, run_id, judgement.trial_id, confidence=decision.confidence,
-                                       basis=basis_text(decision, calibration)):
+        with core.acting_as_system(conn):
+            done = checks_db.publish_judgement(conn, run_id, judgement.trial_id, confidence=decision.confidence,
+                                               basis=basis_text(decision, calibration))
+        if done:
             published.append(judgement.trial_id)
     return published

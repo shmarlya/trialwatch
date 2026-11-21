@@ -3,6 +3,7 @@ results. See db/migrations/*_core_*.sql and *_checks_on_core.sql."""
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 
 import psycopg
 from psycopg.rows import class_row
@@ -363,6 +364,9 @@ class RunRow:
     errors: int
     input_tokens: int
     output_tokens: int
+    cost_usd: Decimal
+    # billed calls on a model missing from the price list (not in cost_usd)
+    unpriced_calls: int
     full: int
     not_full: int
     undecided: int
@@ -371,6 +375,9 @@ class RunRow:
 _RUN_ROWS = """
     SELECT r.id, r.check_name, a.name AS actor, r.model, r.effort, r.prompt, r.requirements, r.status,
            r.error, r.started_at, r.finished_at, r.trials, r.errors, r.input_tokens, r.output_tokens,
+           r.cost_usd,
+           (SELECT count(*) FROM core.api_call c WHERE c.check_run_id = r.id AND c.cost_usd IS NULL)::int
+               AS unpriced_calls,
            count(*) FILTER (WHERE j.label = 'full')::int AS full,
            count(*) FILTER (WHERE j.label = 'not full')::int AS not_full,
            count(*) FILTER (WHERE j.label = 'undecided')::int AS undecided
@@ -408,6 +415,7 @@ class JudgementRow:
     error: str | None
     input_tokens: int | None
     output_tokens: int | None
+    cost_usd: Decimal | None
     duration_ms: int | None
     model: str
     prompt: str
@@ -428,7 +436,7 @@ class JudgementRow:
 
 _JUDGEMENT_ROWS = f"""
     SELECT j.run_id, j.trial_id, {_NAME} AS name, j.parts, j.label, j.trace,
-           j.served_by, j.error, j.input_tokens, j.output_tokens, j.duration_ms, r.model, r.prompt, r.requirements,
+           j.served_by, j.error, j.input_tokens, j.output_tokens, j.cost_usd, j.duration_ms, r.model, r.prompt, r.requirements,
            r.started_at, j.trial_record_id, j.document_versions, r.status AS run_status,
            (SELECT max(v.published_at) FROM core.document_version v WHERE v.id = ANY(j.document_versions))
                AS latest_published_at,

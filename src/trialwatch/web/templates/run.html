@@ -16,6 +16,7 @@
     <div class="stat"><span>Published</span><b>{{ judgements | length }}</b></div>
     {% endif %}
     <div class="stat"><span>Tokens in · out</span><b>{{ "{:,}".format(run.input_tokens) }} · {{ "{:,}".format(run.output_tokens) }}</b></div>
+    {% if can("spend.view") %}<div class="stat"><span>Cost</span><b>{{ dollars(run.cost_usd) }}{% if run.unpriced_calls %} <span class="small muted">+ {{ run.unpriced_calls }} unpriced calls</span>{% endif %}</b></div>{% endif %}
     <div class="stat"><span>Finished</span><b>{{ when(run.finished_at) }}</b></div>
   </div>
   <div class="panel">
@@ -32,13 +33,14 @@
 <h2>Judgements</h2>
 {% if not can("view.internal") %}<p class="small muted">Only the judgements our team reviewed and published.</p>{% endif %}
 <div class="table-wrap"><table>
-  <tr><th>Trial</th><th>Label</th><th>Parts</th><th class="num">Tokens in</th><th class="num">Time</th><th></th></tr>
+  <tr><th>Trial</th><th>Label</th><th>Parts</th><th class="num">Tokens in</th>{% if can("spend.view") %}<th class="num">Cost</th>{% endif %}<th class="num">Time</th><th></th></tr>
   {% for j in judgements %}
   <tr>
     <td><a href="/trials/{{ j.trial_id }}?run={{ run.id }}">{{ j.name }}</a></td>
     <td>{% if j.error %}<span class="label error">error</span>{% else %}{{ label(j.label) }}{% endif %}</td>
     <td class="small">{% for name, value in j.parts.items() %}{{ name }} {{ part(value) }}{% if not loop.last %} · {% endif %}{% endfor %}</td>
     <td class="num small">{% if j.input_tokens %}{{ "{:,}".format(j.input_tokens) }}{% endif %}</td>
+    {% if can("spend.view") %}<td class="num small">{% if j.cost_usd is not none %}{{ dollars(j.cost_usd) }}{% elif j.input_tokens %}<span class="muted">unpriced</span>{% endif %}</td>{% endif %}
     <td class="num small">{% if j.duration_ms %}{{ "%.1f" | format(j.duration_ms / 1000) }} s{% endif %}</td>
     <td class="small">{% if j.error %}<span class="muted">{{ j.error[:100] }}</span>{% else %}<a href="/trials/{{ j.trial_id }}?run={{ run.id }}">{% if can("view.internal") %}trace{% else %}answers{% endif %} →</a>{% if j.published and can("view.internal") %} <span class="label full">public</span>{% endif %}{% endif %}</td>
   </tr>

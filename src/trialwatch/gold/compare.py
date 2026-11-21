@@ -11,10 +11,13 @@ is "full": a false accusation.
 
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 
 import psycopg
 
+from trialwatch.costs import dollars
 from trialwatch.db import checks as checks_db
+from trialwatch.db import costs as costs_db
 from trialwatch.db import core
 from trialwatch.gold import datasets
 from trialwatch.gold.datasets import Dataset
@@ -56,6 +59,10 @@ class Scored:
     disagreements: list[Disagreement] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    # what the judged items' model calls cost (core.api_call), and how many calls ran on a model not in
+    # the price list
+    cost_usd: Decimal = Decimal(0)
+    unpriced: int = 0
 
 
 def evidence_day(dataset: Dataset) -> date | None:
@@ -93,6 +100,7 @@ def compare_run(conn: psycopg.Connection, run_id: int, dataset: Dataset) -> Scor
         scored.parts[part] = [0, 0]
         scored.parts_open[part] = 0
     judgements = checks_db.judgements(conn, run_id)
+    billed = costs_db.trial_spend(conn, run_id)
     read_day = evidence_day(dataset)
     for item in dataset.items:
         if item.expected_label is None:
@@ -107,6 +115,9 @@ def compare_run(conn: psycopg.Connection, run_id: int, dataset: Dataset) -> Scor
             scored.input_tokens += judgement.input_tokens
         if judgement.output_tokens:
             scored.output_tokens += judgement.output_tokens
+        if trial_id in billed:
+            scored.cost_usd += billed[trial_id].cost_usd
+            scored.unpriced += billed[trial_id].unpriced_calls
         if judgement.error:
             scored.errors[item.key] = judgement.error
             continue
@@ -178,8 +189,15 @@ def report_lines(scored: Scored) -> list[str]:
         lines.append(f"  ours {pair[0]:<9} · theirs {pair[1]:<8} {count}")
     lines.append(f"false accusations (ours not full, theirs full): {len(scored.false_accusations)}; "
                  f"missed (ours full, theirs not full): {len(scored.missed)}")
-    lines.append(f"tokens in {scored.input_tokens:,}, out {scored.output_tokens:,}")
+    lines.append(f"tokens in {scored.input_tokens:,}, out {scored.output_tokens:,}; cost {dollars(scored.cost_usd)}"
+                 f"{_unpriced_text(scored.unpriced)}")
     return lines
+
+
+def _unpriced_text(count: int) -> str:
+    if not count:
+        return ""
+    return f" (+{count} calls on models not in the price list)"
 
 
 def disagreement_lines(scored: Scored) -> list[str]:

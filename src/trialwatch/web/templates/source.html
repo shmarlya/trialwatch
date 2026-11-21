@@ -6,7 +6,7 @@
 <h1>{{ row.code }}{% if not row.enabled %} <span class="label none">off</span>{% endif %}</h1>
 <p class="sub">{{ row.name }}{% if row.url %} · <a href="{{ row.url }}">{{ row.url }}</a>{% endif %} · adapter {{ row.adapter or "none" }}</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
-{% if running %}<div class="panel notice">Running: <a href="/jobs/{{ running.id }}">job {{ running.id }} · {{ steps[running.request.step] }}</a>. Steps run one at a time.</div>{% endif %}
+{% if running %}<div class="panel notice">Running: <a href="/jobs/{{ running.id }}">job {{ running.id }} · {{ steps[running.kind] }}</a>. Jobs run one at a time; the others wait in the <a href="/admin/jobs?tab=queued">queue</a>.</div>{% endif %}
 
 <div class="grid">
   <div class="panel">
@@ -25,7 +25,7 @@
     <input type="hidden" name="step" value="list">
     <input type="hidden" name="source" value="{{ row.code }}">
     <input type="hidden" name="back" value="{{ here }}">
-    <button {% if running or not row.enabled %}disabled{% endif %}>Sync list</button>
+    <button {% if not row.enabled %}disabled{% endif %}>Sync list</button>
   </form>
   {% endif %}
   {% if adapter and adapter.transfers and can("trial.transfer") %}
@@ -39,7 +39,7 @@
       <select name="which">{% for name, text in choices.items() %}<option value="{{ name }}">{{ name }}: {{ text }}</option>{% endfor %}</select>
     </label>
     <label>Limit<input type="number" name="limit" min="1" placeholder="all"></label>
-    <button {% if running or not row.enabled %}disabled{% endif %}>Transfer</button>
+    <button {% if not row.enabled %}disabled{% endif %}>Transfer</button>
   </form>
   <form class="panel step" method="post" action="/jobs">
     <h3>… or by {{ adapter.key_label }}</h3>
@@ -48,7 +48,7 @@
     <input type="hidden" name="source" value="{{ row.code }}">
     <input type="hidden" name="back" value="{{ here }}">
     <label>{{ adapter.key_label }}s<textarea name="key_text" required></textarea></label>
-    <button {% if running or not row.enabled %}disabled{% endif %}>Transfer</button>
+    <button {% if not row.enabled %}disabled{% endif %}>Transfer</button>
   </form>
   {% endif %}
 </div>
@@ -64,8 +64,8 @@
   <input type="hidden" name="back" value="{{ here }}">
   <div class="selected-bar">
     <span class="small muted"><span id="count">0</span> ticked of {{ "{:,}".format(total) }} shown in {{ pages }} page{% if pages != 1 %}s{% endif %}</span>
-    {% if adapter and adapter.transfers and can("trial.transfer") %}<button name="step" value="transfer" {% if running %}disabled{% endif %}>Transfer ticked</button>{% endif %}
-    {% if can("check.dry_run") %}<button class="secondary" name="step" value="evidence" {% if running %}disabled{% endif %}>Check ticked (setup {{ defaults.config }})</button>
+    {% if adapter and adapter.transfers and can("trial.transfer") %}<button name="step" value="transfer">Transfer ticked</button>{% endif %}
+    {% if can("check.dry_run") %}<button class="secondary" name="step" value="evidence">Check ticked (setup {{ defaults.config }})</button>
     {% if can("check.run") %}<label class="check small"><input type="checkbox" name="dry_run" value="true" checked> dry run</label>{% else %}<input type="hidden" name="dry_run" value="true"><span class="small muted">dry run</span>{% endif %}{% endif %}
   </div>
   <div class="table-wrap"><table>

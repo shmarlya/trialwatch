@@ -19,7 +19,7 @@
     <input type="hidden" name="config" value="{{ defaults.config }}">
     {% if not can("check.run") %}<input type="hidden" name="dry_run" value="true">{% endif %}
     <input type="hidden" name="back" value="/gold/{{ dataset.ref }}/{{ item.key }}">
-    <button {% if running %}disabled{% endif %}>Check it (setup {{ defaults.config }}){% if not can("check.run") %}, dry run{% endif %}</button>
+    <button>Check it (setup {{ defaults.config }}){% if not can("check.run") %}, dry run{% endif %}</button>
   </form>
   {% elif ct_numbers and can("trial.transfer") %}
   <form method="post" action="/jobs">
@@ -27,7 +27,7 @@
     <input type="hidden" name="source" value="ctis">
     <input type="hidden" name="key_text" value="{{ ct_numbers | join(' ') }}">
     <input type="hidden" name="back" value="/gold/{{ dataset.ref }}/{{ item.key }}">
-    <button {% if running %}disabled{% endif %}>Transfer evidence from CTIS</button>
+    <button>Transfer evidence from CTIS</button>
   </form>
   <span class="small muted">{% if trial_id is not none %}its evidence is not transferred completely yet{% else %}not in our database yet{% endif %}: brings in its record and documents and reads them, then you can check it</span>
   {% elif trial_id is none and can("trial.create") %}

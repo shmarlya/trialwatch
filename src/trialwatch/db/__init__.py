@@ -17,11 +17,15 @@ import psycopg
 
 # Sessions run in UTC so timestamps come back as UTC-aware datetimes, whatever the server default
 SESSION_OPTIONS = "-c TimeZone=UTC"
+# TrialWatch itself (core.actor 1): who writes what no person does, such as scheduled jobs, automatic
+# checks and publishing, migrations and seeding the first admin
+SYSTEM_ACTOR = "trialwatch"
+SYSTEM_ACTOR_ID = 1
 
 
 def connect(actor: str | None = None, actor_kind: str = "person") -> psycopg.Connection:
     """A connection whose writes are recorded as made by `actor` (core.actor, ADR-003): a person's
-    name, or a process such as ctis-adapter with actor_kind="process". Without a name, the person
+    name, or a process such as SYSTEM_ACTOR with actor_kind="process". Without a name, the person
     is TRIALWATCH_ACTOR or the login name of whoever runs the program."""
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -39,6 +43,12 @@ def connect(actor: str | None = None, actor_kind: str = "person") -> psycopg.Con
         conn.close()
         raise
     return conn
+
+
+def connect_system() -> psycopg.Connection:
+    """A connection whose writes are recorded as TrialWatch's own (SYSTEM_ACTOR). Also used for
+    reading, so a page view never adds the server's login name as a person."""
+    return connect(actor=SYSTEM_ACTOR, actor_kind="process")
 
 
 def default_actor() -> str:

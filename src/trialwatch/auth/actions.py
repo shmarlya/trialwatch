@@ -31,7 +31,8 @@ ACTIONS = (
     Action("view.internal", "See unpublished judgements and their traces, sources and transfers, gold datasets, "
            "and staff names in history", (MODERATOR, ADMIN)),
     Action("judgement.publish", "Publish a judgement so the public sees it, or withdraw it", (MODERATOR, ADMIN)),
-    Action("job.view", "See a job's page and its live progress", (MODERATOR, ADMIN)),
+    Action("job.view", "See jobs (/admin/jobs), a job's page and its live progress", (MODERATOR, ADMIN)),
+    Action("spend.view", "See what TrialWatch spent on paid APIs (/admin/spend)", (MODERATOR, ADMIN)),
     Action("trial.create", "Add a trial by hand with uploaded documents", (MODERATOR, ADMIN)),
     Action("trial.document.upload", "Upload a document to a trial", (MODERATOR, ADMIN)),
     Action("trial.sponsor.edit", "Add or remove a trial's sponsors", (MODERATOR, ADMIN)),
@@ -43,6 +44,9 @@ ACTIONS = (
     Action("source.configure", "Change a source's config or switch it on or off", (ADMIN,)),
     Action("job.stop.own", "Stop a job you started", (MODERATOR, ADMIN)),
     Action("job.stop.any", "Stop a job someone else started", (ADMIN,)),
+    Action("job.retry", "Try a failed, cancelled or held job again now", (ADMIN,)),
+    Action("schedule.edit", "Change when scheduled jobs run, switch them on or off, start one now", (ADMIN,)),
+    Action("spend.cap.set", "Set the monthly spending cap for automatic checks", (ADMIN,)),
     Action("user.manage", "Add users, change their role or password, disable them; see this chart", (ADMIN,)),
 )
 

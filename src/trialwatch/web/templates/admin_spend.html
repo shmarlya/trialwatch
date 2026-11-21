@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% from "macros.html" import when, run_status %}
+{% block title %}Spend · TrialWatch{% endblock %}
+{% block content %}
+<h1>Spend</h1>
+<p class="sub">What TrialWatch spent on paid APIs: every billed model call, priced at Anthropic's list prices (<code>src/trialwatch/costs/prices.json</code>) when it was made. US dollars; months are UTC.</p>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<div class="grid">
+  <div class="panel">
+    <div class="stat"><span>This month</span><b>{{ dollars(totals.this_month) }}{% if cap is not none %} <span class="small muted">of {{ dollars(cap) }} cap</span>{% endif %}</b></div>
+    <div class="stat"><span>Last 30 days</span><b>{{ dollars(totals.last_30_days) }}</b></div>
+    <div class="stat"><span>All time</span><b>{{ dollars(totals.all_time) }}</b></div>
+    <div class="stat"><span>Billed calls</span><b>{{ "{:,}".format(totals.calls) }}{% if totals.unpriced_calls %} <span class="small muted">({{ totals.unpriced_calls }} on models not in the price list, not counted)</span>{% endif %}</b></div>
+  </div>
+  <div class="panel">
+    <h3 class="panel-title">Monthly cap for automatic checks</h3>
+    <p class="small">Checks TrialWatch starts by itself (the weekly refresh) are held once this month's spend reaches the cap, and go on by themselves next month or when the cap is raised. Checks a person starts always run.</p>
+    {% if can("spend.cap.set") %}
+    <form method="post" action="/admin/spend/cap" class="inline">
+      <label>US dollars <input name="cap" value="{% if cap is not none %}{{ cap }}{% endif %}" placeholder="no cap" style="width:8em"></label>
+      <button class="small">Save</button>
+    </form>
+    {% else %}<p>{% if cap is none %}No cap.{% else %}{{ dollars(cap) }} a month.{% endif %}</p>{% endif %}
+    {% if held %}<p class="small"><a href="/admin/jobs?tab=attention">{{ held | length }} held job{% if held | length != 1 %}s{% endif %}</a></p>{% endif %}
+  </div>
+</div>
+
+{% for group, title in (("month", "By month"), ("model", "By model"), ("actor", "By who it was for"), ("operation", "By operation")) %}
+<h2>{{ title }}</h2>
+{% if groups[group] %}
+<div class="table-wrap"><table>
+  <tr><th>{% if group == "actor" %}Actor{% else %}{{ group | capitalize }}{% endif %}</th><th class="num">Calls</th><th class="num">Tokens in</th><th class="num">Tokens out</th><th class="num">Cost</th></tr>
+  {% for row in groups[group] %}
+  <tr><td>{% if group == "actor" %}{{ who(row.name.split(":", 1)[1]) }}{% else %}{{ row.name }}{% endif %}</td><td class="num">{{ "{:,}".format(row.calls) }}</td>
+      <td class="num">{{ "{:,}".format(row.input_tokens) }}</td><td class="num">{{ "{:,}".format(row.output_tokens) }}</td>
+      <td class="num">{{ dollars(row.cost_usd) }}{% if row.unpriced_calls %} <span class="small muted">+{{ row.unpriced_calls }} unpriced</span>{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="muted">Nothing spent yet.</p>{% endif %}
+{% endfor %}
+
+<h2>Costliest check runs</h2>
+{% if costliest %}
+<div class="table-wrap"><table>
+  <tr><th>Run</th><th>Started</th><th>By</th><th>Model</th><th class="num">Trials</th><th class="num">Cost</th></tr>
+  {% for run in costliest %}
+  <tr><td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td><td class="small">{{ when(run.started_at) }}</td><td class="small">{{ who(run.actor) }}</td>
+      <td class="small">{{ run.model }}</td><td class="num">{{ run.trials }}</td><td class="num">{{ dollars(run.cost_usd) }}</td></tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="muted">No run has cost anything yet.</p>{% endif %}
+{% endblock %}

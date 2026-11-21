@@ -1,39 +1,69 @@
 {% extends "base.html" %}
+{% from "macros.html" import when, run_status %}
 {% block title %}Job {{ job.id }} · TrialWatch{% endblock %}
 {% block content %}
-<h1>Job {{ job.id }} · {{ steps[job.request.step] }}{% if job.request.dry_run %} <span class="muted">(dry run)</span>{% endif %}</h1>
+<h1>Job {{ job.id }} · {{ steps[job.kind] }}{% if job.params.dry_run %} <span class="muted">(dry run)</span>{% endif %}</h1>
 <p class="sub">
   Status: <b id="status">{{ job.status }}</b>
-  <span id="run-link">{% if job.run_id and job.request.step == "evidence" %} · <a href="/runs/{{ job.run_id }}">run {{ job.run_id }}</a>{% elif job.run_id %} · ingest run {{ job.run_id }}{% endif %}</span>
-  · {% if job.request.every %}every trial{% endif %}
-  {% if job.request.source %}{{ job.request.source }}{% endif %}
-  {% if job.request.which %} · {{ job.request.which }}{% endif %}
-  {% if job.request.keys %} · {{ job.request.keys[:10] | join(", ") }}{% if job.request.keys | length > 10 %} and {{ job.request.keys | length - 10 }} more{% endif %}{% endif %}
-  {% if job.request.trial_ids %}trial {{ job.request.trial_ids | join(", ") }}{% endif %}
-  · started by {{ job.actor }}
-  {% if job.request.limit %} · limit {{ job.request.limit }}{% endif %}
-  {% if job.request.step == "evidence" %} · setup {{ job.request.config }}{% endif %}
+  · attempt <span id="attempts">{{ job.attempts }}</span> of {{ job.max_attempts }}
+  · {% if job.automatic %}automatic{% endif %} created by {{ who(job.actor) }} {{ when(job.created_at) }}
+  {% if parent %} · part of <a href="/jobs/{{ parent.id }}">job {{ parent.id }} ({{ steps[parent.kind] }})</a>{% endif %}
+  {% if job.status == "queued" and job.attempts %} · next try {{ when(job.run_after) }}{% endif %}
+  · cost <span id="cost">{{ dollars(cost) }}</span>
 </p>
-{% if job.status == "running" and (can("job.stop.any") or job.actor == user.email) %}<form method="post" action="/jobs/{{ job.id }}/stop" id="stop" class="actions"><button class="secondary" {% if job.stop_requested %}disabled{% endif %}>Stop after the current trial</button></form>{% endif %}
-<pre id="log">{% for line in lines %}{{ line }}
+<p class="small muted">
+  {% if job.params.source %}source {{ job.params.source }}{% endif %}
+  {% if job.params.which %} · {{ job.params.which }}{% endif %}
+  {% if job.params.get("keys") %} · {{ job.params.get("keys")[:10] | join(", ") }}{% if job.params.get("keys") | length > 10 %} and {{ job.params.get("keys") | length - 10 }} more{% endif %}{% endif %}
+  {% if job.params.every %}every trial ready for a check{% endif %}
+  {% if job.params.trial_ids %}trials {% for trial_id in job.params.trial_ids[:20] %}<a href="/trials/{{ trial_id }}">{{ trial_id }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% if job.params.trial_ids | length > 20 %} and {{ job.params.trial_ids | length - 20 }} more{% endif %}{% endif %}
+  {% if job.params.limit %} · limit {{ job.params.limit }}{% endif %}
+  {% if job.kind == "check" %} · setup {{ job.params.config }}{% endif %}
+</p>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% if job.last_error and job.status != "succeeded" %}<div class="alert"><b>{% if job.status == "held" %}Held{% else %}Last error{% endif %}:</b> {{ job.last_error }}</div>{% endif %}
+<div class="actions">
+  {% if not job.ended and (can("job.stop.any") or job.actor == user.email) %}<form method="post" action="/jobs/{{ job.id }}/stop" id="stop"><button class="secondary" {% if job.cancel_requested %}disabled{% endif %}>{% if job.status == "running" %}Stop after the current item{% else %}Cancel{% endif %}</button></form>{% endif %}
+  {% if job.status in ("failed", "cancelled", "held") and can("job.retry") %}<form method="post" action="/jobs/{{ job.id }}/retry"><button>{% if job.status == "held" %}Release now{% else %}Try again now{% endif %}</button></form>{% endif %}
+</div>
+{% if runs.check_runs or runs.ingest_runs %}
+<p class="small">Runs: {% for run_id in runs.check_runs %}<a href="/runs/{{ run_id }}">check run {{ run_id }}</a> {% endfor %}{% for run_id in runs.ingest_runs %}ingest run {{ run_id }} {% endfor %}</p>
+{% endif %}
+{% if children %}
+<h2>Its jobs</h2>
+<div class="table-wrap"><table>
+  <tr><th>Job</th><th>What</th><th>Status</th><th class="num">Attempts</th><th>Last error</th></tr>
+  {% for child in children %}
+  <tr><td><a href="/jobs/{{ child.id }}">{{ child.id }}</a></td><td>{{ steps[child.kind] }}{% if child.params.source %} · {{ child.params.source }}{% endif %}{% if child.params.get("keys") %} · {{ child.params.get("keys") | length }} trials{% endif %}{% if child.params.trial_ids %} · {{ child.params.trial_ids | length }} trials{% endif %}</td>
+      <td>{{ run_status(child.status) }}</td><td class="num">{{ child.attempts }}/{{ child.max_attempts }}</td>
+      <td class="small muted">{% if child.last_error %}{{ child.last_error[:160] }}{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+<h2>Progress</h2>
+<pre id="log">{% for line in lines %}{% if loop.first or line.attempt != loop.previtem.attempt %}— attempt {{ line.attempt }} —
+{% endif %}{{ line.line }}
 {% endfor %}</pre>
-<p class="small"><a href="/">← Workflow</a>{% if job.request.source %} · <a href="/sources/{{ job.request.source }}">{{ job.request.source }}</a>{% endif %}</p>
+{% if job.result %}<details class="prompt"><summary class="small">Result</summary><pre>{{ job.result | tojson(indent=2) }}</pre></details>{% endif %}
+<p class="small"><a href="/admin/jobs">← Jobs</a>{% if job.params.source %} · <a href="/sources/{{ job.params.source }}">{{ job.params.source }}</a>{% endif %}</p>
 <script>
-  // Poll the job's progress every second until it ends, appending new lines to the log
+  // Poll the job's progress every two seconds until it ends, appending new lines to the log
   const log = document.getElementById("log");
   const statusEl = document.getElementById("status");
-  let seen = {{ lines | length }};
+  const ended = ["succeeded", "failed", "cancelled"];
+  let last = {% if lines %}{{ lines[-1].id }}{% else %}0{% endif %};
   async function poll() {
-    const response = await fetch(`/jobs/{{ job.id }}/progress?after=${seen}`);
+    const response = await fetch(`/jobs/{{ job.id }}/progress?after=${last}`);
     const data = await response.json();
     for (const line of data.lines) log.textContent += line + "\n";
-    seen = data.total;
+    last = data.last;
+    const changed = statusEl.textContent !== data.status;
     statusEl.textContent = data.status;
-    if (data.run_id && data.step === "evidence") document.getElementById("run-link").innerHTML = ` · <a href="/runs/${data.run_id}">run ${data.run_id}</a>`;
-    else if (data.run_id) document.getElementById("run-link").textContent = ` · ingest run ${data.run_id}`;
-    if (data.status === "running") setTimeout(poll, 1000);
-    else if (document.getElementById("stop")) document.getElementById("stop").remove();
+    document.getElementById("attempts").textContent = data.attempts;
+    document.getElementById("cost").textContent = data.cost;
+    if (changed && ended.includes(data.status)) location.reload();
+    else if (!ended.includes(data.status)) setTimeout(poll, 2000);
   }
-  if (statusEl.textContent === "running") setTimeout(poll, 1000);
+  if (!ended.includes(statusEl.textContent)) setTimeout(poll, 2000);
 </script>
 {% endblock %}

@@ -138,7 +138,7 @@ def test_the_score_reads_as_lines(conn):
     assert lines[5:9] == ["  ours full      · theirs full     1", "  ours full      · theirs not full 1",
                           "  ours not full  · theirs full     1", "  ours undecided · theirs full     1"]
     assert lines[9:] == ["false accusations (ours not full, theirs full): 1; missed (ours full, theirs not full): 1",
-                         "tokens in 600, out 60"]
+                         "tokens in 600, out 60; cost $0.00"]
     disagreements = compare.disagreement_lines(scored)
     assert len(disagreements) == 3
     assert disagreements[0].startswith(f"  {ACCUSED} ours not full (") and "outcomes=0" in disagreements[0]

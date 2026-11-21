@@ -11,6 +11,7 @@ from test_sources_ctis import CT, RECORD, FakeCtis, ctis_source, listed_row, tra
 from trialwatch.db import core
 from trialwatch.sources import ctis, stages
 from trialwatch.web import app as web
+from trialwatch.db import jobs as jobs_db
 from trialwatch.web.jobs import JobRequest, check_request
 
 
@@ -136,7 +137,7 @@ def test_checking_a_trial_whose_evidence_is_not_complete_goes_back_with_why(app_
                                                "config": "../default", "back": f"/trials/{trial_id}"},
                                 follow_redirects=False)
     assert "no setup '../default'" in error_of(unknown_setup)
-    assert web.jobs.running() is None
+    assert jobs_db.recent_jobs(app_conn) == []
 
 
 def test_a_bad_ct_number_goes_back_with_a_message(admin_client):

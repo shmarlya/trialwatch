@@ -36,6 +36,8 @@ gold_app = typer.Typer(no_args_is_help=True, help="Gold datasets: hand-checked a
 app.add_typer(gold_app, name="gold")
 user_app = typer.Typer(no_args_is_help=True, help="People who can sign in to the web interface, and their role (ADR-006).")
 app.add_typer(user_app, name="user")
+jobs_app = typer.Typer(no_args_is_help=True, help="Queued jobs that `trialwatch worker` runs, and their retries.")
+app.add_typer(jobs_app, name="jobs")
 
 # Calls go to Anthropic's API itself, whatever ANTHROPIC_BASE_URL a shell may set (e.g. a proxy)
 ANTHROPIC_API = "https://api.anthropic.com"
@@ -64,6 +66,69 @@ def web(
     import uvicorn
 
     uvicorn.run("trialwatch.web.app:app", host=host, port=port, reload=reload)
+
+
+@app.command("worker")
+def worker(
+    once: Annotated[bool, typer.Option("--once", help="Run the queued jobs that are due, then stop")] = False,
+) -> None:
+    """Run queued jobs one at a time (those people start on the web interface, and the weekly refresh),
+    trying failed ones again later. Leave it running next to `trialwatch web`."""
+    import logging
+
+    from trialwatch.jobs import worker as job_worker
+
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(message)s")
+    try:
+        ran = job_worker.run(once=once)
+    except KeyboardInterrupt:
+        typer.echo("stopped: a job it was running is taken over by the next worker after its heartbeat lapses")
+        return
+    typer.echo(f"{ran} jobs run")
+
+
+@jobs_app.command("list")
+def jobs_list(
+    status: Annotated[str | None, typer.Option(help="Only jobs in this status, e.g. failed, held, queued")] = None,
+    limit: Annotated[int, typer.Option(help="How many, newest first")] = 30,
+) -> None:
+    """The newest jobs, with their status, attempts and last error."""
+    from trialwatch.db import jobs as jobs_db
+
+    with db.connect_system() as conn:
+        if status:
+            found = jobs_db.jobs_with_status(conn, (status,), limit)
+        else:
+            found = jobs_db.recent_jobs(conn, limit)
+    for job in found:
+        error = ""
+        if job.last_error:
+            error = f" · {job.last_error[:120]}"
+        typer.echo(f"{job.id:>6} {job.kind:<8} {job.status:<9} {job.attempts}/{job.max_attempts} {job.actor}{error}")
+
+
+@jobs_app.command("retry")
+def jobs_retry(job_id: Annotated[int, typer.Argument(help="The job, as `jobs list` shows it")]) -> None:
+    """Queue a failed, cancelled or held job again now, with one more attempt."""
+    from trialwatch.db import jobs as jobs_db
+
+    with db.connect() as conn:
+        if not jobs_db.retry_now(conn, job_id):
+            raise typer.BadParameter(f"job {job_id} is not failed, cancelled or held")
+    typer.echo(f"job {job_id} queued")
+
+
+@jobs_app.command("refresh")
+def jobs_refresh() -> None:
+    """Queue the weekly refresh now (sync every source, transfer what changed, check what changed), as
+    TrialWatch itself; `trialwatch worker` runs it."""
+    from trialwatch.db import jobs as jobs_db
+    from trialwatch.jobs import MAX_ATTEMPTS, PRIORITY_AUTOMATIC
+
+    with db.connect_system() as conn:
+        job_id = jobs_db.enqueue(conn, "refresh", {}, max_attempts=MAX_ATTEMPTS["refresh"], automatic=True,
+                                 priority=PRIORITY_AUTOMATIC)
+    typer.echo(f"refresh queued as job {job_id}")
 
 
 def _echo_failures(failed: dict[str, str]) -> None:
@@ -181,7 +246,7 @@ def source_config(
 def source_sync(code: Annotated[str, typer.Argument(help="The source, e.g. ctis")]) -> None:
     """Sync a source's list: every trial it lists (as its config filters them) becomes a trial here,
     with its key, title and identifiers. Records and documents come with `source transfer`."""
-    with db.connect(actor=f"{code}-adapter", actor_kind="process") as conn:
+    with db.connect_system() as conn:
         source = _registered(conn, code)
         with registry.open_adapter(source.adapter) as adapter:
             try:
@@ -220,7 +285,7 @@ def source_transfer(
         raise typer.BadParameter("give keys or --which, not both")
     if not given and not which:
         raise typer.BadParameter("give keys, --file or --which")
-    with db.connect(actor=f"{code}-adapter", actor_kind="process") as conn:
+    with db.connect_system() as conn:
         source = _registered(conn, code)
         why = "chosen"
         if which:
@@ -311,7 +376,7 @@ def check_evidence(
         raise typer.BadParameter(str(exc), param_hint="--config") from exc
     requirement_set = requirement_sets.load(settings.requirements)
     system_prompt = load_prompt(settings.prompt)
-    with db.connect(actor="evidence-check", actor_kind="process") as conn:
+    with db.connect_system() as conn:
         trial_ids = _trials_to_judge(conn, ct_numbers, from_file, all_trials, requirement_set)
         if limit is not None:
             trial_ids = trial_ids[:limit]
@@ -479,7 +544,7 @@ def gold_snapshot(
                 client = snapshot.LocalCopyFirst(live, files_from, copied_on)
                 description += f"; document files from a copy of {copied_on} where it holds the same version"
             recording = snapshot.RecordingClient(client, Path(folder), description, dataset=chosen.ref)
-            with db.connect(actor="ctis-adapter", actor_kind="process") as conn:
+            with db.connect_system() as conn:
                 result = stages.transfer(conn, _registered(conn, "ctis"), ctis.CtisAdapter(recording), ct_numbers,
                                          why="gold snapshot", progress=typer.echo)
             index = recording.finish()
@@ -544,7 +609,7 @@ def gold_eval(
                 raise typer.BadParameter(str(exc), param_hint="--snapshot") from exc
             evidence_from = f"frozen snapshot {frozen.name} (sha256 {locked.sha256[:12]}…, made {locked.made_at})"
         typer.echo(f"evidence: {evidence_from}")
-        with db.connect(actor="ctis-adapter", actor_kind="process") as conn:
+        with db.connect_system() as conn:
             source = _registered(conn, "ctis")
             if frozen is not None:
                 # the CTIS adapter as always, answered by the snapshot: everything after the network runs as usual
@@ -557,7 +622,7 @@ def gold_eval(
     typer.echo(transferred.summary())
     _echo_failures(transferred.failed)
     system_prompt = load_prompt(settings.prompt)
-    with db.connect(actor="evidence-check", actor_kind="process") as conn:
+    with db.connect_system() as conn:
         found = core_db.trials_with_scheme(conn, "eu-ct", ct_numbers)
         trial_ids = []
         for ct_number in ct_numbers:

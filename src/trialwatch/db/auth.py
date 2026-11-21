@@ -1,6 +1,6 @@
 """Queries on the auth schema: the people who can sign in to the web interface, and their sessions
 (see db/migrations/*_auth.sql and ADR-006). What a role may do is the chart in trialwatch.auth.actions,
-not data. Each user is also a core.actor (a person with the same name), so the audit log records their
+not data. Users sign in with their email. Each user is also a core.actor (a person named by the email), so the audit log records their
 writes under their own name."""
 
 from dataclasses import dataclass
@@ -15,37 +15,37 @@ from trialwatch.db.core import actor_id
 @dataclass(frozen=True)
 class User:
     id: int
-    username: str
+    email: str
     role: str
     password_hash: str
     disabled_at: datetime | None
     created_at: datetime
 
 
-USER_COLUMNS = "id, username, role, password_hash, disabled_at, created_at"
+USER_COLUMNS = "id, email, role, password_hash, disabled_at, created_at"
 
 
-def add_user(conn: psycopg.Connection, username: str, password_hash: str, role: str) -> int:
+def add_user(conn: psycopg.Connection, email: str, password_hash: str, role: str) -> int:
     """A new user with their core.actor (made if new). Raises psycopg.errors.UniqueViolation when the
     name is taken."""
     # the writer stays whoever adds them (the session's actor); the new user only gets an actor
-    user_actor = actor_id(conn, username, "person")
+    user_actor = actor_id(conn, email, "person")
     row = conn.execute(
-        "INSERT INTO auth.app_user (username, password_hash, role, actor_id) VALUES (%s, %s, %s, %s) RETURNING id",
-        (username, password_hash, role, user_actor),
+        "INSERT INTO auth.app_user (email, password_hash, role, actor_id) VALUES (%s, %s, %s, %s) RETURNING id",
+        (email, password_hash, role, user_actor),
     ).fetchone()
     return row[0]
 
 
-def user_by_name(conn: psycopg.Connection, username: str) -> User | None:
+def user_by_email(conn: psycopg.Connection, email: str) -> User | None:
     with conn.cursor(row_factory=class_row(User)) as cur:
-        cur.execute(f"SELECT {USER_COLUMNS} FROM auth.app_user WHERE username = %s", (username,))
+        cur.execute(f"SELECT {USER_COLUMNS} FROM auth.app_user WHERE email = %s", (email,))
         return cur.fetchone()
 
 
 def users(conn: psycopg.Connection) -> list[User]:
     with conn.cursor(row_factory=class_row(User)) as cur:
-        cur.execute(f"SELECT {USER_COLUMNS} FROM auth.app_user ORDER BY username")
+        cur.execute(f"SELECT {USER_COLUMNS} FROM auth.app_user ORDER BY email")
         return cur.fetchall()
 
 
@@ -56,26 +56,26 @@ def active_admins(conn: psycopg.Connection) -> int:
     return row[0]
 
 
-def set_role(conn: psycopg.Connection, username: str, role: str) -> bool:
+def set_role(conn: psycopg.Connection, email: str, role: str) -> bool:
     """Change a user's role; False when there is no such user."""
-    cur = conn.execute("UPDATE auth.app_user SET role = %s WHERE username = %s", (role, username))
+    cur = conn.execute("UPDATE auth.app_user SET role = %s WHERE email = %s", (role, email))
     return cur.rowcount == 1
 
 
-def set_password_hash(conn: psycopg.Connection, username: str, password_hash: str) -> bool:
-    cur = conn.execute("UPDATE auth.app_user SET password_hash = %s WHERE username = %s", (password_hash, username))
+def set_password_hash(conn: psycopg.Connection, email: str, password_hash: str) -> bool:
+    cur = conn.execute("UPDATE auth.app_user SET password_hash = %s WHERE email = %s", (password_hash, email))
     return cur.rowcount == 1
 
 
-def set_disabled(conn: psycopg.Connection, username: str, disabled: bool) -> bool:
+def set_disabled(conn: psycopg.Connection, email: str, disabled: bool) -> bool:
     """Disable a user (they can't sign in) or enable them again; False when there is no such user."""
     if disabled:
         cur = conn.execute(
-            "UPDATE auth.app_user SET disabled_at = coalesce(disabled_at, clock_timestamp()) WHERE username = %s",
-            (username,),
+            "UPDATE auth.app_user SET disabled_at = coalesce(disabled_at, clock_timestamp()) WHERE email = %s",
+            (email,),
         )
     else:
-        cur = conn.execute("UPDATE auth.app_user SET disabled_at = NULL WHERE username = %s", (username,))
+        cur = conn.execute("UPDATE auth.app_user SET disabled_at = NULL WHERE email = %s", (email,))
     return cur.rowcount == 1
 
 
@@ -96,7 +96,7 @@ def session_user(conn: psycopg.Connection, token_sha256: bytes, idle_since: date
             "UPDATE auth.session s SET last_seen_at = clock_timestamp() FROM auth.app_user u"
             " WHERE s.token_sha256 = %s AND u.id = s.user_id AND u.disabled_at IS NULL"
             " AND s.expires_at > clock_timestamp() AND s.last_seen_at > %s"
-            " RETURNING u.id, u.username, u.role, u.password_hash, u.disabled_at, u.created_at",
+            " RETURNING u.id, u.email, u.role, u.password_hash, u.disabled_at, u.created_at",
             (token_sha256, idle_since),
         )
         return cur.fetchone()
@@ -106,10 +106,10 @@ def drop_session(conn: psycopg.Connection, token_sha256: bytes) -> None:
     conn.execute("DELETE FROM auth.session WHERE token_sha256 = %s", (token_sha256,))
 
 
-def drop_sessions_of(conn: psycopg.Connection, username: str) -> None:
+def drop_sessions_of(conn: psycopg.Connection, email: str) -> None:
     """Sign a user out everywhere (after a change of role, password or a disable)."""
     conn.execute(
-        "DELETE FROM auth.session WHERE user_id = (SELECT id FROM auth.app_user WHERE username = %s)", (username,)
+        "DELETE FROM auth.session WHERE user_id = (SELECT id FROM auth.app_user WHERE email = %s)", (email,)
     )
 
 

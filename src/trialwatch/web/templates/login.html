@@ -6,7 +6,7 @@
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <form class="panel step" method="post" action="/login" style="max-width:360px">
   <input type="hidden" name="next" value="{{ next }}">
-  <label>Username<input type="text" name="username" autocomplete="username" required autofocus></label>
+  <label>Email<input type="email" name="email" autocomplete="username" required autofocus></label>
   <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
   <button>Sign in</button>
 </form>

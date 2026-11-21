@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 import psycopg
 
-from trialwatch.auth import passwords
+from trialwatch.auth import accounts, passwords
 from trialwatch.db import auth as auth_db
 
 COOKIE = "tw_session"
@@ -25,12 +25,12 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
-def sign_in(conn: psycopg.Connection, username: str, password: str) -> str | None:
-    """A new session's token when the name and password are right and the user is enabled, else None.
+def sign_in(conn: psycopg.Connection, email: str, password: str) -> str | None:
+    """A new session's token when the email and password are right and the user is enabled, else None.
     The answer never says which of them was wrong."""
-    user = auth_db.user_by_name(conn, username.strip().lower())
+    user = auth_db.user_by_email(conn, accounts.normalised_email(email))
     if user is None:
-        # the same work as for a real user, so the time taken doesn't tell whether the name exists
+        # the same work as for a real user, so the time taken doesn't tell whether the email is known
         passwords.matches(passwords.UNKNOWN_USER_HASH, password)
         return None
     if not passwords.matches(user.password_hash, password):
@@ -38,7 +38,7 @@ def sign_in(conn: psycopg.Connection, username: str, password: str) -> str | Non
     if user.disabled_at is not None:
         return None
     if passwords.needs_rehash(user.password_hash):
-        auth_db.set_password_hash(conn, user.username, passwords.hashed(password))
+        auth_db.set_password_hash(conn, user.email, passwords.hashed(password))
     auth_db.drop_expired_sessions(conn, now() - IDLE)
     token = secrets.token_urlsafe(32)
     auth_db.add_session(conn, token_hash(token), user.id, now() + LIFETIME)

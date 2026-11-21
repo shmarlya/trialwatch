@@ -6,12 +6,12 @@
 <p class="sub">Who can sign in, and their role. What each role may do is the <a href="/admin/roles">action chart</a>. A change of role or password, or disabling someone, signs them out everywhere. There is always at least one enabled admin.</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="table-wrap"><table>
-  <tr><th>Username</th><th>Role</th><th>Added</th><th>Status</th><th>New password</th></tr>
+  <tr><th>Email</th><th>Role</th><th>Added</th><th>Status</th><th>New password</th></tr>
   {% for row in rows %}
   <tr {% if row.disabled_at %}class="muted"{% endif %}>
-    <td>{{ row.username }}{% if row.username == user.username %} <span class="small muted">(you)</span>{% endif %}</td>
+    <td>{{ row.email }}{% if row.email == user.email %} <span class="small muted">(you)</span>{% endif %}</td>
     <td>
-      <form class="search" method="post" action="/admin/users/{{ row.username }}/role">
+      <form class="search" method="post" action="/admin/users/{{ row.email | urlencode }}/role">
         <select name="role">{% for role in roles %}<option {% if role == row.role %}selected{% endif %}>{{ role }}</option>{% endfor %}</select>
         <button class="secondary small">Change</button>
       </form>
@@ -20,13 +20,13 @@
     <td>
       {% if row.disabled_at %}
       <span class="small">disabled {{ when(row.disabled_at) }}</span>
-      <form method="post" action="/admin/users/{{ row.username }}/enable"><button class="secondary small">Enable</button></form>
+      <form method="post" action="/admin/users/{{ row.email | urlencode }}/enable"><button class="secondary small">Enable</button></form>
       {% else %}
-      <form method="post" action="/admin/users/{{ row.username }}/disable"><button class="secondary small">Disable</button></form>
+      <form method="post" action="/admin/users/{{ row.email | urlencode }}/disable"><button class="secondary small">Disable</button></form>
       {% endif %}
     </td>
     <td>
-      <form class="search" method="post" action="/admin/users/{{ row.username }}/password">
+      <form class="search" method="post" action="/admin/users/{{ row.email | urlencode }}/password">
         <input type="password" name="password" minlength="{{ minimum }}" autocomplete="new-password" required>
         <button class="secondary small">Set</button>
       </form>
@@ -37,7 +37,7 @@
 
 <h2>Add a user</h2>
 <form class="panel step" method="post" action="/admin/users" style="max-width:420px">
-  <label>Username (lower case letters, digits, . _ -)<input type="text" name="username" required pattern="[a-z0-9][a-z0-9._\-]{1,62}"></label>
+  <label>Email (what they sign in with)<input type="email" name="email" autocomplete="off" required></label>
   <label>Password (at least {{ minimum }} characters)<input type="password" name="password" minlength="{{ minimum }}" autocomplete="new-password" required></label>
   <label>Role<select name="role">{% for role in roles %}<option>{{ role }}</option>{% endfor %}</select></label>
   <button>Add</button>

@@ -147,7 +147,7 @@ def default_settings(changes: dict | None = None) -> check_settings.Settings:
 TEST_PASSWORD = "a-test-password-1"
 
 
-def signed_in_client(conn, role: str, username: str | None = None):
+def signed_in_client(conn, role: str, email: str | None = None):
     """A TestClient of the web interface signed in as a new user with `role` (admin or moderator),
     on the test's connection (use with app_conn)."""
     from fastapi.testclient import TestClient
@@ -157,11 +157,11 @@ def signed_in_client(conn, role: str, username: str | None = None):
     from trialwatch.db import core
     from trialwatch.web import app as web
 
-    if username is None:
-        username = f"test-{role}"
+    if email is None:
+        email = f"{role}@test.example"
     core.act_as(conn, "test-setup")
-    auth_db.add_user(conn, username, passwords.hashed(TEST_PASSWORD), role)
-    token = sessions.sign_in(conn, username, TEST_PASSWORD)
+    auth_db.add_user(conn, email, passwords.hashed(TEST_PASSWORD), role)
+    token = sessions.sign_in(conn, email, TEST_PASSWORD)
     client = TestClient(web.app)
     client.cookies.set(sessions.COOKIE, token)
     return client

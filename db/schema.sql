@@ -122,14 +122,14 @@ SET default_table_access_method = heap;
 
 CREATE TABLE auth.app_user (
     id bigint NOT NULL,
-    username text NOT NULL,
+    email text NOT NULL,
     password_hash text NOT NULL,
     role text NOT NULL,
     actor_id bigint NOT NULL,
     disabled_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT app_user_role_check CHECK ((role = ANY (ARRAY['admin'::text, 'moderator'::text]))),
-    CONSTRAINT app_user_username_check CHECK ((username ~ '^[a-z0-9][a-z0-9._-]{1,62}$'::text))
+    CONSTRAINT app_user_email_check CHECK (((email = lower(email)) AND (length(email) <= 254) AND (email ~ '^[^@/[:space:]]+@[^@/[:space:]]+\.[^@/[:space:]]+$'::text))),
+    CONSTRAINT app_user_role_check CHECK ((role = ANY (ARRAY['admin'::text, 'moderator'::text])))
 );
 
 
@@ -936,19 +936,19 @@ ALTER TABLE ONLY auth.app_user
 
 
 --
+-- Name: app_user app_user_email_key; Type: CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.app_user
+    ADD CONSTRAINT app_user_email_key UNIQUE (email);
+
+
+--
 -- Name: app_user app_user_pkey; Type: CONSTRAINT; Schema: auth; Owner: -
 --
 
 ALTER TABLE ONLY auth.app_user
     ADD CONSTRAINT app_user_pkey PRIMARY KEY (id);
-
-
---
--- Name: app_user app_user_username_key; Type: CONSTRAINT; Schema: auth; Owner: -
---
-
-ALTER TABLE ONLY auth.app_user
-    ADD CONSTRAINT app_user_username_key UNIQUE (username);
 
 
 --

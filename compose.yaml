@@ -10,6 +10,9 @@ services:
       # The gold datasets in the mounted data/ (the package's own path is inside the image's venv).
       # They are read here; `gold build` runs on the host, where data/gold/ is writable.
       TRIALWATCH_GOLD_DIR: /app/data/gold
+      # The first admin, added when the web interface starts if no user has this email (ADR-006)
+      TRIALWATCH_ADMIN_EMAIL: ${TRIALWATCH_ADMIN_EMAIL:-}
+      TRIALWATCH_ADMIN_PASSWORD: ${TRIALWATCH_ADMIN_PASSWORD:-}
     volumes:
       # Research files and gold datasets, read-only: data/bruckner/ and data/gold/ are in git
       - ./data:/app/data:ro

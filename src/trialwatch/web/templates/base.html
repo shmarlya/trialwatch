@@ -154,7 +154,7 @@
   {% block header_extra %}{% endblock %}
   <div class="who small">
     {% if user %}
-    <span>{{ user.username }} <span class="muted">({{ user.role }})</span></span>
+    <span>{{ user.email }} <span class="muted">({{ user.role }})</span></span>
     <form method="post" action="/logout"><button class="secondary small">Sign out</button></form>
     {% else %}
     <a href="/login">Sign in</a>

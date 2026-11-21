@@ -1,7 +1,7 @@
 -- migrate:up
 
--- Sign-in for the web interface (ADR-006). Each user has a password and one role (admin or
--- moderator). What a role may do is the chart in src/trialwatch/auth/actions.py, not data here.
+-- Sign-in for the web interface (ADR-006). Each user signs in with their email and a password and
+-- has one role (admin or moderator). What a role may do is the chart in src/trialwatch/auth/actions.py, not data here.
 -- Anyone not signed in can only browse. Each user is also a core.actor, so their writes are audited
 -- under their own name.
 SET LOCAL trialwatch.actor = '1';
@@ -10,7 +10,9 @@ CREATE SCHEMA auth;
 
 CREATE TABLE auth.app_user (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    username text NOT NULL UNIQUE CHECK (username ~ '^[a-z0-9][a-z0-9._-]{1,62}$'),
+    -- lower case, so one address is one user however it is typed; also their core.actor name
+    email text NOT NULL UNIQUE CHECK (email = lower(email) AND length(email) <= 254
+                                      AND email ~ '^[^@/[:space:]]+@[^@/[:space:]]+\.[^@/[:space:]]+$'),
     -- argon2id; never written to the audit log
     password_hash text NOT NULL,
     role text NOT NULL CHECK (role IN ('admin', 'moderator')),

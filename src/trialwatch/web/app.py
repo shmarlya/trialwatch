@@ -21,6 +21,7 @@ import os
 import re
 import threading
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -35,7 +36,7 @@ from fastapi.templating import Jinja2Templates
 import psycopg
 
 from trialwatch import db
-from trialwatch.auth import actions, passwords, sessions
+from trialwatch.auth import accounts, actions, passwords, sessions
 from trialwatch.checks import evidence, model
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
@@ -68,7 +69,15 @@ STEP_TITLES = {
     "error": "Stopped",
 }
 
-app = FastAPI(title="TrialWatch")
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """On start: add the admin named by TRIALWATCH_ADMIN_EMAIL / _PASSWORD if they are not a user yet
+    (trialwatch.auth.accounts); a half-set or invalid seed stops the server with the reason."""
+    accounts.seed_from_environment(db.connect)
+    yield
+
+
+app = FastAPI(title="TrialWatch", lifespan=lifespan)
 jobs = Jobs()
 
 # The names this machine answers to; TRIALWATCH_HOSTS adds others (comma-separated), e.g. when
@@ -262,11 +271,11 @@ class LoginThrottle:
 login_throttle = LoginThrottle()
 
 
-def throttle_keys(request: Request, username: str) -> list[str]:
+def throttle_keys(request: Request, email: str) -> list[str]:
     address = "unknown"
     if request.client is not None:
         address = request.client.host
-    return [f"user:{username.strip().lower()}", f"address:{address}"]
+    return [f"user:{accounts.normalised_email(email)}", f"address:{address}"]
 
 
 def secure_cookie(request: Request) -> bool:
@@ -282,18 +291,18 @@ def login_page(request: Request, next: str = "/", error: str | None = None) -> R
 
 
 @app.post("/login")
-def login(request: Request, username: Annotated[str, Form()], password: Annotated[str, Form()],
+def login(request: Request, email: Annotated[str, Form()], password: Annotated[str, Form()],
           next: Annotated[str, Form()] = "/") -> Response:
-    keys = throttle_keys(request, username)
+    keys = throttle_keys(request, email)
     target = safe_next(next)
     if login_throttle.blocked(keys):
         message = "too many wrong tries: wait a few minutes"
         return RedirectResponse(f"/login?next={url_quote(target)}&error={url_quote(message)}", status_code=303)
     with db.connect() as conn:
-        token = sessions.sign_in(conn, username, password)
+        token = sessions.sign_in(conn, email, password)
     if token is None:
         login_throttle.failed(keys)
-        message = "wrong username or password"
+        message = "wrong email or password"
         return RedirectResponse(f"/login?next={url_quote(target)}&error={url_quote(message)}", status_code=303)
     login_throttle.succeeded(keys)
     response = RedirectResponse(target, status_code=303)
@@ -326,75 +335,79 @@ def _users_with_error(message: str) -> RedirectResponse:
     return RedirectResponse(f"/admin/users?error={url_quote(message)}", status_code=303)
 
 
-def _is_last_admin(conn, username: str) -> bool:
-    """Whether `username` is the only enabled admin (then they can't be demoted or disabled: nobody
+def _is_last_admin(conn, email: str) -> bool:
+    """Whether `email` is the only enabled admin (then they can't be demoted or disabled: nobody
     would be left to manage users)."""
-    target = auth_db.user_by_name(conn, username)
+    target = auth_db.user_by_email(conn, email)
     if target is None or target.role != actions.ADMIN or target.disabled_at is not None:
         return False
     return auth_db.active_admins(conn) <= 1
 
 
 @app.post("/admin/users")
-def add_user(username: Annotated[str, Form()], password: Annotated[str, Form()], role: Annotated[str, Form()],
+def add_user(email: Annotated[str, Form()], password: Annotated[str, Form()], role: Annotated[str, Form()],
              user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
     if role not in actions.ROLES:
         return _users_with_error(f"unknown role {role!r}")
+    chosen = accounts.normalised_email(email)
+    problem = accounts.email_problem(chosen)
+    if problem is not None:
+        return _users_with_error(problem)
     try:
         password_hash = passwords.hashed(password)
-        with db.connect(actor=user.username) as conn:
-            auth_db.add_user(conn, username.strip().lower(), password_hash, role)
+        with db.connect(actor=user.email) as conn:
+            auth_db.add_user(conn, chosen, password_hash, role)
     except ValueError as exc:
         return _users_with_error(str(exc))
-    except psycopg.Error as exc:  # a name taken, or not of the allowed characters
+    except psycopg.Error as exc:  # an email already taken
         return _users_with_error(_short_error(exc))
     return RedirectResponse("/admin/users", status_code=303)
 
 
-@app.post("/admin/users/{username}/role")
-def change_role(username: str, role: Annotated[str, Form()],
+@app.post("/admin/users/{email}/role")
+def change_role(email: str, role: Annotated[str, Form()],
                 user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
     if role not in actions.ROLES:
         return _users_with_error(f"unknown role {role!r}")
-    with db.connect(actor=user.username) as conn:
-        if role != actions.ADMIN and _is_last_admin(conn, username):
+    with db.connect(actor=user.email) as conn:
+        if role != actions.ADMIN and _is_last_admin(conn, email):
             return _users_with_error("the last admin can't be given another role")
-        if not auth_db.set_role(conn, username, role):
-            raise HTTPException(404, f"no user {username}")
-        auth_db.drop_sessions_of(conn, username)
+        if not auth_db.set_role(conn, email, role):
+            raise HTTPException(404, f"no user {email}")
+        auth_db.drop_sessions_of(conn, email)
     return RedirectResponse("/admin/users", status_code=303)
 
 
-@app.post("/admin/users/{username}/password")
-def reset_password(username: str, password: Annotated[str, Form()],
+@app.post("/admin/users/{email}/password")
+def reset_password(email: str, password: Annotated[str, Form()],
                    user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
     try:
         password_hash = passwords.hashed(password)
     except ValueError as exc:
         return _users_with_error(str(exc))
-    with db.connect(actor=user.username) as conn:
-        if not auth_db.set_password_hash(conn, username, password_hash):
-            raise HTTPException(404, f"no user {username}")
-        auth_db.drop_sessions_of(conn, username)
+    with db.connect(actor=user.email) as conn:
+        if not auth_db.set_password_hash(conn, email, password_hash):
+            raise HTTPException(404, f"no user {email}")
+        auth_db.drop_sessions_of(conn, email)
     return RedirectResponse("/admin/users", status_code=303)
 
 
-@app.post("/admin/users/{username}/disable")
-def disable_user(username: str, user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
-    with db.connect(actor=user.username) as conn:
-        if _is_last_admin(conn, username):
+@app.post("/admin/users/{email}/disable")
+def disable_user(email: str, user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
+    with db.connect(actor=user.email) as conn:
+        if _is_last_admin(conn, email):
             return _users_with_error("the last admin can't be disabled")
-        if not auth_db.set_disabled(conn, username, True):
-            raise HTTPException(404, f"no user {username}")
-        auth_db.drop_sessions_of(conn, username)
+        if not auth_db.set_disabled(conn, email, True):
+            raise HTTPException(404, f"no user {email}")
+        auth_db.drop_sessions_of(conn, email)
     return RedirectResponse("/admin/users", status_code=303)
 
 
-@app.post("/admin/users/{username}/enable")
-def enable_user(username: str, user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
-    with db.connect(actor=user.username) as conn:
-        if not auth_db.set_disabled(conn, username, False):
-            raise HTTPException(404, f"no user {username}")
+@app.post("/admin/users/{email}/enable")
+def enable_user(email: str, user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
+    with db.connect(actor=user.email) as conn:
+        if not auth_db.set_disabled(conn, email, False):
+            raise HTTPException(404, f"no user {email}")
     return RedirectResponse("/admin/users", status_code=303)
 
 
@@ -643,7 +656,7 @@ def start_job(
                              trial_ids=chosen_trials, every=every, limit=chosen_limit, config=config.strip(),
                              dry_run=dry_run)
     try:
-        job = jobs.start(job_request, actor=user.username)
+        job = jobs.start(job_request, actor=user.email)
     except (ValueError, JobBusy) as exc:
         return _redirect_back(back, str(exc))
     return RedirectResponse(f"/jobs/{job.id}", status_code=303)
@@ -655,7 +668,7 @@ def stop_job(job_id: int, user: auth_db.User = Depends(Requires("job.stop.own", 
     job = jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "no such job")
-    if job.actor == user.username:
+    if job.actor == user.email:
         require(user, "job.stop.own")
     else:
         require(user, "job.stop.any")
@@ -756,7 +769,7 @@ def add_trial(
                               status=_or_none(status), primary_endpoints=endpoint_lines)
     try:
         # Recorded as the signed-in person
-        with db.connect(actor=user.username) as conn:
+        with db.connect(actor=user.email) as conn:
             trial_id = manual.add_trial(conn, entry, _uploads(files), kind)
     except manual.AlreadyKnown as exc:
         message = f"Already in the database ({exc}). Add documents here instead."
@@ -793,7 +806,7 @@ def upload_document(
     if not uploads:
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote('choose a file to upload')}", status_code=303)
     try:
-        with db.connect(actor=user.username) as conn:
+        with db.connect(actor=user.email) as conn:
             manual.add_document(conn, trial_id, uploads[0], kind, _or_none(title))
     except Exception as exc:  # shown on the trial page
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote(_short_error(exc))}", status_code=303)
@@ -810,7 +823,7 @@ def transfer_trial(trial_id: int, source: Annotated[str, Form()],
         message = f"this trial has no key at {source} to transfer"
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote(message)}", status_code=303)
     try:
-        job = jobs.start(JobRequest(step="transfer", source=source, keys=keys), actor=user.username)
+        job = jobs.start(JobRequest(step="transfer", source=source, keys=keys), actor=user.email)
     except (ValueError, JobBusy) as exc:
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote(str(exc))}", status_code=303)
     return RedirectResponse(f"/jobs/{job.id}", status_code=303)
@@ -824,7 +837,7 @@ def add_sponsor(trial_id: int, name: Annotated[str, Form()], primary: Annotated[
     if not cleaned:
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote('a sponsor needs a name')}#sponsors",
                                 status_code=303)
-    with db.connect(actor=user.username) as conn:
+    with db.connect(actor=user.email) as conn:
         core.add_trial_sponsor(conn, trial_id, core.Sponsor(name=cleaned, primary=primary), manual.SOURCE)
     return RedirectResponse(f"/trials/{trial_id}#sponsors", status_code=303)
 
@@ -833,7 +846,7 @@ def add_sponsor(trial_id: int, name: Annotated[str, Form()], primary: Annotated[
 def remove_sponsor(trial_id: int, organisation_id: int,
                    user: auth_db.User = Depends(Requires("trial.sponsor.edit"))) -> Response:
     """A person removes a sponsor from the trial: kept as removed, and a source listing it again won't bring it back."""
-    with db.connect(actor=user.username) as conn:
+    with db.connect(actor=user.email) as conn:
         core.remove_trial_sponsor(conn, trial_id, organisation_id)
     return RedirectResponse(f"/trials/{trial_id}#sponsors", status_code=303)
 
@@ -967,7 +980,7 @@ def register_source(adapter: Annotated[str, Form()], code: Annotated[str, Form()
     try:
         adapter_type = registry.adapter_class(adapter)
         chosen_code = code.strip() or adapter_type.name
-        with db.connect(actor=user.username) as conn:
+        with db.connect(actor=user.email) as conn:
             core.register_source(conn, code=chosen_code, kind=adapter_type.kind, name=name.strip() or adapter_type.label,
                                  url=adapter_type.url, adapter=adapter, config=adapter_type().default_config())
     except Exception as exc:  # e.g. a code already used: shown on the page
@@ -1009,7 +1022,7 @@ def source_page(request: Request, code: str, state: str = "", q: str = "", page:
 def save_source_config(code: str, config: Annotated[str, Form()], enabled: Annotated[bool, Form()] = False,
                        user: auth_db.User = Depends(Requires("source.configure"))) -> Response:
     """Replace the source's config (one current config; every run records the one it used)."""
-    with db.connect(actor=user.username) as conn:
+    with db.connect(actor=user.email) as conn:
         source = core.registered_source(conn, code)
         if source is None:
             raise HTTPException(404, f"no source {code}")

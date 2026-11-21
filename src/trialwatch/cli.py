@@ -12,7 +12,7 @@ import psycopg
 import typer
 
 from trialwatch import db
-from trialwatch.auth import actions, passwords
+from trialwatch.auth import accounts, actions, passwords
 from trialwatch.checks import evidence
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
@@ -430,23 +430,26 @@ def _role(role: str) -> str:
 
 @user_app.command("add")
 def user_add(
-    username: Annotated[str, typer.Argument(help="Lower case letters, digits, . _ -")],
+    email: Annotated[str, typer.Argument(help="Their email address: what they sign in with")],
     role: Annotated[str, typer.Option(help="admin or moderator")],
     password: Annotated[str, typer.Option(prompt=True, hide_input=True, confirmation_prompt=True,
                                           help="Asked for when not given")],
 ) -> None:
     """Add a person who can sign in to the web interface (the first admin is added this way)."""
     chosen_role = _role(role)
-    problem = passwords.password_problem(password)
+    chosen = accounts.normalised_email(email)
+    problem = accounts.email_problem(chosen)
+    if problem is None:
+        problem = passwords.password_problem(password)
     if problem is not None:
         raise typer.BadParameter(problem)
     try:
         with db.connect() as conn:
-            auth_db.add_user(conn, username.strip().lower(), passwords.hashed(password), chosen_role)
+            auth_db.add_user(conn, chosen, passwords.hashed(password), chosen_role)
     except psycopg.Error as exc:
         typer.echo(f"not added: {str(exc).splitlines()[0]}", err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"added {username.strip().lower()} as {chosen_role}")
+    typer.echo(f"added {chosen} as {chosen_role}")
 
 
 @user_app.command("list")
@@ -458,46 +461,49 @@ def user_list() -> None:
         state = ""
         if row.disabled_at is not None:
             state = f"  disabled {row.disabled_at:%Y-%m-%d}"
-        typer.echo(f"{row.username:<24} {row.role:<10}{state}")
+        typer.echo(f"{row.email:<40} {row.role:<10}{state}")
 
 
 @user_app.command("role")
-def user_role(username: str, role: Annotated[str, typer.Argument(help="admin or moderator")]) -> None:
+def user_role(email: str, role: Annotated[str, typer.Argument(help="admin or moderator")]) -> None:
     """Change a user's role (they are signed out everywhere)."""
     chosen_role = _role(role)
+    email = accounts.normalised_email(email)
     with db.connect() as conn:
-        if not auth_db.set_role(conn, username, chosen_role):
-            raise typer.BadParameter(f"no user {username!r}")
-        auth_db.drop_sessions_of(conn, username)
-    typer.echo(f"{username} is now {chosen_role}")
+        if not auth_db.set_role(conn, email, chosen_role):
+            raise typer.BadParameter(f"no user {email!r}")
+        auth_db.drop_sessions_of(conn, email)
+    typer.echo(f"{email} is now {chosen_role}")
 
 
 @user_app.command("password")
 def user_password(
-    username: str,
+    email: str,
     password: Annotated[str, typer.Option(prompt=True, hide_input=True, confirmation_prompt=True,
                                           help="Asked for when not given")],
 ) -> None:
     """Set a user's password (they are signed out everywhere)."""
+    email = accounts.normalised_email(email)
     problem = passwords.password_problem(password)
     if problem is not None:
         raise typer.BadParameter(problem)
     with db.connect() as conn:
-        if not auth_db.set_password_hash(conn, username, passwords.hashed(password)):
-            raise typer.BadParameter(f"no user {username!r}")
-        auth_db.drop_sessions_of(conn, username)
-    typer.echo(f"password of {username} set")
+        if not auth_db.set_password_hash(conn, email, passwords.hashed(password)):
+            raise typer.BadParameter(f"no user {email!r}")
+        auth_db.drop_sessions_of(conn, email)
+    typer.echo(f"password of {email} set")
 
 
 @user_app.command("disable")
-def user_disable(username: str, enable: Annotated[bool, typer.Option("--enable", help="Enable them again")] = False) -> None:
+def user_disable(email: str, enable: Annotated[bool, typer.Option("--enable", help="Enable them again")] = False) -> None:
     """Stop a user signing in (and sign them out), or with --enable let them in again."""
+    email = accounts.normalised_email(email)
     with db.connect() as conn:
-        if not auth_db.set_disabled(conn, username, not enable):
-            raise typer.BadParameter(f"no user {username!r}")
+        if not auth_db.set_disabled(conn, email, not enable):
+            raise typer.BadParameter(f"no user {email!r}")
         if not enable:
-            auth_db.drop_sessions_of(conn, username)
+            auth_db.drop_sessions_of(conn, email)
     if enable:
-        typer.echo(f"{username} enabled")
+        typer.echo(f"{email} enabled")
     else:
-        typer.echo(f"{username} disabled")
+        typer.echo(f"{email} disabled")

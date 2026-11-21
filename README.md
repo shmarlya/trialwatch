@@ -37,13 +37,13 @@ A small local site for the workflow (ADR-005): on the Sources page, sync a regis
 uv run trialwatch web --reload
 ```
 
-Anyone may browse; every action needs a signed-in admin or moderator (ADR-006). What each role may do is one chart, src/trialwatch/auth/actions.py, shown at /admin/roles: moderators add trials, upload documents, edit sponsors, transfer evidence, run dry-run checks and stop their own jobs; only admins sync and configure sources, run checks that call the model, stop other people's jobs and manage users (/admin/users). The same rules hold for scripts calling the routes (401 when not signed in, 403 when the role may not), and writes are recorded as the signed-in person. There is no sign-up; add the first admin from the terminal (it asks for a password of at least 12 characters):
+Anyone may browse; every action needs a signed-in admin or moderator (ADR-006). What each role may do is one chart, src/trialwatch/auth/actions.py, shown at /admin/roles: moderators add trials, upload documents, edit sponsors, transfer evidence, run dry-run checks and stop their own jobs; only admins sync and configure sources, run checks that call the model, stop other people's jobs and manage users (/admin/users). The same rules hold for scripts calling the routes (401 when not signed in, 403 when the role may not), and writes are recorded as the signed-in person. People sign in with their email and a password (at least 12 characters). There is no sign-up. The first admin comes from `.env`: set `TRIALWATCH_ADMIN_EMAIL` and `TRIALWATCH_ADMIN_PASSWORD` (see `.env.example`), and `trialwatch web` adds that admin when it starts, if no user has that email yet. It never changes an existing user, so changing the password in `.env` later does nothing. Or add one from the terminal (it asks for the password):
 
 ```bash
-uv run trialwatch user add alice --role admin
+uv run trialwatch user add you@example.org --role admin
 ```
 
-`user list`, `user role NAME ROLE`, `user password NAME` and `user disable NAME` (`--enable` to undo) manage them; the command line itself is not limited by roles, since it holds the database password. Served on a network (`--host` with `TRIALWATCH_HOSTS`), put HTTPS in front: off this machine the session cookie is sent over HTTPS only.
+`user list`, `user role EMAIL ROLE`, `user password EMAIL` and `user disable EMAIL` (`--enable` to undo) manage them; the command line itself is not limited by roles, since it holds the database password. Served on a network (`--host` with `TRIALWATCH_HOSTS`), put HTTPS in front: off this machine the session cookie is sent over HTTPS only.
 
 It opens on http://127.0.0.1:8010 and reads the database and `ANTHROPIC_API_KEY` from `.env`. Model checks start as dry runs; untick "dry run" to send. Long jobs can be stopped between trials; what they did so far is kept. A job that dies with the server (a restart, `--reload`) leaves its run marked running, and the next run closes it as failed. The site answers only requests addressed to this machine (`TRIALWATCH_HOSTS` adds other names) and takes form posts only from its own pages; a stored PDF opens in the browser's viewer, any other file is downloaded.
 

@@ -3,7 +3,7 @@
 {% block title %}Workflow · TrialWatch{% endblock %}
 {% block content %}
 <h1>Workflow</h1>
-<p class="sub">Sync a source's list → transfer the evidence of the trials you want (or add a trial by hand) → check each trial against every results document linked to it. Only trials whose evidence came in completely can be checked.{% if user %} Changes are recorded as <b>{{ user.username }}</b>.{% else %} <a href="/login">Sign in</a> to start a step.{% endif %}</p>
+<p class="sub">Sync a source's list → transfer the evidence of the trials you want (or add a trial by hand) → check each trial against every results document linked to it. Only trials whose evidence came in completely can be checked.{% if user %} Changes are recorded as <b>{{ user.email }}</b>.{% else %} <a href="/login">Sign in</a> to start a step.{% endif %}</p>
 
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 {% if running %}

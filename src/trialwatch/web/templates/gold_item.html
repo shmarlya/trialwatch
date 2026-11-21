@@ -11,15 +11,17 @@
   {% if trial_id is not none %}
   <a class="button secondary" href="/trials/{{ trial_id }}">Open our trial {{ trial_id }}</a>
   {% endif %}
-  {% if trial_id is not none and ready %}
+  {% if not user %}
+  {% elif trial_id is not none and ready and can("check.dry_run") %}
   <form method="post" action="/jobs">
     <input type="hidden" name="step" value="evidence">
     <input type="hidden" name="trial_ids" value="{{ trial_id }}">
     <input type="hidden" name="config" value="{{ defaults.config }}">
+    {% if not can("check.run") %}<input type="hidden" name="dry_run" value="true">{% endif %}
     <input type="hidden" name="back" value="/gold/{{ dataset.ref }}/{{ item.key }}">
-    <button {% if running %}disabled{% endif %}>Check it (setup {{ defaults.config }})</button>
+    <button {% if running %}disabled{% endif %}>Check it (setup {{ defaults.config }}){% if not can("check.run") %}, dry run{% endif %}</button>
   </form>
-  {% elif ct_numbers %}
+  {% elif ct_numbers and can("trial.transfer") %}
   <form method="post" action="/jobs">
     <input type="hidden" name="step" value="transfer">
     <input type="hidden" name="source" value="ctis">
@@ -28,7 +30,7 @@
     <button {% if running %}disabled{% endif %}>Transfer evidence from CTIS</button>
   </form>
   <span class="small muted">{% if trial_id is not none %}its evidence is not transferred completely yet{% else %}not in our database yet{% endif %}: brings in its record and documents and reads them, then you can check it</span>
-  {% else %}
+  {% elif trial_id is none and can("trial.create") %}
   <span class="small muted">Not in our database. Add it on the <a href="/trials/new">new trial page</a>.</span>
   {% endif %}
 </div>

@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "anthropic>=2.8.0",
+    "argon2-cffi>=23.1.0",
     "cryptography>=50.0.2",
     "fastapi>=0.163.2",
     "httpx>=0.28.1",

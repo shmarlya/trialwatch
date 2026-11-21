@@ -141,3 +141,33 @@ def default_settings(changes: dict | None = None) -> check_settings.Settings:
         # the prepared changes are passed as keyword arguments to the library call
         chosen = dataclasses.replace(chosen, **changes)
     return chosen
+
+
+# A test user's password (only in the test database, rolled back after each test)
+TEST_PASSWORD = "a-test-password-1"
+
+
+def signed_in_client(conn, role: str, username: str | None = None):
+    """A TestClient of the web interface signed in as a new user with `role` (admin or moderator),
+    on the test's connection (use with app_conn)."""
+    from fastapi.testclient import TestClient
+
+    from trialwatch.auth import passwords, sessions
+    from trialwatch.db import auth as auth_db
+    from trialwatch.db import core
+    from trialwatch.web import app as web
+
+    if username is None:
+        username = f"test-{role}"
+    core.act_as(conn, "test-setup")
+    auth_db.add_user(conn, username, passwords.hashed(TEST_PASSWORD), role)
+    token = sessions.sign_in(conn, username, TEST_PASSWORD)
+    client = TestClient(web.app)
+    client.cookies.set(sessions.COOKIE, token)
+    return client
+
+
+@pytest.fixture
+def admin_client(app_conn):
+    """The web interface signed in as an admin, who may do every action."""
+    return signed_in_client(app_conn, "admin")

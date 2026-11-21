@@ -62,8 +62,8 @@ def test_only_requests_addressed_to_this_machine_are_answered(monkeypatch):
     assert client.get("/requirements", headers={"host": "192.168.1.20"}).status_code == 200
 
 
-def test_form_posts_are_taken_only_from_the_interfaces_own_pages():
-    client = TestClient(web.app)
+def test_form_posts_are_taken_only_from_the_interfaces_own_pages(admin_client):
+    client = admin_client
     # any page open in the browser could otherwise post a form here (cross-site request forgery)
     refused = client.post("/jobs/999/stop", headers={"origin": "https://evil.example"}, follow_redirects=False)
     assert (refused.status_code, refused.text) == (403, "refused: a form post from another site ('evil.example')")
@@ -75,12 +75,13 @@ def test_form_posts_are_taken_only_from_the_interfaces_own_pages():
                              follow_redirects=False)
     assert other_port.status_code == 403
     # its own pages; and a client that is not a browser page (no Origin, no Referer)
+    # (taken, and answered: there is no job 999)
     own = client.post("/jobs/999/stop", headers={"origin": "http://testserver"}, follow_redirects=False)
-    assert (own.status_code, own.headers["location"]) == (303, "/jobs/999")
+    assert own.status_code == 404
     own_page = client.post("/jobs/999/stop", headers={"host": "localhost:8010", "referer": "http://localhost:8010/"},
                            follow_redirects=False)
-    assert own_page.status_code == 303
-    assert client.post("/jobs/999/stop", follow_redirects=False).status_code == 303
+    assert own_page.status_code == 404
+    assert client.post("/jobs/999/stop", follow_redirects=False).status_code == 404
     # following a link from elsewhere changes nothing: reading is answered
     assert client.get("/requirements", headers={"referer": "https://evil.example/"}).status_code == 200
     # and a form only ever sends the browser back to one of the interface's own pages
@@ -108,9 +109,9 @@ def test_a_stored_pdf_is_shown_and_anything_else_is_downloaded(app_conn):
     assert client.get("/files/not-a-hash/raw").status_code == 404
 
 
-def test_a_trial_page_says_why_it_cannot_be_checked_yet(app_conn):
+def test_a_trial_page_says_why_it_cannot_be_checked_yet(app_conn, admin_client):
     trial_id = listed_only(app_conn)
-    client = TestClient(web.app)
+    client = admin_client
     page = client.get(f"/trials/{trial_id}")
     assert page.status_code == 200
     assert "It can't be checked yet: ctis: evidence not transferred." in page.text
@@ -122,9 +123,9 @@ def test_a_trial_page_says_why_it_cannot_be_checked_yet(app_conn):
     assert workflow.status_code == 200 and CT in workflow.text
 
 
-def test_checking_a_trial_whose_evidence_is_not_complete_goes_back_with_why(app_conn):
+def test_checking_a_trial_whose_evidence_is_not_complete_goes_back_with_why(app_conn, admin_client):
     trial_id = listed_only(app_conn)
-    client = TestClient(web.app)
+    client = admin_client
     response = client.post("/jobs", data={"step": "evidence", "trial_ids": [str(trial_id)],
                                           "back": f"/trials/{trial_id}"}, follow_redirects=False)
     assert response.status_code == 303
@@ -137,8 +138,8 @@ def test_checking_a_trial_whose_evidence_is_not_complete_goes_back_with_why(app_
     assert web.jobs.running() is None
 
 
-def test_a_bad_ct_number_goes_back_with_a_message(database_url):
-    client = TestClient(web.app)
+def test_a_bad_ct_number_goes_back_with_a_message(admin_client):
+    client = admin_client
     response = client.post("/jobs", data={"step": "transfer", "source": "ctis",
                                           "key_text": "2022-500044-38-01, nonsense", "back": "/sources/ctis"},
                            follow_redirects=False)
@@ -146,10 +147,10 @@ def test_a_bad_ct_number_goes_back_with_a_message(database_url):
     assert response.headers["location"].startswith("/sources/ctis?error=not%20an%20EU%20CT%20number")
 
 
-def test_a_trial_typed_in_takes_valid_identifiers_and_pdf_files_only(app_conn, monkeypatch):
+def test_a_trial_typed_in_takes_valid_identifiers_and_pdf_files_only(app_conn, admin_client, monkeypatch):
     monkeypatch.setattr("trialwatch.sources.pages.extract_pages", text_of_pdf)
     core.act_as(app_conn, "test-person")
-    client = TestClient(web.app)
+    client = admin_client
     created = client.post("/trials/new", data={"title": "A typed-in study", "schemes": ["nct"], "values": ["NCT09999970"]},
                           files=[("files", ("results.pdf", b"%PDF-1.7 24 participants", "application/pdf"))],
                           follow_redirects=False)

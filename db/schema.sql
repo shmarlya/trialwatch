@@ -16,6 +16,13 @@ SET client_min_messages = warning;
 SET row_security = off;
 
 --
+-- Name: auth; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA auth;
+
+
+--
 -- Name: checks; Type: SCHEMA; Schema: -; Owner: -
 --
 
@@ -108,6 +115,58 @@ $$;
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
+
+--
+-- Name: app_user; Type: TABLE; Schema: auth; Owner: -
+--
+
+CREATE TABLE auth.app_user (
+    id bigint NOT NULL,
+    username text NOT NULL,
+    password_hash text NOT NULL,
+    role text NOT NULL,
+    actor_id bigint NOT NULL,
+    disabled_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT app_user_role_check CHECK ((role = ANY (ARRAY['admin'::text, 'moderator'::text]))),
+    CONSTRAINT app_user_username_check CHECK ((username ~ '^[a-z0-9][a-z0-9._-]{1,62}$'::text))
+);
+
+
+--
+-- Name: TABLE app_user; Type: COMMENT; Schema: auth; Owner: -
+--
+
+COMMENT ON TABLE auth.app_user IS 'people who can sign in to the web interface; their role picks their actions (auth/actions.py)';
+
+
+--
+-- Name: app_user_id_seq; Type: SEQUENCE; Schema: auth; Owner: -
+--
+
+ALTER TABLE auth.app_user ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME auth.app_user_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: session; Type: TABLE; Schema: auth; Owner: -
+--
+
+CREATE TABLE auth.session (
+    token_sha256 bytea NOT NULL,
+    user_id bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    CONSTRAINT session_token_sha256_check CHECK ((length(token_sha256) = 32))
+);
+
 
 --
 -- Name: evidence; Type: TABLE; Schema: checks; Owner: -
@@ -869,6 +928,38 @@ CREATE TABLE public.schema_migrations (
 
 
 --
+-- Name: app_user app_user_actor_id_key; Type: CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.app_user
+    ADD CONSTRAINT app_user_actor_id_key UNIQUE (actor_id);
+
+
+--
+-- Name: app_user app_user_pkey; Type: CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.app_user
+    ADD CONSTRAINT app_user_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: app_user app_user_username_key; Type: CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.app_user
+    ADD CONSTRAINT app_user_username_key UNIQUE (username);
+
+
+--
+-- Name: session session_pkey; Type: CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.session
+    ADD CONSTRAINT session_pkey PRIMARY KEY (token_sha256);
+
+
+--
 -- Name: evidence evidence_pkey; Type: CONSTRAINT; Schema: checks; Owner: -
 --
 
@@ -1125,6 +1216,13 @@ ALTER TABLE ONLY public.schema_migrations
 
 
 --
+-- Name: session_user_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX session_user_idx ON auth.session USING btree (user_id);
+
+
+--
 -- Name: evidence_question_idx; Type: INDEX; Schema: checks; Owner: -
 --
 
@@ -1234,6 +1332,13 @@ CREATE INDEX trial_source_trial_idx ON core.trial_source USING btree (trial_id);
 --
 
 CREATE INDEX trial_sponsor_organisation_idx ON core.trial_sponsor USING btree (organisation_id);
+
+
+--
+-- Name: app_user app_user_audit; Type: TRIGGER; Schema: auth; Owner: -
+--
+
+CREATE TRIGGER app_user_audit AFTER INSERT OR DELETE OR UPDATE ON auth.app_user FOR EACH ROW EXECUTE FUNCTION core.audit('id', 'password_hash');
 
 
 --
@@ -1381,6 +1486,22 @@ CREATE TRIGGER trial_source_audit AFTER INSERT OR DELETE OR UPDATE ON core.trial
 --
 
 CREATE TRIGGER trial_sponsor_audit AFTER INSERT OR DELETE OR UPDATE ON core.trial_sponsor FOR EACH ROW EXECUTE FUNCTION core.audit('trial_id,organisation_id');
+
+
+--
+-- Name: app_user app_user_actor_id_fkey; Type: FK CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.app_user
+    ADD CONSTRAINT app_user_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES core.actor(id);
+
+
+--
+-- Name: session session_user_id_fkey; Type: FK CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.session
+    ADD CONSTRAINT session_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.app_user(id) ON DELETE CASCADE;
 
 
 --
@@ -1884,4 +2005,5 @@ ALTER TABLE ONLY core.trial_sponsor
 
 INSERT INTO public.schema_migrations (version) VALUES
     ('20261121120000'),
-    ('20261121180000');
+    ('20261121180000'),
+    ('20261121200000');

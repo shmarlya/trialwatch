@@ -1,5 +1,6 @@
 """TrialWatch's command line: the workflow steps (ADR-005: register a source, sync its list, transfer
-evidence), the evidence check (ADR-004) and the gold datasets (ADR-003). Every command reads .env
+evidence), the evidence check (ADR-004), the gold datasets (ADR-003) and the web interface's users
+(ADR-006). Every command reads .env
 first, so outside compose it uses the same database and API key as the web interface."""
 
 import json
@@ -7,13 +8,16 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
 
+import psycopg
 import typer
 
 from trialwatch import db
+from trialwatch.auth import actions, passwords
 from trialwatch.checks import evidence
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
 from trialwatch.checks.model import load_prompt
+from trialwatch.db import auth as auth_db
 from trialwatch.db import core as core_db
 from trialwatch.env import load_env_file
 from trialwatch.gold import bruckner, datasets
@@ -28,6 +32,8 @@ check_app = typer.Typer(no_args_is_help=True, help="Our checks: rules and model 
 app.add_typer(check_app, name="check")
 gold_app = typer.Typer(no_args_is_help=True, help="Gold datasets: hand-checked answers we compare our checks against.")
 app.add_typer(gold_app, name="gold")
+user_app = typer.Typer(no_args_is_help=True, help="People who can sign in to the web interface, and their role (ADR-006).")
+app.add_typer(user_app, name="user")
 
 # Calls go to Anthropic's API itself, whatever ANTHROPIC_BASE_URL a shell may set (e.g. a proxy)
 ANTHROPIC_API = "https://api.anthropic.com"
@@ -411,3 +417,87 @@ def gold_compare_run(
         typer.echo(line)
     for line in gold_compare.disagreement_lines(scored):
         typer.echo(line, err=True)
+
+
+# --- users of the web interface (ADR-006) ---------------------------------------------------------
+# The command line itself is not limited by roles: whoever runs it has the database's password.
+
+def _role(role: str) -> str:
+    if role not in actions.ROLES:
+        raise typer.BadParameter(f"the role is one of {', '.join(actions.ROLES)}")
+    return role
+
+
+@user_app.command("add")
+def user_add(
+    username: Annotated[str, typer.Argument(help="Lower case letters, digits, . _ -")],
+    role: Annotated[str, typer.Option(help="admin or moderator")],
+    password: Annotated[str, typer.Option(prompt=True, hide_input=True, confirmation_prompt=True,
+                                          help="Asked for when not given")],
+) -> None:
+    """Add a person who can sign in to the web interface (the first admin is added this way)."""
+    chosen_role = _role(role)
+    problem = passwords.password_problem(password)
+    if problem is not None:
+        raise typer.BadParameter(problem)
+    try:
+        with db.connect() as conn:
+            auth_db.add_user(conn, username.strip().lower(), passwords.hashed(password), chosen_role)
+    except psycopg.Error as exc:
+        typer.echo(f"not added: {str(exc).splitlines()[0]}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"added {username.strip().lower()} as {chosen_role}")
+
+
+@user_app.command("list")
+def user_list() -> None:
+    """Every user with their role, and whether they are disabled."""
+    with db.connect() as conn:
+        rows = auth_db.users(conn)
+    for row in rows:
+        state = ""
+        if row.disabled_at is not None:
+            state = f"  disabled {row.disabled_at:%Y-%m-%d}"
+        typer.echo(f"{row.username:<24} {row.role:<10}{state}")
+
+
+@user_app.command("role")
+def user_role(username: str, role: Annotated[str, typer.Argument(help="admin or moderator")]) -> None:
+    """Change a user's role (they are signed out everywhere)."""
+    chosen_role = _role(role)
+    with db.connect() as conn:
+        if not auth_db.set_role(conn, username, chosen_role):
+            raise typer.BadParameter(f"no user {username!r}")
+        auth_db.drop_sessions_of(conn, username)
+    typer.echo(f"{username} is now {chosen_role}")
+
+
+@user_app.command("password")
+def user_password(
+    username: str,
+    password: Annotated[str, typer.Option(prompt=True, hide_input=True, confirmation_prompt=True,
+                                          help="Asked for when not given")],
+) -> None:
+    """Set a user's password (they are signed out everywhere)."""
+    problem = passwords.password_problem(password)
+    if problem is not None:
+        raise typer.BadParameter(problem)
+    with db.connect() as conn:
+        if not auth_db.set_password_hash(conn, username, passwords.hashed(password)):
+            raise typer.BadParameter(f"no user {username!r}")
+        auth_db.drop_sessions_of(conn, username)
+    typer.echo(f"password of {username} set")
+
+
+@user_app.command("disable")
+def user_disable(username: str, enable: Annotated[bool, typer.Option("--enable", help="Enable them again")] = False) -> None:
+    """Stop a user signing in (and sign them out), or with --enable let them in again."""
+    with db.connect() as conn:
+        if not auth_db.set_disabled(conn, username, not enable):
+            raise typer.BadParameter(f"no user {username!r}")
+        if not enable:
+            auth_db.drop_sessions_of(conn, username)
+    if enable:
+        typer.echo(f"{username} enabled")
+    else:
+        typer.echo(f"{username} disabled")

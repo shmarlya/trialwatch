@@ -7,7 +7,7 @@ The design docs are Excalidraw diagrams in `docs/` (open a `.excalidraw` file at
 
 - [Current system (as built)](docs/img/system-design.svg) · [High-level architecture](docs/img/architecture.svg) · [Database tables](docs/img/db.svg) · [External API interfaces](docs/img/external-apis.svg)
 - [AI architecture decisions & learning map](docs/img/ai-architecture-decisions.svg) · [ADR roadmap](docs/img/adr-roadmap.svg)
-- ADRs: [ADR-001 success criteria](docs/img/adr/ADR-001-success-criteria.svg) · [ADR-002 workflow or agent](docs/img/adr/ADR-002-workflow-or-agent.svg) · [ADR-003 sources and gold datasets](docs/img/adr/ADR-003-sources-and-gold-datasets.svg) · [ADR-004 generic check, requirements as data](docs/img/adr/ADR-004-generic-check-requirements-as-data.svg) · [ADR-005 data sources in stages](docs/img/adr/ADR-005-data-sources-in-stages.svg) · [template](docs/img/adr/ADR-template.svg)
+- ADRs: [ADR-001 success criteria](docs/img/adr/ADR-001-success-criteria.svg) · [ADR-002 workflow or agent](docs/img/adr/ADR-002-workflow-or-agent.svg) · [ADR-003 sources and gold datasets](docs/img/adr/ADR-003-sources-and-gold-datasets.svg) · [ADR-004 generic check, requirements as data](docs/img/adr/ADR-004-generic-check-requirements-as-data.svg) · [ADR-005 data sources in stages](docs/img/adr/ADR-005-data-sources-in-stages.svg) · [ADR-006 sign-in and an action → role chart](docs/img/adr/ADR-006-auth-and-roles.svg) · [template](docs/img/adr/ADR-template.svg)
 
 The images are generated, never edited by hand: `node tools/diagrams/render.mjs` renders every stale one with Excalidraw's own exporter in headless Chromium, and a pre-commit hook runs it whenever a commit touches a diagram. If an image changed, the commit stops so you can `git add docs/img` and commit again. `tests/test_docs.py` fails while any image is out of date. One-time setup (Node 24 and uv):
 
@@ -37,7 +37,15 @@ A small local site for the workflow (ADR-005): on the Sources page, sync a regis
 uv run trialwatch web --reload
 ```
 
-It opens on http://127.0.0.1:8010 and reads the database and `ANTHROPIC_API_KEY` from `.env`. Model checks start as dry runs; untick "dry run" to send. Long jobs can be stopped between trials; what they did so far is kept. A job that dies with the server (a restart, `--reload`) leaves its run marked running, and the next run closes it as failed. The site has no login, so it answers only requests addressed to this machine (`TRIALWATCH_HOSTS` adds other names) and takes form posts only from its own pages; a stored PDF opens in the browser's viewer, any other file is downloaded.
+Anyone may browse; every action needs a signed-in admin or moderator (ADR-006). What each role may do is one chart, src/trialwatch/auth/actions.py, shown at /admin/roles: moderators add trials, upload documents, edit sponsors, transfer evidence, run dry-run checks and stop their own jobs; only admins sync and configure sources, run checks that call the model, stop other people's jobs and manage users (/admin/users). The same rules hold for scripts calling the routes (401 when not signed in, 403 when the role may not), and writes are recorded as the signed-in person. There is no sign-up; add the first admin from the terminal (it asks for a password of at least 12 characters):
+
+```bash
+uv run trialwatch user add alice --role admin
+```
+
+`user list`, `user role NAME ROLE`, `user password NAME` and `user disable NAME` (`--enable` to undo) manage them; the command line itself is not limited by roles, since it holds the database password. Served on a network (`--host` with `TRIALWATCH_HOSTS`), put HTTPS in front: off this machine the session cookie is sent over HTTPS only.
+
+It opens on http://127.0.0.1:8010 and reads the database and `ANTHROPIC_API_KEY` from `.env`. Model checks start as dry runs; untick "dry run" to send. Long jobs can be stopped between trials; what they did so far is kept. A job that dies with the server (a restart, `--reload`) leaves its run marked running, and the next run closes it as failed. The site answers only requests addressed to this machine (`TRIALWATCH_HOSTS` adds other names) and takes form posts only from its own pages; a stored PDF opens in the browser's viewer, any other file is downloaded.
 
 The same steps from the terminal:
 

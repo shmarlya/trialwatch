@@ -423,8 +423,10 @@ def test_the_client_searches_ctis_in_ct_number_order():
     assert (listed.key, listed.title, listed.updated_on.isoformat()) == (CT, "A listed study", "2025-12-31")
 
 
-def test_the_source_pages_render(database_url):
-    client = TestClient(web.app)
+def test_the_source_pages_render(admin_client):
+    public = TestClient(web.app).get("/sources/ctis")
+    assert public.status_code == 200 and "Transfer ticked" not in public.text and "Save config" not in public.text
+    client = admin_client
     page = client.get("/sources")
     assert page.status_code == 200 and "Sync" in page.text and "/sources/ctis" in page.text
     source = client.get("/sources/ctis", params={"state": "failed"})

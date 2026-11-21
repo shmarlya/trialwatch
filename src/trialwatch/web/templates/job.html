@@ -14,7 +14,7 @@
   {% if job.request.limit %} · limit {{ job.request.limit }}{% endif %}
   {% if job.request.step == "evidence" %} · setup {{ job.request.config }}{% endif %}
 </p>
-{% if job.status == "running" %}<form method="post" action="/jobs/{{ job.id }}/stop" id="stop" class="actions"><button class="secondary" {% if job.stop_requested %}disabled{% endif %}>Stop after the current trial</button></form>{% endif %}
+{% if job.status == "running" and (can("job.stop.any") or job.actor == user.username) %}<form method="post" action="/jobs/{{ job.id }}/stop" id="stop" class="actions"><button class="secondary" {% if job.stop_requested %}disabled{% endif %}>Stop after the current trial</button></form>{% endif %}
 <pre id="log">{% for line in lines %}{{ line }}
 {% endfor %}</pre>
 <p class="small"><a href="/">← Workflow</a>{% if job.request.source %} · <a href="/sources/{{ job.request.source }}">{{ job.request.source }}</a>{% endif %}</p>

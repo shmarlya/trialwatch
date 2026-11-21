@@ -132,6 +132,10 @@
   details.prompt { margin-top: 16px; }
   details.prompt summary { cursor: pointer; }
   details.prompt pre { margin-top: 10px; }
+  header .who { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+  header .who form { margin: 0; }
+  .chart td.yes { color: var(--good, inherit); font-weight: 600; text-align: center; }
+  .chart td.no { color: var(--muted); text-align: center; }
 </style>
 </head>
 <body>
@@ -145,8 +149,17 @@
     <a href="/prompts">Prompts</a>
     <a href="/requirements">Requirements</a>
     <a href="/gold">Gold</a>
+    {% if can("user.manage") %}<a href="/admin/users">Users</a>{% endif %}
   </nav>
   {% block header_extra %}{% endblock %}
+  <div class="who small">
+    {% if user %}
+    <span>{{ user.username }} <span class="muted">({{ user.role }})</span></span>
+    <form method="post" action="/logout"><button class="secondary small">Sign out</button></form>
+    {% else %}
+    <a href="/login">Sign in</a>
+    {% endif %}
+  </div>
 </header>
 <main>
 {% block content %}{% endblock %}

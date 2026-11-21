@@ -21,17 +21,22 @@ from psycopg.types.json import Jsonb
 
 # --- actors and sources --------------------------------------------------------------------------
 
-def act_as(conn: psycopg.Connection, name: str, kind: str = "person") -> int:
-    """Make this session's writes count as `name`'s (created if new); returns the actor id."""
+def actor_id(conn: psycopg.Connection, name: str, kind: str = "person") -> int:
+    """The id of the actor `name` (created if new), without changing who this session writes as."""
     # Creating an actor is not audited (there is nobody to record yet), so no actor is needed for it
     conn.execute(
         "INSERT INTO core.actor (kind, name) VALUES (%s, %s) ON CONFLICT (kind, name) DO NOTHING", (kind, name)
     )
     row = conn.execute("SELECT id FROM core.actor WHERE kind = %s AND name = %s", (kind, name)).fetchone()
-    actor_id = row[0]
+    return row[0]
+
+
+def act_as(conn: psycopg.Connection, name: str, kind: str = "person") -> int:
+    """Make this session's writes count as `name`'s (created if new); returns the actor id."""
+    actor_id_found = actor_id(conn, name, kind)
     # Session-wide (not just this transaction): the connections run in autocommit
-    conn.execute("SELECT set_config('trialwatch.actor', %s, false)", (str(actor_id),))
-    return actor_id
+    conn.execute("SELECT set_config('trialwatch.actor', %s, false)", (str(actor_id_found),))
+    return actor_id_found
 
 
 def current_actor(conn: psycopg.Connection) -> int | None:

@@ -18,7 +18,7 @@
     <div class="stat"><span>failed</span><b>{{ "{:,}".format(row.failed) }}</b></div>
     <div class="stat"><span>no longer listed</span><b>{{ "{:,}".format(row.delisted) }}</b></div>
   </div>
-  {% if adapter and adapter.lists %}
+  {% if adapter and adapter.lists and can("source.sync") %}
   <form class="panel step" method="post" action="/jobs">
     <h3>1 · Sync the list</h3>
     <span class="small muted">Reads the source's whole list (as the config's listing filters it) and makes each listed trial a trial here: its {{ adapter.key_label }}, title and identifiers. No records or documents. Last synced {{ when(row.last_listed) }}.</span>
@@ -28,7 +28,7 @@
     <button {% if running or not row.enabled %}disabled{% endif %}>Sync list</button>
   </form>
   {% endif %}
-  {% if adapter and adapter.transfers %}
+  {% if adapter and adapter.transfers and can("trial.transfer") %}
   <form class="panel step" method="post" action="/jobs">
     <h3>2 · Transfer evidence</h3>
     <span class="small muted">For each trial: its record and the documents the config names, then their page text. Complete only if all of it came in. About 1 s per request, a few requests per trial.</span>
@@ -59,14 +59,14 @@
   <select name="state"><option value="">every state</option>{% for name in filters %}<option {% if name == state %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>
   <button>Search</button>
 </form>
-<form method="post" action="/jobs" id="selected">
+{% if can("trial.transfer") or can("check.dry_run") %}<form method="post" action="/jobs" id="selected">{% else %}<div id="selected">{% endif %}
   <input type="hidden" name="source" value="{{ row.code }}">
   <input type="hidden" name="back" value="{{ here }}">
   <div class="selected-bar">
     <span class="small muted"><span id="count">0</span> ticked of {{ "{:,}".format(total) }} shown in {{ pages }} page{% if pages != 1 %}s{% endif %}</span>
-    {% if adapter and adapter.transfers %}<button name="step" value="transfer" {% if running %}disabled{% endif %}>Transfer ticked</button>{% endif %}
-    <button class="secondary" name="step" value="evidence" {% if running %}disabled{% endif %}>Check ticked (setup {{ defaults.config }})</button>
-    <label class="check small"><input type="checkbox" name="dry_run" value="true" checked> dry run</label>
+    {% if adapter and adapter.transfers and can("trial.transfer") %}<button name="step" value="transfer" {% if running %}disabled{% endif %}>Transfer ticked</button>{% endif %}
+    {% if can("check.dry_run") %}<button class="secondary" name="step" value="evidence" {% if running %}disabled{% endif %}>Check ticked (setup {{ defaults.config }})</button>
+    {% if can("check.run") %}<label class="check small"><input type="checkbox" name="dry_run" value="true" checked> dry run</label>{% else %}<input type="hidden" name="dry_run" value="true"><span class="small muted">dry run</span>{% endif %}{% endif %}
   </div>
   <div class="table-wrap"><table>
     <tr><th><input type="checkbox" id="all" title="Tick every trial on this page"></th><th>{{ adapter.key_label if adapter else "Key" }}</th><th>Title</th>
@@ -88,7 +88,7 @@
     <tr><td colspan="9" class="muted">No trials{% if state or q %} match{% elif adapter and adapter.lists %} yet: sync the list{% endif %}.</td></tr>
     {% endfor %}
   </table></div>
-</form>
+{% if can("trial.transfer") or can("check.dry_run") %}</form>{% else %}</div>{% endif %}
 <div class="pager small">
   {% if page > 1 %}<a href="/sources/{{ row.code }}?state={{ state | urlencode }}&q={{ q | urlencode }}&page={{ page - 1 }}">← previous</a>{% endif %}
   <span class="muted">page {{ page }} of {{ pages }}</span>
@@ -96,6 +96,7 @@
 </div>
 
 <h2 id="config">Config</h2>
+{% if can("source.configure") %}
 <form class="panel step" method="post" action="/sources/{{ row.code }}/config" style="max-width:760px">
   {% if saved %}<span class="small"><b>Saved.</b> The next runs use it.</span>{% endif %}
   <span class="small muted">One current config, as JSON; every run records the config it used.{% if row.adapter == "ctis" %} <code>listing.criteria</code> takes the fields of CTIS's search, e.g. <code>{"status": [8], "hasStudyResults": true}</code>; <code>evidence.document_kinds</code> the kinds to transfer (<code>null</code> for every kind).{% endif %}</span>
@@ -103,6 +104,7 @@
   <label class="check"><input type="checkbox" name="enabled" value="true" {% if row.enabled %}checked{% endif %}> switched on</label>
   <button>Save config</button>
 </form>
+{% else %}<pre class="panel">{{ config_text }}</pre>{% endif %}
 
 <h2>Runs</h2>
 {% if runs %}

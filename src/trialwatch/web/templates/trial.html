@@ -6,11 +6,11 @@
 <p class="sub">{{ row.title or "No registered information yet" }}{% if row.sponsor %} · {{ row.sponsor }}{% endif %}{% if row.status %} · {{ row.status }}{% endif %}</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="actions">
-  {% for transfer in transferable %}
+  {% if can("trial.transfer") %}{% for transfer in transferable %}
   <form method="post" action="/trials/{{ row.id }}/transfer"><input type="hidden" name="source" value="{{ transfer.source }}"><button class="secondary" {% if running %}disabled{% endif %}>{% if transfer.status == "not transferred" %}Transfer evidence{% else %}Transfer again{% endif %} from {{ transfer.source }}</button></form>
   {% endfor %}
-  {% if transferable %}<span class="small muted">fetches the record and the source's configured documents, then reads their page text</span>{% endif %}
-  <a class="button secondary" href="#upload">Upload a document</a>
+  {% if transferable %}<span class="small muted">fetches the record and the source's configured documents, then reads their page text</span>{% endif %}{% endif %}
+  {% if can("trial.document.upload") %}<a class="button secondary" href="#upload">Upload a document</a>{% endif %}
 </div>
 {% if row.open_duplicates %}<div class="alert">This trial may be the same as another one: its identifiers came in together. A person decides (merged or distinct).</div>{% endif %}
 
@@ -60,15 +60,17 @@
     <td class="small">{{ sponsor.kind or "—" }}{% if sponsor.country %} · {{ sponsor.country }}{% endif %}{% if sponsor.commercial is sameas true %} · commercial{% elif sponsor.commercial is sameas false %} · non-commercial{% endif %}</td>
     <td class="small">{{ sponsor.identifiers | join(", ") or "—" }}</td>
     <td class="small muted">{{ sponsor.source }} · {{ when(sponsor.created_at) }} · {{ sponsor.created_by }}</td>
-    <td>{% if not sponsor.removed_at %}<form method="post" action="/trials/{{ row.id }}/sponsors/{{ sponsor.organisation_id }}/remove"><button class="secondary small">Remove</button></form>{% endif %}</td>
+    <td>{% if not sponsor.removed_at and can("trial.sponsor.edit") %}<form method="post" action="/trials/{{ row.id }}/sponsors/{{ sponsor.organisation_id }}/remove"><button class="secondary small">Remove</button></form>{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="6" class="muted">No sponsors known.</td></tr>{% endfor %}
 </table></div>
+{% if can("trial.sponsor.edit") %}
 <form class="search" method="post" action="/trials/{{ row.id }}/sponsors">
   <input type="text" name="name" placeholder="Add a sponsor by name">
   <label class="small"><input type="checkbox" name="primary" value="true"> primary</label>
   <button class="secondary">Add sponsor</button>
 </form>
+{% endif %}
 
 {% if gold_items %}
 <div class="panel gold-box">
@@ -245,7 +247,7 @@
     <h3>Check this trial</h3>
     <span class="small muted">It can't be checked yet: {{ not_ready }}. A check reads a trial only when every source that holds it gave all of its evidence and it is still current. Transfer it first{% if transferable %} (button at the top){% else %}, or upload its documents below{% endif %}.</span>
   </div>
-  {% else %}
+  {% elif can("check.dry_run") %}
   <form class="panel step" method="post" action="/jobs">
     <h3>Check this trial {% if judgement %}again{% endif %}</h3>
     <span class="small muted">Starts an evidence run on this trial only. Run it with another setup to compare runs side by side (tabs on the left).</span>
@@ -253,7 +255,7 @@
     <input type="hidden" name="trial_ids" value="{{ row.id }}">
     <input type="hidden" name="back" value="/trials/{{ row.id }}">
     {{ setup_select(configs, judgement_config or defaults.config) }}
-    <label class="check"><input type="checkbox" name="dry_run" value="true"> dry run (send nothing)</label>
+    {% if can("check.run") %}<label class="check"><input type="checkbox" name="dry_run" value="true"> dry run (send nothing)</label>{% else %}<input type="hidden" name="dry_run" value="true"><span class="small muted">dry run: only an admin can send model calls</span>{% endif %}
     <button {% if running %}disabled{% endif %}>Check</button>
   </form>
   {% endif %}
@@ -277,6 +279,7 @@
 </table></div>
 {% else %}<p class="muted">No documents linked.</p>{% endif %}
 
+{% if can("trial.document.upload") %}
 <form id="upload" class="panel step upload" method="post" action="/trials/{{ row.id }}/documents" enctype="multipart/form-data">
   <h3>Upload a document</h3>
   <span class="small muted">Linked to this trial by you; PDFs get their page text extracted straight away, so the next check reads them. The same file twice on one trial is refused.</span>
@@ -291,6 +294,7 @@
   </div>
   <div class="row end"><span></span><button>Upload</button></div>
 </form>
+{% endif %}
 
 <h2>History</h2>
 <p class="small muted">Who added or changed this trial, its identifiers, records and document links, and when (core.audit_log).</p>

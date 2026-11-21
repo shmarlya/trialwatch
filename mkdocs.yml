@@ -66,6 +66,7 @@ nav:
       - "ADR-003: Sources and gold datasets": adr/ADR-003-sources-and-gold-datasets.md
       - "ADR-004: Generic check, requirements as data": adr/ADR-004-generic-check-requirements-as-data.md
       - "ADR-005: Data sources in stages": adr/ADR-005-data-sources-in-stages.md
+      - "ADR-006: Sign-in and an action → role chart": adr/ADR-006-auth-and-roles.md
   - Benchmark data: data/bruckner/README.md
   - Glossary: glossary.md
   - Code style: STYLE.md

@@ -8,14 +8,19 @@ Started by `trialwatch web`. Pages are rendered on the server from templates/; t
 the job page's polling of its own progress and small conveniences (scroll to a quote). All SQL is in
 trialwatch.db (db/overview.py for these pages).
 
-It has no login: it is for the person running it, on their own machine. So it answers only requests
-addressed to this machine (a web page can't reach it through a domain name pointing here) and takes
-form posts only from its own pages (a web page elsewhere can't submit a form to it).
+Who may do what is the action → role chart in trialwatch.auth.actions (ADR-006): anyone may browse,
+and every action needs a signed-in admin or moderator whose role the chart allows. Each route that
+changes something names its action (`Depends(Requires(...))`), and its writes are recorded as the
+signed-in person. It also answers only requests addressed to this machine's names (a web page can't
+reach it through a domain name pointing here) and takes form posts only from its own pages (a web
+page elsewhere can't submit a form to it).
 """
 
 import json
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -23,21 +28,33 @@ from typing import Annotated
 from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
+import psycopg
+
 from trialwatch import db
+from trialwatch.auth import actions, passwords, sessions
 from trialwatch.checks import evidence, model
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
+from trialwatch.db import auth as auth_db
 from trialwatch.db import core, overview
 from trialwatch.db.core import Identifier, normalised
 from trialwatch.gold import datasets as gold_datasets
 from trialwatch.sources import manual, registry, stages
 from trialwatch.web.jobs import STEPS, JobBusy, JobRequest, Jobs
 
-TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
+
+
+def auth_context(request: Request) -> dict:
+    """What every page gets: who is signed in, and can(action) to show only the forms they may use."""
+    user = signed_in(request)
+    return {"user": user, "can": Permissions(user), "chart_roles": actions.ROLES}
+
+
+TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates", context_processors=[auth_context])
 CT_NUMBER = re.compile(r"\d{4}-\d{6}-\d{2}-\d{2}")
 # Names of the trace steps as the trial page shows them
 STEP_TITLES = {
@@ -114,6 +131,280 @@ async def only_this_machine_and_own_pages(request: Request, call_next):
     if reason is not None:
         return PlainTextResponse(f"refused: {reason}", status_code=403)
     return await call_next(request)
+
+
+# --- who is signed in, and what they may do (ADR-006) ---------------------------------------------
+
+class SignInNeeded(Exception):
+    """Raised by Requires when nobody is signed in; answered by sign_in_needed below."""
+
+
+class Permissions:
+    """`can("trial.create")` in a template: whether the viewer may do the action. Hiding a form is only
+    a convenience: every route checks again on the server."""
+
+    def __init__(self, user: auth_db.User | None) -> None:
+        self.user = user
+
+    def __call__(self, action: str) -> bool:
+        role = None
+        if self.user is not None:
+            role = self.user.role
+        return actions.allowed(role, action)
+
+
+def signed_in(request: Request) -> auth_db.User | None:
+    """The user of the request's session cookie, looked up once per request."""
+    if "user_looked_up" in request.scope:
+        return request.scope["user"]
+    user = None
+    token = request.cookies.get(sessions.COOKIE)
+    if token:
+        with db.connect() as conn:
+            user = sessions.user_of(conn, token)
+    request.scope["user_looked_up"] = True
+    request.scope["user"] = user
+    return user
+
+
+class Requires:
+    """A route's guard: `Depends(Requires("trial.create"))`. The user must be signed in and their role
+    must allow one of the actions (a route whose action depends on its form, such as POST /jobs, names
+    them all and checks the exact one itself). Gives the signed-in user."""
+
+    def __init__(self, *names: str) -> None:
+        for name in names:
+            # an unknown name raises here, when the app starts, not when someone first uses the route
+            actions.action_named(name)
+        self.names = names
+
+    def __call__(self, request: Request) -> auth_db.User:
+        user = signed_in(request)
+        if user is None:
+            raise SignInNeeded()
+        for name in self.names:
+            if actions.allowed(user.role, name):
+                return user
+        raise HTTPException(403, f"your role ({user.role}) may not do this: {', '.join(self.names)}")
+
+
+def require(user: auth_db.User, name: str) -> None:
+    """The check inside a route, for an action only its form tells (refused with 403)."""
+    if not actions.allowed(user.role, name):
+        raise HTTPException(403, f"your role ({user.role}) may not do this: {name}")
+
+
+def wants_page(request: Request) -> bool:
+    return "text/html" in request.headers.get("accept", "")
+
+
+def safe_next(target: str) -> str:
+    """Where to go after signing in: a path on this site only, never another site."""
+    if target.startswith("/") and not target.startswith("//") and "\\" not in target:
+        return target
+    return "/"
+
+
+@app.exception_handler(SignInNeeded)
+def sign_in_needed(request: Request, exc: SignInNeeded) -> Response:
+    """A browser goes to the sign-in page (back to the page it wanted, for a GET); anything else
+    (curl, a script, the job page's polling) gets 401."""
+    if not wants_page(request):
+        return PlainTextResponse("sign in first", status_code=401)
+    target = "/"
+    if request.method == "GET":
+        target = request.url.path
+        if request.url.query:
+            target = f"{target}?{request.url.query}"
+    return RedirectResponse(f"/login?next={url_quote(target)}", status_code=303)
+
+
+class LoginThrottle:
+    """Slows down password guessing: after FAILURES wrong tries for a name or from an address within
+    WINDOW seconds, sign-in for it is refused until the window has passed. Kept in memory, per process."""
+
+    FAILURES = 5
+    WINDOW = 15 * 60
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._failures: dict[str, list[float]] = {}
+
+    def _recent(self, key: str, now: float) -> list[float]:
+        kept = []
+        for moment in self._failures.get(key, []):
+            if now - moment < self.WINDOW:
+                kept.append(moment)
+        self._failures[key] = kept
+        return kept
+
+    def blocked(self, keys: list[str]) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            for key in keys:
+                if len(self._recent(key, now)) >= self.FAILURES:
+                    return True
+        return False
+
+    def failed(self, keys: list[str]) -> None:
+        now = time.monotonic()
+        with self._lock:
+            for key in keys:
+                self._recent(key, now).append(now)
+
+    def succeeded(self, keys: list[str]) -> None:
+        with self._lock:
+            for key in keys:
+                if key in self._failures:
+                    del self._failures[key]
+
+
+login_throttle = LoginThrottle()
+
+
+def throttle_keys(request: Request, username: str) -> list[str]:
+    address = "unknown"
+    if request.client is not None:
+        address = request.client.host
+    return [f"user:{username.strip().lower()}", f"address:{address}"]
+
+
+def secure_cookie(request: Request) -> bool:
+    """Over a network the session cookie is sent only over HTTPS; on this machine plain http works."""
+    return host_name(request.headers.get("host", "")) not in LOCAL_HOSTS
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request, next: str = "/", error: str | None = None) -> Response:
+    if signed_in(request) is not None:
+        return RedirectResponse(safe_next(next), status_code=303)
+    return TEMPLATES.TemplateResponse(request, "login.html", {"next": safe_next(next), "error": error})
+
+
+@app.post("/login")
+def login(request: Request, username: Annotated[str, Form()], password: Annotated[str, Form()],
+          next: Annotated[str, Form()] = "/") -> Response:
+    keys = throttle_keys(request, username)
+    target = safe_next(next)
+    if login_throttle.blocked(keys):
+        message = "too many wrong tries: wait a few minutes"
+        return RedirectResponse(f"/login?next={url_quote(target)}&error={url_quote(message)}", status_code=303)
+    with db.connect() as conn:
+        token = sessions.sign_in(conn, username, password)
+    if token is None:
+        login_throttle.failed(keys)
+        message = "wrong username or password"
+        return RedirectResponse(f"/login?next={url_quote(target)}&error={url_quote(message)}", status_code=303)
+    login_throttle.succeeded(keys)
+    response = RedirectResponse(target, status_code=303)
+    response.set_cookie(sessions.COOKIE, token, max_age=int(sessions.LIFETIME.total_seconds()), httponly=True,
+                        samesite="lax", secure=secure_cookie(request), path="/")
+    return response
+
+
+@app.post("/logout")
+def logout(request: Request) -> Response:
+    with db.connect() as conn:
+        sessions.sign_out(conn, request.cookies.get(sessions.COOKIE))
+    response = RedirectResponse("/", status_code=303)
+    response.delete_cookie(sessions.COOKIE, path="/")
+    return response
+
+
+# --- users and the chart (admins) ----------------------------------------------------------------
+
+@app.get("/admin/users", response_class=HTMLResponse)
+def users_page(request: Request, error: str | None = None,
+               user: auth_db.User = Depends(Requires("user.manage"))) -> HTMLResponse:
+    with db.connect() as conn:
+        rows = auth_db.users(conn)
+    context = {"rows": rows, "roles": actions.ROLES, "error": error, "minimum": passwords.MINIMUM_LENGTH}
+    return TEMPLATES.TemplateResponse(request, "admin_users.html", context)
+
+
+def _users_with_error(message: str) -> RedirectResponse:
+    return RedirectResponse(f"/admin/users?error={url_quote(message)}", status_code=303)
+
+
+def _is_last_admin(conn, username: str) -> bool:
+    """Whether `username` is the only enabled admin (then they can't be demoted or disabled: nobody
+    would be left to manage users)."""
+    target = auth_db.user_by_name(conn, username)
+    if target is None or target.role != actions.ADMIN or target.disabled_at is not None:
+        return False
+    return auth_db.active_admins(conn) <= 1
+
+
+@app.post("/admin/users")
+def add_user(username: Annotated[str, Form()], password: Annotated[str, Form()], role: Annotated[str, Form()],
+             user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
+    if role not in actions.ROLES:
+        return _users_with_error(f"unknown role {role!r}")
+    try:
+        password_hash = passwords.hashed(password)
+        with db.connect(actor=user.username) as conn:
+            auth_db.add_user(conn, username.strip().lower(), password_hash, role)
+    except ValueError as exc:
+        return _users_with_error(str(exc))
+    except psycopg.Error as exc:  # a name taken, or not of the allowed characters
+        return _users_with_error(_short_error(exc))
+    return RedirectResponse("/admin/users", status_code=303)
+
+
+@app.post("/admin/users/{username}/role")
+def change_role(username: str, role: Annotated[str, Form()],
+                user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
+    if role not in actions.ROLES:
+        return _users_with_error(f"unknown role {role!r}")
+    with db.connect(actor=user.username) as conn:
+        if role != actions.ADMIN and _is_last_admin(conn, username):
+            return _users_with_error("the last admin can't be given another role")
+        if not auth_db.set_role(conn, username, role):
+            raise HTTPException(404, f"no user {username}")
+        auth_db.drop_sessions_of(conn, username)
+    return RedirectResponse("/admin/users", status_code=303)
+
+
+@app.post("/admin/users/{username}/password")
+def reset_password(username: str, password: Annotated[str, Form()],
+                   user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
+    try:
+        password_hash = passwords.hashed(password)
+    except ValueError as exc:
+        return _users_with_error(str(exc))
+    with db.connect(actor=user.username) as conn:
+        if not auth_db.set_password_hash(conn, username, password_hash):
+            raise HTTPException(404, f"no user {username}")
+        auth_db.drop_sessions_of(conn, username)
+    return RedirectResponse("/admin/users", status_code=303)
+
+
+@app.post("/admin/users/{username}/disable")
+def disable_user(username: str, user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
+    with db.connect(actor=user.username) as conn:
+        if _is_last_admin(conn, username):
+            return _users_with_error("the last admin can't be disabled")
+        if not auth_db.set_disabled(conn, username, True):
+            raise HTTPException(404, f"no user {username}")
+        auth_db.drop_sessions_of(conn, username)
+    return RedirectResponse("/admin/users", status_code=303)
+
+
+@app.post("/admin/users/{username}/enable")
+def enable_user(username: str, user: auth_db.User = Depends(Requires("user.manage"))) -> Response:
+    with db.connect(actor=user.username) as conn:
+        if not auth_db.set_disabled(conn, username, False):
+            raise HTTPException(404, f"no user {username}")
+    return RedirectResponse("/admin/users", status_code=303)
+
+
+@app.get("/admin/roles", response_class=HTMLResponse)
+def roles_page(request: Request, user: auth_db.User = Depends(Requires("user.manage"))) -> HTMLResponse:
+    """The action → role chart, drawn from trialwatch.auth.actions itself."""
+    columns = [actions.PUBLIC]
+    for role in actions.ROLES:
+        columns.append(role)
+    return TEMPLATES.TemplateResponse(request, "admin_roles.html", {"chart": actions.ACTIONS, "columns": columns})
 
 
 # --- helpers for the pages -----------------------------------------------------------------------
@@ -260,7 +551,7 @@ def dashboard(request: Request, error: str | None = None) -> HTMLResponse:
         choices = overview.trial_choices(conn, stages.ready_trials(conn, kinds), kinds, default_set.name)
         sources = overview.source_rows(conn)
     context = {"sources": sources, "coverage": coverage, "runs": runs[:10], "jobs": jobs.all(), "running": jobs.running(),
-               "steps": STEPS, "error": error, "defaults": defaults, "actor": db.default_actor(),
+               "steps": STEPS, "error": error, "defaults": defaults,
                "choices": choices, "configs": check_settings.load_all()}
     return TEMPLATES.TemplateResponse(request, "dashboard.html", context)
 
@@ -274,6 +565,19 @@ def _redirect_back(back: str, message: str) -> RedirectResponse:
                 joiner = "&"
             return RedirectResponse(f"{back}{joiner}error={url_quote(message)}", status_code=303)
     return _back_with_error(message)
+
+
+def job_action(step: str, dry_run: bool) -> str:
+    """The chart's action for starting a job of `step`."""
+    if step == "list":
+        return "source.sync"
+    if step == "evidence":
+        if dry_run:
+            return "check.dry_run"
+        return "check.run"
+    if step == "transfer":
+        return "trial.transfer"
+    raise HTTPException(400, f"unknown step {step!r}")
 
 
 @app.post("/jobs")
@@ -292,7 +596,9 @@ def start_job(
     config: Annotated[str, Form()] = check_settings.DEFAULT,
     dry_run: Annotated[bool, Form()] = False,
     back: Annotated[str, Form()] = "",
+    user: auth_db.User = Depends(Requires("source.sync", "trial.transfer", "check.dry_run", "check.run")),
 ) -> Response:
+    require(user, job_action(step, dry_run))
     # Keys may be ticked, or pasted separated by spaces, commas or new lines
     given = []
     for key in keys:
@@ -337,21 +643,29 @@ def start_job(
                              trial_ids=chosen_trials, every=every, limit=chosen_limit, config=config.strip(),
                              dry_run=dry_run)
     try:
-        job = jobs.start(job_request)
+        job = jobs.start(job_request, actor=user.username)
     except (ValueError, JobBusy) as exc:
         return _redirect_back(back, str(exc))
     return RedirectResponse(f"/jobs/{job.id}", status_code=303)
 
 
 @app.post("/jobs/{job_id}/stop")
-def stop_job(job_id: int) -> Response:
+def stop_job(job_id: int, user: auth_db.User = Depends(Requires("job.stop.own", "job.stop.any"))) -> Response:
     """Ask a running job to stop after the trial it is on; what it did so far is kept."""
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "no such job")
+    if job.actor == user.username:
+        require(user, "job.stop.own")
+    else:
+        require(user, "job.stop.any")
     jobs.stop(job_id)
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
-def job_page(request: Request, job_id: int) -> HTMLResponse:
+def job_page(request: Request, job_id: int,
+             user: auth_db.User = Depends(Requires("job.view"))) -> HTMLResponse:
     job = jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "no such job (jobs are kept until the server restarts)")
@@ -362,7 +676,8 @@ def job_page(request: Request, job_id: int) -> HTMLResponse:
 
 
 @app.get("/jobs/{job_id}/progress")
-def job_progress(job_id: int, after: int = 0) -> JSONResponse:
+def job_progress(job_id: int, after: int = 0,
+                 user: auth_db.User = Depends(Requires("job.view"))) -> JSONResponse:
     """The job's status and its lines from number `after` on, for the job page to poll."""
     job = jobs.get(job_id)
     if job is None:
@@ -397,7 +712,8 @@ def trials_page(request: Request, q: str = "", evidence_state: str = "", page: i
 
 
 @app.get("/trials/new", response_class=HTMLResponse)
-def new_trial_page(request: Request, error: str | None = None) -> HTMLResponse:
+def new_trial_page(request: Request, error: str | None = None,
+                   user: auth_db.User = Depends(Requires("trial.create"))) -> HTMLResponse:
     with db.connect() as conn:
         schemes = core.identifier_schemes(conn)
         kinds = core.document_kinds(conn)
@@ -426,6 +742,7 @@ def add_trial(
     endpoints: Annotated[str, Form()] = "",
     kind: Annotated[str, Form()] = "results-summary",
     files: Annotated[list[UploadFile], File()] = [],
+    user: auth_db.User = Depends(Requires("trial.create")),
 ) -> Response:
     identifiers = []
     for index, value in enumerate(values):
@@ -438,8 +755,8 @@ def add_trial(
     entry = manual.TrialEntry(identifiers=identifiers, public_title=title.strip(), sponsors=sponsors.splitlines(),
                               status=_or_none(status), primary_endpoints=endpoint_lines)
     try:
-        # Recorded as the person running the web interface
-        with db.connect() as conn:
+        # Recorded as the signed-in person
+        with db.connect(actor=user.username) as conn:
             trial_id = manual.add_trial(conn, entry, _uploads(files), kind)
     except manual.AlreadyKnown as exc:
         message = f"Already in the database ({exc}). Add documents here instead."
@@ -470,12 +787,13 @@ def upload_document(
     file: Annotated[UploadFile, File()],
     kind: Annotated[str, Form()] = "results-summary",
     title: Annotated[str, Form()] = "",
+    user: auth_db.User = Depends(Requires("trial.document.upload")),
 ) -> Response:
     uploads = _uploads([file])
     if not uploads:
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote('choose a file to upload')}", status_code=303)
     try:
-        with db.connect() as conn:
+        with db.connect(actor=user.username) as conn:
             manual.add_document(conn, trial_id, uploads[0], kind, _or_none(title))
     except Exception as exc:  # shown on the trial page
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote(_short_error(exc))}", status_code=303)
@@ -483,7 +801,8 @@ def upload_document(
 
 
 @app.post("/trials/{trial_id}/transfer")
-def transfer_trial(trial_id: int, source: Annotated[str, Form()]) -> Response:
+def transfer_trial(trial_id: int, source: Annotated[str, Form()],
+                   user: auth_db.User = Depends(Requires("trial.transfer"))) -> Response:
     """Transfer this trial's evidence again from a source (its record, new document versions, page text)."""
     with db.connect() as conn:
         keys = overview.trial_source_keys(conn, trial_id, source)
@@ -491,28 +810,30 @@ def transfer_trial(trial_id: int, source: Annotated[str, Form()]) -> Response:
         message = f"this trial has no key at {source} to transfer"
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote(message)}", status_code=303)
     try:
-        job = jobs.start(JobRequest(step="transfer", source=source, keys=keys))
+        job = jobs.start(JobRequest(step="transfer", source=source, keys=keys), actor=user.username)
     except (ValueError, JobBusy) as exc:
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote(str(exc))}", status_code=303)
     return RedirectResponse(f"/jobs/{job.id}", status_code=303)
 
 
 @app.post("/trials/{trial_id}/sponsors")
-def add_sponsor(trial_id: int, name: Annotated[str, Form()], primary: Annotated[bool, Form()] = False) -> Response:
+def add_sponsor(trial_id: int, name: Annotated[str, Form()], primary: Annotated[bool, Form()] = False,
+                user: auth_db.User = Depends(Requires("trial.sponsor.edit"))) -> Response:
     """A person adds a sponsor by name: an organisation we hold with that name, else a new one."""
     cleaned = " ".join(name.split())
     if not cleaned:
         return RedirectResponse(f"/trials/{trial_id}?error={url_quote('a sponsor needs a name')}#sponsors",
                                 status_code=303)
-    with db.connect() as conn:
+    with db.connect(actor=user.username) as conn:
         core.add_trial_sponsor(conn, trial_id, core.Sponsor(name=cleaned, primary=primary), manual.SOURCE)
     return RedirectResponse(f"/trials/{trial_id}#sponsors", status_code=303)
 
 
 @app.post("/trials/{trial_id}/sponsors/{organisation_id}/remove")
-def remove_sponsor(trial_id: int, organisation_id: int) -> Response:
+def remove_sponsor(trial_id: int, organisation_id: int,
+                   user: auth_db.User = Depends(Requires("trial.sponsor.edit"))) -> Response:
     """A person removes a sponsor from the trial: kept as removed, and a source listing it again won't bring it back."""
-    with db.connect() as conn:
+    with db.connect(actor=user.username) as conn:
         core.remove_trial_sponsor(conn, trial_id, organisation_id)
     return RedirectResponse(f"/trials/{trial_id}#sponsors", status_code=303)
 
@@ -640,12 +961,13 @@ def _config_from_text(text: str, adapter: registry.Adapter) -> dict:
 
 @app.post("/sources")
 def register_source(adapter: Annotated[str, Form()], code: Annotated[str, Form()] = "",
-                    name: Annotated[str, Form()] = "") -> Response:
+                    name: Annotated[str, Form()] = "",
+                    user: auth_db.User = Depends(Requires("source.register"))) -> Response:
     """Register a source read by an adapter, with the adapter's default config (edited on its page)."""
     try:
         adapter_type = registry.adapter_class(adapter)
         chosen_code = code.strip() or adapter_type.name
-        with db.connect() as conn:
+        with db.connect(actor=user.username) as conn:
             core.register_source(conn, code=chosen_code, kind=adapter_type.kind, name=name.strip() or adapter_type.label,
                                  url=adapter_type.url, adapter=adapter, config=adapter_type().default_config())
     except Exception as exc:  # e.g. a code already used: shown on the page
@@ -684,9 +1006,10 @@ def source_page(request: Request, code: str, state: str = "", q: str = "", page:
 
 
 @app.post("/sources/{code}/config")
-def save_source_config(code: str, config: Annotated[str, Form()], enabled: Annotated[bool, Form()] = False) -> Response:
+def save_source_config(code: str, config: Annotated[str, Form()], enabled: Annotated[bool, Form()] = False,
+                       user: auth_db.User = Depends(Requires("source.configure"))) -> Response:
     """Replace the source's config (one current config; every run records the one it used)."""
-    with db.connect() as conn:
+    with db.connect(actor=user.username) as conn:
         source = core.registered_source(conn, code)
         if source is None:
             raise HTTPException(404, f"no source {code}")

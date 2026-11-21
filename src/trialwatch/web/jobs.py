@@ -2,7 +2,7 @@
 source's list, transfer trials' evidence, check trials (ADR-005).
 
 Each job calls the same functions as the CLI command of that step, on its own database connection,
-as the person running the web interface (core.actor), and collects their progress lines so the
+as the signed-in person who started it (core.actor), and collects their progress lines so the
 browser can show them while the job runs. Jobs live in memory only: what they produce is in the
 database (ingest runs, documents, pages, check runs with their traces), as with the CLI. A job that
 dies with the server (a restart, --reload) leaves its run marked running; the next run closes it
@@ -119,14 +119,15 @@ class Jobs:
         job.add("stop asked: finishing the current trial")
         return True
 
-    def start(self, request: JobRequest) -> Job:
-        """Check the request, then run it in a background thread. Raises ValueError or JobBusy."""
+    def start(self, request: JobRequest, actor: str) -> Job:
+        """Check the request, then run it in a background thread as `actor` (the signed-in person, whose
+        writes the audit log records). Raises ValueError or JobBusy."""
         check_request(request)
         with self._lock:
             busy = self.running()
             if busy is not None:
                 raise JobBusy(f"job {busy.id} ({STEPS[busy.request.step]}) is still running")
-            job = Job(id=len(self._jobs) + 1, request=request, actor=db.default_actor())
+            job = Job(id=len(self._jobs) + 1, request=request, actor=actor)
             self._jobs.append(job)
         thread = threading.Thread(target=run_job, args=(job,), name=f"job-{job.id}", daemon=True)
         thread.start()

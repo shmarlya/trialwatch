@@ -26,7 +26,7 @@
   {% endfor %}
 </table></div>
 
-{% if free_adapters %}
+{% if free_adapters and can("source.register") %}
 <h2>Register a source</h2>
 <form class="panel step" method="post" action="/sources" style="max-width:520px">
   <span class="small muted">Starts with the adapter's default config; change it on the source's page.</span>

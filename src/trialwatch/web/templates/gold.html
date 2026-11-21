@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% from "macros.html" import label, part, outcome %}
+{% block title %}Gold datasets · TrialWatch{% endblock %}
+{% block content %}
+<h1>Gold datasets</h1>
+<p class="sub">Hand-checked answers we compare our checks against. Each version is a fixed set of files in {{ gold_dir }}, never stored in the database; ours is the newest finished judgement under the dataset's requirement set.</p>
+{% for problem in lock_problems %}<div class="alert">{{ problem }}</div>{% endfor %}
+{% if not dataset %}
+<p class="muted">No gold datasets yet. Build one with <code>trialwatch gold build bruckner</code>.</p>
+{% else %}
+<form class="search" method="get" action="/gold">
+  <select name="dataset">{% for ref in refs %}<option value="{{ ref }}" {% if ref == dataset.ref %}selected{% endif %}>{{ ref }}</option>{% endfor %}</select>
+  <input type="text" name="q" value="{{ q }}" placeholder="Search identifiers, titles, comments, details">
+  <select name="label">
+    <option value="">any gold label</option>
+    {% for value in dataset.labels %}<option value="{{ value }}" {% if label_filter == value %}selected{% endif %}>gold: {{ value }}</option>{% endfor %}
+    <option value="none" {% if label_filter == "none" %}selected{% endif %}>gold: no label</option>
+  </select>
+  <select name="reviewers">
+    <option value="">any reviewers</option>
+    <option value="disagreed" {% if reviewers == "disagreed" %}selected{% endif %}>reviewers disagreed</option>
+  </select>
+  <select name="ours">{% for value, text in ours_filters.items() %}<option value="{{ value }}" {% if ours == value %}selected{% endif %}>{{ text }}</option>{% endfor %}</select>
+  <button>Search</button>
+</form>
+
+<div class="grid">
+  <div class="panel">
+    <h3 class="panel-title">{{ dataset.title }}</h3>
+    <p class="small">{{ dataset.description }}</p>
+    <p class="small muted">Requirement set <a href="/requirements?show={{ dataset.requirements }}#{{ dataset.requirements }}">{{ dataset.requirements }}</a> · parts {{ dataset.parts | join(", ") }} · labels {{ dataset.labels | join(", ") }}</p>
+  </div>
+  <div class="panel">
+    <h3 class="panel-title">Evidence the reviewers read</h3>
+    <p class="small">{{ dataset.evidence.description }}</p>
+    <p class="small muted">kinds {{ dataset.evidence.document_kinds | join(", ") }} · as of {{ dataset.evidence.as_of }}</p>
+    {% if dataset.citation %}<p class="small muted">{{ dataset.citation }}{% if dataset.url %} · <a href="{{ dataset.url }}">source</a>{% endif %}</p>{% endif %}
+  </div>
+  <div class="panel">
+    <h3 class="panel-title">Ours against this version</h3>
+    <div class="stat"><span>items · with a gold label</span><b>{{ summary.items }} · {{ summary.labelled }}</b></div>
+    <div class="stat"><span>in our database · checked</span><b>{{ summary.synced }} · {{ summary.checked }}</b></div>
+    <div class="stat"><span>label agrees · disagrees · ours open</span><b>{{ summary.agree }} · {{ summary.disagree }} · {{ summary.ours_open }}</b></div>
+    <div class="stat"><span>false accusations</span><b>{% if summary.false_accusations %}<span class="flag">{{ summary.false_accusations }}</span>{% else %}0{% endif %}</b></div>
+    <div class="stat"><span>set aside (we read documents posted after the reviewers' day)</span><b>{{ summary.set_aside }}</b></div>
+  </div>
+</div>
+
+<p class="small muted">{{ rows | length }} shown</p>
+<div class="table-wrap"><table>
+  <tr><th>Item</th><th>Title</th><th>Gold label</th>{% for name in dataset.parts %}<th>{{ name }}</th>{% endfor %}<th>Reviewers</th><th>Ours</th><th>Compared</th></tr>
+  {% for row in rows %}
+  <tr>
+    <td><a href="/gold/{{ dataset.ref }}/{{ row.item.key }}">{{ row.item.key }}</a></td>
+    <td class="small">{{ (row.item.title or "")[:110] }}{% if row.item.title and row.item.title | length > 110 %}…{% endif %}
+      {% if row.item.comment %}<br><span class="muted">{{ row.item.comment[:140] }}{% if row.item.comment | length > 140 %}…{% endif %}</span>{% endif %}</td>
+    <td>{{ label(row.item.expected_label) }}</td>
+    {% for name in dataset.parts %}<td class="small">{{ part(row.item.expected_parts[name]) }}</td>{% endfor %}
+    <td class="small">{{ row.item.reviews | length }}{% if row.reviewers_disagreed %} <span class="label undecided">disagreed</span>{% endif %}</td>
+    <td class="small">{% if row.trial_id is none %}<span class="muted">not synced</span>
+      {% elif row.judgement %}<a href="/trials/{{ row.trial_id }}?run={{ row.judgement.run_id }}">{{ label(row.judgement.label) }}</a> <span class="muted">run {{ row.judgement.run_id }}</span>
+      {% else %}<a href="/trials/{{ row.trial_id }}">not checked</a>{% endif %}</td>
+    <td>{% if row.set_aside %}<span class="muted" title="our check read a document posted after the reviewers read theirs">set aside</span>{% elif row.comparison %}{{ outcome(row.comparison.label) }}{% if row.comparison.false_accusation %} <span class="flag">false accusation</span>{% endif %}{% endif %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="{{ 6 + dataset.parts | length }}" class="muted">Nothing matches.</td></tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,46 @@
+{
+  "name": "eu-ctr-results",
+  "title": "Results reported as the EU Clinical Trials Regulation requires",
+  "description": "Whether a trial's results documents report how many participants took part, give a result for every registered primary endpoint, and whether the trial enrolled nobody: the three questions Bruckner et al.'s reviewers answered for each results document (Regulation 536/2014). Not reported needs the whole document read; anything the rules can't settle is undecided, for a person.",
+  "document_kinds": ["results-summary", "study-report", "publication"],
+  "not_reported_kinds": ["narrative_only", "chart_only", "redacted", "not_analysed"],
+  "requirements": [
+    {
+      "key": "participants",
+      "part": "participants",
+      "question": "How many participants actually took part (enrolled, randomised, treated or analysed)? Quote the actual number, not a planned or target number.",
+      "guidance": "Use numeric_result when the passage gives the number.",
+      "search": ["participants", "subjects", "patients", "enrolled", "randomised", "randomized", "number", "analysed", "treated", "included"],
+      "rule": "count_stated"
+    },
+    {
+      "key": "cancelled",
+      "part": "cancelled",
+      "question": "Does the document say the trial enrolled nobody (cancelled before the first participant, or zero participants overall)? Quote that statement if there is one.",
+      "guidance": "A trial that started and stopped early is not cancelled. Use numeric_result when the statement gives a number (\"0 participants\").",
+      "search": ["enrolled", "recruited", "participants", "cancelled", "withdrawn", "terminated", "zero", "none"],
+      "rule": "statement_present"
+    },
+    {
+      "key": "endpoint:{id}",
+      "for_each": "primary_endpoints",
+      "part": "outcomes",
+      "question": "Registered primary endpoint {number}: \"{text}\". Quote the passage that gives this endpoint's result.",
+      "guidance": "The document may name the endpoint differently (shorter, translated, as an objective, or by the measure it uses): match it by meaning. Prefer the passage with its numeric result. If only part of a combined endpoint is reported, quote what is there and say in note what is missing. If the document says why there is no result, quote that statement (not_analysed).",
+      "search_from": "text",
+      "rule": "numeric_result"
+    }
+  ],
+  "parts": {
+    "participants": {"combine": "all", "empty": "no answer"},
+    "outcomes": {"combine": "all", "empty": "no registered primary endpoint"},
+    "cancelled": {"combine": "all", "empty": "no answer"}
+  },
+  "inferences": [
+    {"type": "nobody_enrolled_contradicted_by_count", "count_requirement": "participants", "part": "cancelled"}
+  ],
+  "label": {
+    "not_full_when": {"false": ["participants", "outcomes"], "true": ["cancelled"]},
+    "full_when": {"true": ["participants", "outcomes"], "false": ["cancelled"]}
+  }
+}

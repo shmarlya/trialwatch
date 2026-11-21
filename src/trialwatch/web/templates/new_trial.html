@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Add a trial · TrialWatch{% endblock %}
+{% block content %}
+<h1>Add a trial by hand</h1>
+<p class="sub">For a trial that isn't in a registry we sync, or to enter one yourself. Its identifiers are matched against the trials already here first: if one of them is known, you're taken to that trial instead, so nothing is added twice. Every change is recorded as you.</p>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+
+<form class="panel step wide" method="post" action="/trials/new" enctype="multipart/form-data">
+  <fieldset>
+    <legend>Identifiers (any you know; none is fine: the trial then gets our own TW-number)</legend>
+    {% for row in range(3) %}
+    <div class="row">
+      <label>Scheme
+        <select name="schemes">
+          {% for code, scheme_label in schemes %}{% if code != "trialwatch" %}
+          <option value="{{ code }}" {% if loop.index0 == row %}selected{% endif %}>{{ scheme_label }}</option>
+          {% endif %}{% endfor %}
+        </select>
+      </label>
+      <label>Value<input type="text" name="values" placeholder="{% if row == 0 %}2022-500044-38-01{% elif row == 1 %}2021-001234-56{% else %}NCT01234567{% endif %}"></label>
+    </div>
+    {% endfor %}
+  </fieldset>
+
+  <fieldset>
+    <legend>Registered information (what the check asks about)</legend>
+    <label>Title<input type="text" name="title" required placeholder="A study of …"></label>
+    <div class="row">
+      <label>Sponsors <span class="small muted">one per line, the primary sponsor first</span><textarea name="sponsors" rows="2"></textarea></label>
+      <label>Status<input type="text" name="status" placeholder="Ended"></label>
+    </div>
+    <label>Primary endpoints, one per line<textarea name="endpoints" rows="4" placeholder="Change from baseline in … at 12 weeks"></textarea></label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Documents (optional; PDFs are read for checks)</legend>
+    <div class="row">
+      <label>Files<input type="file" name="files" multiple accept=".pdf,application/pdf"></label>
+      <label>They are
+        <select name="kind">
+          {% for code, kind_label in kinds %}<option value="{{ code }}">{{ kind_label }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
+  </fieldset>
+
+  <div class="row end">
+    <a href="/trials">Cancel</a>
+    <button>Add the trial</button>
+  </div>
+</form>
+{% endblock %}

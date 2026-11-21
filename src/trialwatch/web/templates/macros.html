@@ -1,0 +1,60 @@
+{% macro label(value) -%}
+  {%- if value is none -%}<span class="label none">—</span>
+  {%- elif value == "full" -%}<span class="label full">full</span>
+  {%- elif value == "not full" -%}<span class="label not-full">not full</span>
+  {%- elif value == "undecided" -%}<span class="label undecided">undecided</span>
+  {%- else -%}<span class="label error">{{ value }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro part(value) -%}
+  {%- if value is none -%}<span class="muted">?</span>
+  {%- elif value -%}yes
+  {%- else -%}no
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro when(moment) -%}
+  {%- if moment is none -%}—{%- else -%}{{ moment.strftime("%Y-%m-%d %H:%M") }}{%- endif -%}
+{%- endmacro %}
+
+{% macro run_status(status) -%}
+  {%- if status == "succeeded" -%}<span class="label full">succeeded</span>
+  {%- elif status == "running" -%}<span class="label undecided">running</span>
+  {%- elif status in ("failed", "stopped") -%}<span class="label not-full">{{ status }}</span>
+  {%- else -%}<span class="label none">{{ status }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro outcome(value) -%}
+  {%- if value == "agree" -%}<span class="label full">agree</span>
+  {%- elif value == "disagree" -%}<span class="label not-full">disagree</span>
+  {%- elif value == "ours open" -%}<span class="label undecided">ours open</span>
+  {%- else -%}<span class="label none">{{ value }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{# The model's "found" answer: yes / no / dont_know (older runs stored true / false) #}
+{% macro found_answer(value) -%}
+  {%- if value is sameas true or value == "yes" -%}yes
+  {%- elif value is sameas false or value == "no" -%}<span class="muted">no</span>
+  {%- else -%}<span class="label undecided">don't know</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro evidence_state(state) -%}
+  {%- if state == "complete" -%}<span class="label full">complete</span>
+  {%- elif state == "stale" -%}<span class="label undecided" title="transferred, but the source changed the trial since">stale</span>
+  {%- elif state == "failed" -%}<span class="label not-full">failed</span>
+  {%- else -%}<span class="label none">{{ state }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{# The setups a check can run with (checks/configs/), the chosen one selected #}
+{% macro setup_select(configs, chosen) %}
+<label>Setup
+  <select name="config">
+    {% for setup in configs %}<option value="{{ setup.config }}" title="{{ setup.description }}" {% if setup.config == chosen %}selected{% endif %}>{{ setup.summary() }}</option>{% endfor %}
+  </select>
+</label>
+{% endmacro %}

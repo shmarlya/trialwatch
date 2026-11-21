@@ -1,4 +1,8 @@
-from datetime import datetime
+"""TrialWatch's command line: the workflow steps (ADR-005: register a source, sync its list, transfer
+evidence), the evidence check (ADR-004) and the gold datasets (ADR-003). Every command reads .env
+first, so outside compose it uses the same database and API key as the web interface."""
+
+import json
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
@@ -6,116 +10,404 @@ from typing import Annotated
 import typer
 
 from trialwatch import db
-from trialwatch.ctis.client import CtisClient
-from trialwatch.ctis.export import captured_on_from_name, seed_export
-from trialwatch.ctis.store import fetch_trials
-from trialwatch.gold.bruckner import seed_verdicts
-from trialwatch.gold.bruckner_reviews import seed_reviews
-from trialwatch.gold.compare import SNAPSHOT_DAY, compare_due
+from trialwatch.checks import evidence
+from trialwatch.checks import requirements as requirement_sets
+from trialwatch.checks import settings as check_settings
+from trialwatch.checks.model import load_prompt
+from trialwatch.db import core as core_db
+from trialwatch.env import load_env_file
+from trialwatch.gold import bruckner, datasets
+from trialwatch.gold import compare as gold_compare
+from trialwatch.sources import registry, stages
+from trialwatch.sources.ctis_client import CT_NUMBER
 
 app = typer.Typer(no_args_is_help=True, help="TrialWatch: EU clinical-trial results watchdog.")
-ctis_app = typer.Typer(no_args_is_help=True, help="CTIS (EU Clinical Trials Information System).")
-app.add_typer(ctis_app, name="ctis")
-gold_app = typer.Typer(no_args_is_help=True, help="Gold labels: hand-checked answers we compare our checks against.")
+source_app = typer.Typer(no_args_is_help=True, help="Data sources (ADR-005): the registry, syncing lists, transferring evidence.")
+app.add_typer(source_app, name="source")
+check_app = typer.Typer(no_args_is_help=True, help="Our checks: rules and model calls that judge a trial.")
+app.add_typer(check_app, name="check")
+gold_app = typer.Typer(no_args_is_help=True, help="Gold datasets: hand-checked answers we compare our checks against.")
 app.add_typer(gold_app, name="gold")
+
+# Calls go to Anthropic's API itself, whatever ANTHROPIC_BASE_URL a shell may set (e.g. a proxy)
+ANTHROPIC_API = "https://api.anthropic.com"
+# Converters that build a gold dataset version from a source's own files (ADR-003)
+GOLD_CONVERTERS = {"bruckner": bruckner.build}
+
+
+@app.callback()
+def settings() -> None:
+    # Outside compose, DATABASE_URL and ANTHROPIC_API_KEY come from .env (the environment's own win)
+    load_env_file()
 
 
 @app.command("version")
 def show_version() -> None:
-    """Print the TrialWatch version."""
-    typer.echo(f"trialwatch {version('trialwatch')}")
+    typer.echo(version("trialwatch"))
 
 
-@ctis_app.command("fetch")
-def ctis_fetch(
-    ct_numbers: Annotated[list[str], typer.Argument(help="EU CT numbers, e.g. 2025-522750-39-00")],
+@app.command("web")
+def web(
+    host: Annotated[str, typer.Option(help="Address to listen on; the default is this machine only")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port to listen on")] = 8010,
+    reload: Annotated[bool, typer.Option("--reload", help="Restart when the code changes (development)")] = False,
 ) -> None:
-    """Fetch trials from CTIS and store a snapshot for each one that changed."""
-    with db.connect() as conn, CtisClient() as client:
-        result = fetch_trials(
-            conn, client.retrieve, ct_numbers, kind="fetch", args={"ct_numbers": ct_numbers}
-        )
-    typer.echo(
-        f"run {result.run_id}: fetched {result.fetched}, changed {result.changed}, "
-        f"failed {len(result.failed)}"
-    )
-    for ct_number, message in result.failed.items():
-        typer.echo(f"  {ct_number}: {message}", err=True)
-    if result.failed:
-        raise typer.Exit(1)
+    """Web interface: browse trials, documents, judgements and gold datasets, and start the workflow steps."""
+    import uvicorn
+
+    uvicorn.run("trialwatch.web.app:app", host=host, port=port, reload=reload)
 
 
-@ctis_app.command("seed")
-def ctis_seed(
-    path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, help="CSV export from the CTIS public search")],
-    captured_on: Annotated[
-        datetime | None,
-        typer.Option(formats=["%Y-%m-%d"], help="Day CTIS produced the export. Defaults to the _YYYYMMDD in the file name."),
+def _echo_failures(failed: dict[str, str]) -> None:
+    for where, message in failed.items():
+        typer.echo(f"  {where}: {message}", err=True)
+
+
+def _registered(conn, code: str) -> core_db.RegisteredSource:
+    found = core_db.registered_source(conn, code)
+    if found is None:
+        raise typer.BadParameter(f"no source {code!r} is registered (see `trialwatch source list`)")
+    return found
+
+
+def _read_config(path: Path | None, adapter: registry.Adapter) -> dict:
+    """A config from a JSON file, or the adapter's default; checked by the adapter."""
+    if path is None:
+        config = adapter.default_config()
+    else:
+        try:
+            config = json.loads(path.read_text())
+        except ValueError as exc:
+            raise typer.BadParameter(f"{path} is not JSON: {exc}", param_hint="--config") from exc
+    if not isinstance(config, dict):
+        raise typer.BadParameter("a config is a JSON object", param_hint="--config")
+    problems = adapter.config_problems(config)
+    if problems:
+        raise typer.BadParameter("; ".join(problems), param_hint="--config")
+    return config
+
+
+def _lines_of(path: Path) -> list[str]:
+    """The non-empty lines of a file, without # comments."""
+    lines = []
+    for line in path.read_text().splitlines():
+        text = line.strip()
+        if text and not text.startswith("#"):
+            lines.append(text)
+    return lines
+
+
+# --- sources (ADR-005) ---------------------------------------------------------------------------
+
+@source_app.command("list")
+def source_list() -> None:
+    """The registered sources: adapter, on or off, and how many of their trials are listed and transferred."""
+    from trialwatch.db import overview
+
+    with db.connect() as conn:
+        rows = overview.source_rows(conn)
+    for row in rows:
+        state = "on"
+        if not row.enabled:
+            state = "off"
+        typer.echo(f"{row.code} ({row.adapter}, {state}): {row.name}")
+        typer.echo(f"  listed {row.listed:,} · no longer listed {row.delisted:,} · not transferred {row.not_transferred:,} · "
+                   f"complete {row.complete:,} · stale {row.stale:,} · failed {row.failed:,}")
+
+
+@source_app.command("register")
+def source_register(
+    adapter: Annotated[str, typer.Argument(help="The adapter that reads it, e.g. ctis")],
+    code: Annotated[str | None, typer.Option(help="Short name in URLs and commands (default: the adapter's)")] = None,
+    name: Annotated[str | None, typer.Option(help="Readable name (default: the adapter's)")] = None,
+    url: Annotated[str | None, typer.Option(help="Where the source is")] = None,
+    config: Annotated[
+        Path | None, typer.Option(exists=True, dir_okay=False, help="Its config as a JSON file (default: the adapter's)")
     ] = None,
 ) -> None:
-    """Load a CTIS portal CSV export (e.g. Bruckner et al.'s 2025-11-10 file) as snapshots."""
+    """Register a data source: the adapter that reads it and its config."""
     try:
-        day = captured_on.date() if captured_on else captured_on_from_name(path)
+        adapter_type = registry.adapter_class(adapter)
     except ValueError as exc:
-        raise typer.BadParameter(str(exc), param_hint="--captured-on") from exc
+        raise typer.BadParameter(str(exc)) from exc
+    chosen_config = _read_config(config, adapter_type())
+    chosen_code = code
+    if not chosen_code:
+        chosen_code = adapter_type.name
+    chosen_name = name
+    if not chosen_name:
+        chosen_name = adapter_type.label
+    chosen_url = url
+    if not chosen_url:
+        chosen_url = adapter_type.url
     with db.connect() as conn:
-        result = seed_export(conn, path, day)
-    typer.echo(
-        f"run {result.run_id}: read {result.fetched}, new {result.changed}, skipped {len(result.failed)}"
-    )
-    for where, message in result.failed.items():
-        typer.echo(f"  {where}: {message}", err=True)
-    if result.failed:
-        raise typer.Exit(1)
+        source_id = core_db.register_source(conn, code=chosen_code, kind=adapter_type.kind, name=chosen_name,
+                                            url=chosen_url, adapter=adapter, config=chosen_config)
+    typer.echo(f"registered source {chosen_code} (id {source_id})")
 
 
-@gold_app.command("bruckner")
-def gold_bruckner(
-    path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, help="Their <date>_ctis_study_final_dataset.csv")],
+@source_app.command("config")
+def source_config(
+    code: Annotated[str, typer.Argument(help="The source, e.g. ctis")],
+    config: Annotated[
+        Path | None, typer.Option(exists=True, dir_okay=False, help="Replace its config with this JSON file")
+    ] = None,
+    enable: Annotated[bool | None, typer.Option("--enable/--disable", help="Switch the source on or off")] = None,
 ) -> None:
-    """Load Bruckner et al.'s final verdict per trial (the answer key for ADR-001)."""
+    """Show a source's config, or replace it (one current config; each run records the one it used)."""
     with db.connect() as conn:
-        result = seed_verdicts(conn, path)
-    typer.echo(
-        f"run {result.run_id}: read {result.fetched}, new {result.changed}, skipped {len(result.failed)}"
-    )
-    for where, message in result.failed.items():
-        typer.echo(f"  {where}: {message}", err=True)
+        source = _registered(conn, code)
+        if config is not None or enable is not None:
+            chosen = source.config
+            if config is not None:
+                chosen = _read_config(config, registry.adapter_class(source.adapter)())
+            enabled = source.enabled
+            if enable is not None:
+                enabled = enable
+            core_db.set_source_config(conn, code, chosen, enabled)
+            source = _registered(conn, code)
+    typer.echo(json.dumps({"enabled": source.enabled, "config": source.config}, indent=2))
+
+
+@source_app.command("sync")
+def source_sync(code: Annotated[str, typer.Argument(help="The source, e.g. ctis")]) -> None:
+    """Sync a source's list: every trial it lists (as its config filters them) becomes a trial here,
+    with its key, title and identifiers. Records and documents come with `source transfer`."""
+    with db.connect(actor=f"{code}-adapter", actor_kind="process") as conn:
+        source = _registered(conn, code)
+        with registry.open_adapter(source.adapter) as adapter:
+            try:
+                result = stages.sync_list(conn, source, adapter, progress=typer.echo)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+    typer.echo(result.summary())
+    _echo_failures(result.failed)
     if result.failed:
         raise typer.Exit(1)
 
 
-@gold_app.command("bruckner-reviews")
-def gold_bruckner_reviews(
-    path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, help="Their ctis_merged_reviews_consolidated_with_comments.csv")],
+@source_app.command("transfer")
+def source_transfer(
+    code: Annotated[str, typer.Argument(help="The source, e.g. ctis")],
+    keys: Annotated[list[str] | None, typer.Argument(help="The source's keys of the trials, e.g. EU CT numbers")] = None,
+    from_file: Annotated[
+        Path | None, typer.Option("--file", exists=True, dir_okay=False, help="A file with one key per line")
+    ] = None,
+    which: Annotated[str | None, typer.Option(help="Instead of keys: pending | failed | stale | listed")] = None,
+    limit: Annotated[int | None, typer.Option(min=1, help="Transfer at most this many trials")] = None,
+    files_dir: Annotated[
+        Path | None, typer.Option(help="Also write each file here, to read by hand (never overwritten or removed)")
+    ] = None,
 ) -> None:
-    """Load each reviewer's answers per part for Bruckner et al.'s 206 results documents."""
-    with db.connect() as conn:
-        result = seed_reviews(conn, path)
-    typer.echo(
-        f"run {result.run_id}: read {result.fetched}, new {result.changed}, skipped {len(result.failed)}"
-    )
-    for where, message in result.failed.items():
-        typer.echo(f"  {where}: {message}", err=True)
+    """Transfer trials' evidence from a source: the full record and the documents its config names,
+    with their page text read. Only trials whose evidence is complete and current can be checked."""
+    given = []
+    if keys:
+        for key in keys:
+            given.append(key)
+    if from_file is not None:
+        for key in _lines_of(from_file):
+            given.append(key)
+    if given and which:
+        raise typer.BadParameter("give keys or --which, not both")
+    if not given and not which:
+        raise typer.BadParameter("give keys, --file or --which")
+    with db.connect(actor=f"{code}-adapter", actor_kind="process") as conn:
+        source = _registered(conn, code)
+        why = "chosen"
+        if which:
+            try:
+                given = core_db.keys_to_transfer(conn, code, which)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc), param_hint="--which") from exc
+            why = which
+        if limit is not None:
+            given = given[:limit]
+        typer.echo(f"{len(given)} trials to transfer from {code} ({why})")
+        with registry.open_adapter(source.adapter) as adapter:
+            try:
+                result = stages.transfer(conn, source, adapter, given, why=why, files_dir=files_dir,
+                                         progress=typer.echo)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+    typer.echo(result.summary())
+    _echo_failures(result.failed)
     if result.failed:
         raise typer.Exit(1)
 
 
-@gold_app.command("compare-due")
-def gold_compare_due() -> None:
-    """Run our due-date rules on Bruckner et al.'s export and compare with their verdicts, trial by trial."""
-    with db.connect() as conn:
+# --- the evidence check (ADR-004) ----------------------------------------------------------------
+
+def _ct_numbers_given(ct_numbers: list[str] | None, from_file: Path | None) -> list[str]:
+    """The CT numbers from the arguments and the file, each once, checked for their format."""
+    given = []
+    if ct_numbers:
+        for ct_number in ct_numbers:
+            given.append(ct_number)
+    if from_file is not None:
+        for ct_number in _lines_of(from_file):
+            given.append(ct_number)
+    wanted = []
+    for ct_number in given:
+        if not CT_NUMBER.fullmatch(ct_number):
+            raise typer.BadParameter(f"not an EU CT number: {ct_number!r}")
+        if ct_number not in wanted:
+            wanted.append(ct_number)
+    if not wanted:
+        raise typer.BadParameter("give CT numbers, --file or --all")
+    return wanted
+
+
+def _trials_to_judge(conn, ct_numbers: list[str] | None, from_file: Path | None, all_trials: bool,
+                     requirement_set: requirement_sets.RequirementSet) -> list[int]:
+    """core.trial ids: every trial a check of this requirement set may read now (--all), or the trials
+    with these EU CT numbers."""
+    if all_trials:
+        return stages.ready_trials(conn, requirement_set.document_kinds)
+    wanted = _ct_numbers_given(ct_numbers, from_file)
+    found = core_db.trials_with_scheme(conn, "eu-ct", wanted)
+    missing = []
+    for ct_number in wanted:
+        if ct_number not in found:
+            missing.append(ct_number)
+    if missing:
+        raise typer.BadParameter(f"not in the database (run `trialwatch source transfer ctis` first): {', '.join(missing)}")
+    trial_ids = []
+    for ct_number in wanted:
+        trial_ids.append(found[ct_number])
+    return trial_ids
+
+
+@check_app.command("evidence")
+def check_evidence(
+    ct_numbers: Annotated[list[str] | None, typer.Argument(help="EU CT numbers, e.g. 2025-522750-39-00")] = None,
+    from_file: Annotated[
+        Path | None, typer.Option("--file", exists=True, dir_okay=False, help="A file with one EU CT number per line")
+    ] = None,
+    all_trials: Annotated[
+        bool, typer.Option("--all", help="Every trial whose evidence is complete and current, with page text to read")
+    ] = False,
+    limit: Annotated[int | None, typer.Option(min=1, help="Judge at most this many trials")] = None,
+    config: Annotated[
+        str, typer.Option(help="The setup to run with: a file in checks/configs/, without .json (see `check configs`)")
+    ] = check_settings.DEFAULT,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show questions and pages per trial; call nothing")] = False,
+) -> None:
+    """Judge trials with a named setup (checks/configs/): retrieve the pages of every document of its
+    requirement set's kinds linked to the trial, have the model quote evidence, verify every quote
+    against the page text, and decide with the set's rules. Each run adds rows, with a step-by-step
+    trace per trial, and records the setup it used."""
+    try:
+        settings = check_settings.load(config)
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="--config") from exc
+    requirement_set = requirement_sets.load(settings.requirements)
+    system_prompt = load_prompt(settings.prompt)
+    with db.connect(actor="evidence-check", actor_kind="process") as conn:
+        trial_ids = _trials_to_judge(conn, ct_numbers, from_file, all_trials, requirement_set)
+        if limit is not None:
+            trial_ids = trial_ids[:limit]
         try:
-            result = compare_due(conn)
-        except ValueError as exc:
-            typer.echo(f"cannot compare: {exc}", err=True)
-            raise typer.Exit(1) from exc
-    both = len(result.due_ours & result.due_theirs)
-    typer.echo(f"CTIS export of {SNAPSHOT_DAY}: {result.trials} trials, {result.ended} ended")
-    typer.echo(f"due: ours {len(result.due_ours)}, theirs {len(result.due_theirs)}, both {both}")
-    for name, (compared, agreed) in result.fields.items():
-        typer.echo(f"  {name:<16} {agreed}/{compared} agree")
-    for d in result.disagreements:
-        typer.echo(f"  {d.ct_number} {d.field}: ours {d.ours!r}, theirs {d.theirs!r}", err=True)
-    if result.disagreements:
+            evidence.refuse_unready(conn, trial_ids, requirement_set)
+        except evidence.NotReady as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        typer.echo(f"{settings.summary()} (prompt sha256 {system_prompt.sha256.hex()[:12]}) · {len(trial_ids)} trials")
+        if dry_run:
+            names = core_db.trial_names(conn, trial_ids)
+            for trial_id in trial_ids:
+                questions, pages = evidence.preview_trial(conn, trial_id, requirement_set)
+                typer.echo(f"{names[trial_id]} (trial {trial_id}): {len(pages)} pages, {len(questions)} questions")
+                for question in questions:
+                    typer.echo(f"  {question.key}")
+            return
+        import anthropic
+
+        client = anthropic.Anthropic(base_url=ANTHROPIC_API, max_retries=4)
+        summary = evidence.run(conn, client, trial_ids, settings, system_prompt, progress=typer.echo,
+                               requirement_set=requirement_set)
+    typer.echo(summary.summary())
+    _echo_failures(summary.failed)
+    if summary.failed:
         raise typer.Exit(1)
+
+
+@check_app.command("configs")
+def check_configs() -> None:
+    """The setups a check can run with (checks/configs/*.json), each with its settings."""
+    for name in check_settings.names():
+        try:
+            settings = check_settings.load(name)
+        except ValueError as exc:
+            typer.echo(f"{name}: can't be used: {exc}", err=True)
+            continue
+        typer.echo(settings.summary())
+        typer.echo(f"  {settings.description}")
+        typer.echo(f"  whole up to {settings.whole_pages} pages, {settings.top_k} pages per question, "
+                   f"max_tokens {settings.max_tokens}, fallbacks {settings.fallbacks}")
+
+
+# --- gold datasets (ADR-003) ---------------------------------------------------------------------
+
+@gold_app.command("build")
+def gold_build(
+    converter: Annotated[str, typer.Argument(help="Which source's files to convert: bruckner")],
+    data_dir: Annotated[
+        Path, typer.Option(exists=True, file_okay=False, help="Folder with the source's files")
+    ] = Path("data/bruckner"),
+) -> None:
+    """Build a gold dataset version under data/gold/ and lock it in data/gold/versions.lock."""
+    if converter not in GOLD_CONVERTERS:
+        raise typer.BadParameter(f"choose one of: {', '.join(sorted(GOLD_CONVERTERS))}", param_hint="CONVERTER")
+    build_version = GOLD_CONVERTERS[converter]
+    meta, items = build_version(data_dir)
+    try:
+        ref, written = datasets.write_version(datasets.gold_dir(), meta, items)
+    except datasets.VersionIsFixed as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    if written:
+        typer.echo(f"{ref}: {len(items)} items written and locked")
+    else:
+        typer.echo(f"{ref}: unchanged ({len(items)} items)")
+
+
+@gold_app.command("datasets")
+def gold_datasets() -> None:
+    """List the gold dataset versions and check each against data/gold/versions.lock."""
+    for ref in datasets.dataset_refs():
+        dataset = datasets.load(ref)
+        labelled = 0
+        for item in dataset.items:
+            if item.expected_label is not None:
+                labelled += 1
+        typer.echo(f"{ref}: {len(dataset.items)} items, {labelled} with a label · requirements {dataset.requirements}")
+    problems = datasets.lock_problems()
+    for problem in problems:
+        typer.echo(f"  {problem}", err=True)
+    if problems:
+        raise typer.Exit(1)
+
+
+@gold_app.command("compare")
+def gold_compare_run(
+    run: Annotated[int, typer.Option(help="The check run whose judgements are scored")],
+    dataset: Annotated[
+        str | None, typer.Option(help="A dataset version, e.g. bruckner/2026-03-16 (default: the newest whose labels "
+                                      "answer the run's requirement set)")
+    ] = None,
+) -> None:
+    """Score one check run against a gold dataset, part by part and per trial."""
+    with db.connect() as conn:
+        ref = dataset
+        if ref is None:
+            ref = gold_compare.dataset_for_run(conn, run)
+        if ref is None:
+            raise typer.BadParameter(f"no gold dataset answers run {run}'s requirement set", param_hint="--dataset")
+        try:
+            scored = gold_compare.compare_run(conn, run, datasets.load(ref))
+        except (FileNotFoundError, ValueError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    for line in gold_compare.report_lines(scored):
+        typer.echo(line)
+    for line in gold_compare.disagreement_lines(scored):
+        typer.echo(line, err=True)

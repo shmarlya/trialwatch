@@ -16,24 +16,93 @@ SET client_min_messages = warning;
 SET row_security = off;
 
 --
--- Name: ctis; Type: SCHEMA; Schema: -; Owner: -
+-- Name: checks; Type: SCHEMA; Schema: -; Owner: -
 --
 
-CREATE SCHEMA ctis;
-
-
---
--- Name: gold; Type: SCHEMA; Schema: -; Owner: -
---
-
-CREATE SCHEMA gold;
+CREATE SCHEMA checks;
 
 
 --
--- Name: ref; Type: SCHEMA; Schema: -; Owner: -
+-- Name: core; Type: SCHEMA; Schema: -; Owner: -
 --
 
-CREATE SCHEMA ref;
+CREATE SCHEMA core;
+
+
+--
+-- Name: audit(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.audit() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    actor_setting text := current_setting('trialwatch.actor', true);
+    key_columns   text[] := string_to_array(TG_ARGV[0], ',');
+    left_out      text[] := coalesce(string_to_array(nullif(TG_ARGV[1], ''), ','), '{}');
+    old_json      jsonb;
+    new_json      jsonb;
+    key_json      jsonb := '{}';
+    key_column    text;
+BEGIN
+    IF actor_setting IS NULL OR actor_setting = '' THEN
+        RAISE EXCEPTION 'who is writing to %? set trialwatch.actor to a core.actor id first', TG_TABLE_NAME
+            USING HINT = 'trialwatch.db.connect(actor=...) sets it';
+    END IF;
+    IF TG_OP <> 'INSERT' THEN
+        old_json := to_jsonb(OLD) - left_out;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        new_json := to_jsonb(NEW) - left_out;
+    END IF;
+    FOREACH key_column IN ARRAY key_columns LOOP
+        key_json := key_json || jsonb_build_object(key_column, coalesce(new_json, old_json) -> key_column);
+    END LOOP;
+    -- an update that changes nothing (e.g. ON CONFLICT ... DO UPDATE to the same values) is not logged
+    IF TG_OP = 'UPDATE' AND old_json = new_json THEN
+        RETURN NEW;
+    END IF;
+    INSERT INTO core.audit_log (actor_id, action, table_name, row_key, old_row, new_row, note)
+    VALUES (actor_setting::bigint, lower(TG_OP), TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME, key_json,
+            old_json, new_json, nullif(current_setting('trialwatch.note', true), ''));
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: check_identifier(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.check_identifier() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    expected text;
+BEGIN
+    SELECT pattern INTO expected FROM core.identifier_scheme WHERE code = NEW.scheme;
+    IF NEW.value !~ expected THEN
+        RAISE EXCEPTION '% is not a valid % identifier (%)', NEW.value, NEW.scheme, expected;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: refuse_change(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.refuse_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;
+END
+$$;
 
 
 SET default_tablespace = '';
@@ -41,32 +110,542 @@ SET default_tablespace = '';
 SET default_table_access_method = heap;
 
 --
--- Name: fetch_run; Type: TABLE; Schema: ctis; Owner: -
+-- Name: evidence; Type: TABLE; Schema: checks; Owner: -
 --
 
-CREATE TABLE ctis.fetch_run (
+CREATE TABLE checks.evidence (
+    id bigint NOT NULL,
+    run_id bigint NOT NULL,
+    trial_id bigint NOT NULL,
+    key text NOT NULL,
+    found boolean,
+    kind text,
+    quote text,
+    document_version_id bigint,
+    file_sha256 bytea,
+    page_no integer,
+    note text,
+    verified boolean NOT NULL
+);
+
+
+--
+-- Name: evidence_id_seq; Type: SEQUENCE; Schema: checks; Owner: -
+--
+
+ALTER TABLE checks.evidence ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME checks.evidence_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: judgement; Type: TABLE; Schema: checks; Owner: -
+--
+
+CREATE TABLE checks.judgement (
+    run_id bigint NOT NULL,
+    trial_id bigint NOT NULL,
+    label text,
+    parts jsonb DEFAULT '{}'::jsonb NOT NULL,
+    trace jsonb,
+    trial_record_id bigint,
+    document_versions bigint[] DEFAULT '{}'::bigint[] NOT NULL,
+    served_by text[],
+    input_tokens integer,
+    output_tokens integer,
+    duration_ms integer,
+    error text,
+    CONSTRAINT judgement_check CHECK (((label IS NULL) = (error IS NOT NULL))),
+    CONSTRAINT judgement_label_check CHECK ((label = ANY (ARRAY['full'::text, 'not full'::text, 'undecided'::text])))
+);
+
+
+--
+-- Name: run; Type: TABLE; Schema: checks; Owner: -
+--
+
+CREATE TABLE checks.run (
+    id bigint NOT NULL,
+    check_name text NOT NULL,
+    actor_id bigint NOT NULL,
+    model text NOT NULL,
+    effort text NOT NULL,
+    prompt text NOT NULL,
+    prompt_sha256 bytea NOT NULL,
+    prompt_text text NOT NULL,
+    requirements text NOT NULL,
+    requirements_sha256 bytea NOT NULL,
+    requirements_text text NOT NULL,
+    params jsonb DEFAULT '{}'::jsonb NOT NULL,
+    status text DEFAULT 'running'::text NOT NULL,
+    error text,
+    started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    finished_at timestamp with time zone,
+    trials integer DEFAULT 0 NOT NULL,
+    errors integer DEFAULT 0 NOT NULL,
+    input_tokens bigint DEFAULT 0 NOT NULL,
+    output_tokens bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT run_check CHECK (((status = 'running'::text) = (finished_at IS NULL))),
+    CONSTRAINT run_prompt_sha256_check CHECK ((length(prompt_sha256) = 32)),
+    CONSTRAINT run_requirements_sha256_check CHECK ((length(requirements_sha256) = 32)),
+    CONSTRAINT run_status_check CHECK ((status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'stopped'::text])))
+);
+
+
+--
+-- Name: document; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.document (
+    id bigint NOT NULL,
+    source_id smallint NOT NULL,
+    source_key text NOT NULL,
+    kind text NOT NULL,
+    title text,
+    language text,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL
+);
+
+
+--
+-- Name: document_version; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.document_version (
+    id bigint NOT NULL,
+    document_id bigint NOT NULL,
+    version text NOT NULL,
+    file_sha256 bytea NOT NULL,
+    published_at timestamp with time zone,
+    fetched_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    replaced_at timestamp with time zone,
+    created_by bigint NOT NULL
+);
+
+
+--
+-- Name: COLUMN document_version.version; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core.document_version.version IS 'the source''s version label (CTIS systemVersion), or 1 for an upload; a source may replace a file without changing it, so a label can repeat: file_sha256 tells the versions apart';
+
+
+--
+-- Name: document_current; Type: VIEW; Schema: core; Owner: -
+--
+
+CREATE VIEW core.document_current AS
+ SELECT d.id,
+    d.source_id,
+    d.source_key,
+    d.kind,
+    d.title,
+    d.language,
+    d.created_at,
+    d.created_by,
+    v.id AS version_id,
+    v.version,
+    v.file_sha256,
+    v.published_at,
+    v.fetched_at
+   FROM (core.document d
+     JOIN core.document_version v ON (((v.document_id = d.id) AND (v.replaced_at IS NULL))));
+
+
+--
+-- Name: trial_document; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.trial_document (
+    trial_id bigint NOT NULL,
+    document_id bigint NOT NULL,
+    basis text NOT NULL,
+    source_id smallint NOT NULL,
+    confidence real DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL,
+    removed_at timestamp with time zone,
+    removed_by bigint,
+    removal text,
+    CONSTRAINT trial_document_basis_check CHECK ((basis = ANY (ARRAY['listed-by-source'::text, 'identifier-in-text'::text, 'manual'::text]))),
+    CONSTRAINT trial_document_check CHECK ((((removed_at IS NULL) = (removed_by IS NULL)) AND ((removed_at IS NULL) = (removal IS NULL)))),
+    CONSTRAINT trial_document_confidence_check CHECK (((confidence > (0)::double precision) AND (confidence <= (1)::double precision))),
+    CONSTRAINT trial_document_removal_check CHECK ((removal = ANY (ARRAY['source'::text, 'person'::text])))
+);
+
+
+--
+-- Name: trial_record; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.trial_record (
+    id bigint NOT NULL,
+    source_id smallint NOT NULL,
+    source_key text NOT NULL,
+    content_hash bytea NOT NULL,
+    payload jsonb NOT NULL,
+    registered jsonb DEFAULT '{}'::jsonb NOT NULL,
+    fetched_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL,
+    CONSTRAINT trial_record_content_hash_check CHECK ((length(content_hash) = 32))
+);
+ALTER TABLE ONLY core.trial_record ALTER COLUMN payload SET COMPRESSION lz4;
+
+
+--
+-- Name: trial_source; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.trial_source (
+    source_id smallint NOT NULL,
+    source_key text NOT NULL,
+    trial_id bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL
+);
+
+
+--
+-- Name: trial_record_current; Type: VIEW; Schema: core; Owner: -
+--
+
+CREATE VIEW core.trial_record_current AS
+ SELECT s.trial_id,
+    r.id,
+    r.source_id,
+    r.source_key,
+    r.content_hash,
+    r.payload,
+    r.registered,
+    r.fetched_at,
+    r.created_by
+   FROM (core.trial_source s
+     CROSS JOIN LATERAL ( SELECT r_1.id,
+            r_1.source_id,
+            r_1.source_key,
+            r_1.content_hash,
+            r_1.payload,
+            r_1.registered,
+            r_1.fetched_at,
+            r_1.created_by
+           FROM core.trial_record r_1
+          WHERE ((r_1.source_id = s.source_id) AND (r_1.source_key = s.source_key))
+          ORDER BY r_1.fetched_at DESC, r_1.id DESC
+         LIMIT 1) r);
+
+
+--
+-- Name: judgement_current; Type: VIEW; Schema: checks; Owner: -
+--
+
+CREATE VIEW checks.judgement_current AS
+ SELECT DISTINCT ON (j.trial_id, r.requirements) j.run_id,
+    j.trial_id,
+    j.label,
+    j.parts,
+    j.trace,
+    j.trial_record_id,
+    j.document_versions,
+    j.served_by,
+    j.input_tokens,
+    j.output_tokens,
+    j.duration_ms,
+    r.model,
+    r.prompt,
+    r.requirements,
+    r.started_at,
+    ((EXISTS ( SELECT
+           FROM (core.document_version v
+             JOIN core.trial_document l ON (((l.document_id = v.document_id) AND (l.trial_id = j.trial_id))))
+          WHERE ((v.id = ANY (j.document_versions)) AND ((v.replaced_at IS NOT NULL) OR (l.removed_at IS NOT NULL))))) OR (EXISTS ( SELECT
+           FROM (core.trial_document l
+             JOIN core.document_current d ON ((d.id = l.document_id)))
+          WHERE ((l.trial_id = j.trial_id) AND (l.removed_at IS NULL) AND (NOT (d.version_id = ANY (j.document_versions))) AND (d.kind IN ( SELECT jsonb_array_elements_text(((r.requirements_text)::jsonb -> 'document_kinds'::text)) AS jsonb_array_elements_text))))) OR (EXISTS ( SELECT
+           FROM core.trial_record_current c
+          WHERE ((c.trial_id = j.trial_id) AND (c.id IS DISTINCT FROM j.trial_record_id) AND (c.fetched_at > r.started_at))))) AS outdated
+   FROM (checks.judgement j
+     JOIN checks.run r ON ((r.id = j.run_id)))
+  WHERE ((j.error IS NULL) AND (r.status <> 'running'::text))
+  ORDER BY j.trial_id, r.requirements, j.run_id DESC;
+
+
+--
+-- Name: question; Type: TABLE; Schema: checks; Owner: -
+--
+
+CREATE TABLE checks.question (
+    run_id bigint NOT NULL,
+    trial_id bigint NOT NULL,
+    key text NOT NULL,
+    item_text text,
+    pages jsonb NOT NULL,
+    widened boolean DEFAULT false NOT NULL
+);
+
+
+--
+-- Name: run_id_seq; Type: SEQUENCE; Schema: checks; Owner: -
+--
+
+ALTER TABLE checks.run ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME checks.run_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: step; Type: TABLE; Schema: checks; Owner: -
+--
+
+CREATE TABLE checks.step (
+    run_id bigint NOT NULL,
+    trial_id bigint NOT NULL,
+    seq integer NOT NULL,
+    name text NOT NULL,
+    at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    duration_ms integer,
+    data jsonb DEFAULT '{}'::jsonb NOT NULL
+);
+
+
+--
+-- Name: actor; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.actor (
     id bigint NOT NULL,
     kind text NOT NULL,
+    name text NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT actor_kind_check CHECK ((kind = ANY (ARRAY['person'::text, 'process'::text])))
+);
+
+
+--
+-- Name: actor_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.actor ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.actor_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: audit_log; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.audit_log (
+    id bigint NOT NULL,
+    at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    actor_id bigint NOT NULL,
+    action text NOT NULL,
+    table_name text NOT NULL,
+    row_key jsonb NOT NULL,
+    old_row jsonb,
+    new_row jsonb,
+    note text,
+    CONSTRAINT audit_log_action_check CHECK ((action = ANY (ARRAY['insert'::text, 'update'::text, 'delete'::text])))
+);
+
+
+--
+-- Name: audit_log_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.audit_log ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.audit_log_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: document_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.document ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.document_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: document_kind; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.document_kind (
+    code text NOT NULL,
+    label text NOT NULL,
+    has_results boolean DEFAULT false NOT NULL,
+    CONSTRAINT document_kind_code_check CHECK ((code ~ '^[a-z][a-z0-9-]*$'::text))
+);
+
+
+--
+-- Name: document_version_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.document_version ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.document_version_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: evidence_transfer; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.evidence_transfer (
+    source_id smallint NOT NULL,
+    source_key text NOT NULL,
+    status text NOT NULL,
+    transferred_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    transferred_by bigint NOT NULL,
+    ingest_run_id bigint,
+    document_kinds text[],
+    source_updated_on date,
+    documents integer DEFAULT 0 NOT NULL,
+    pages integer DEFAULT 0 NOT NULL,
+    errors jsonb DEFAULT '{}'::jsonb NOT NULL,
+    CONSTRAINT evidence_transfer_check CHECK (((status = 'complete'::text) = (errors = '{}'::jsonb))),
+    CONSTRAINT evidence_transfer_status_check CHECK ((status = ANY (ARRAY['complete'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: source_listing; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.source_listing (
+    source_id smallint NOT NULL,
+    source_key text NOT NULL,
+    title text,
+    source_updated_on date,
+    summary jsonb DEFAULT '{}'::jsonb NOT NULL,
+    first_listed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    last_listed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    last_run bigint NOT NULL,
+    delisted_at timestamp with time zone
+);
+
+
+--
+-- Name: evidence_status; Type: VIEW; Schema: core; Owner: -
+--
+
+CREATE VIEW core.evidence_status AS
+ SELECT ts.source_id,
+    ts.source_key,
+    ts.trial_id,
+    (l.source_key IS NOT NULL) AS listed,
+    l.delisted_at,
+    l.title,
+    l.source_updated_on,
+    l.summary,
+        CASE
+            WHEN (e.status IS NULL) THEN 'not transferred'::text
+            WHEN (e.status = 'failed'::text) THEN 'failed'::text
+            WHEN (l.source_updated_on >= ((e.transferred_at AT TIME ZONE 'UTC'::text))::date) THEN 'stale'::text
+            ELSE 'complete'::text
+        END AS status,
+    e.transferred_at,
+    e.ingest_run_id,
+    e.document_kinds,
+    e.documents,
+    e.pages,
+    e.errors
+   FROM ((core.trial_source ts
+     LEFT JOIN core.source_listing l USING (source_id, source_key))
+     LEFT JOIN core.evidence_transfer e USING (source_id, source_key));
+
+
+--
+-- Name: file; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.file (
+    sha256 bytea NOT NULL,
+    size_bytes bigint NOT NULL,
+    media_type text,
+    content bytea NOT NULL,
+    text_fingerprint bytea,
+    pages_extracted_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL,
+    CONSTRAINT file_check CHECK ((size_bytes = length(content))),
+    CONSTRAINT file_sha256_check CHECK ((length(sha256) = 32)),
+    CONSTRAINT file_text_fingerprint_check CHECK ((length(text_fingerprint) = 32))
+);
+ALTER TABLE ONLY core.file ALTER COLUMN content SET STORAGE EXTERNAL;
+
+
+--
+-- Name: identifier_scheme; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.identifier_scheme (
+    code text NOT NULL,
+    label text NOT NULL,
+    pattern text NOT NULL,
+    identifies text DEFAULT 'trial'::text NOT NULL,
+    CONSTRAINT identifier_scheme_code_check CHECK ((code ~ '^[a-z][a-z0-9-]*$'::text)),
+    CONSTRAINT identifier_scheme_identifies_check CHECK ((identifies = ANY (ARRAY['trial'::text, 'organisation'::text])))
+);
+
+
+--
+-- Name: ingest_run; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.ingest_run (
+    id bigint NOT NULL,
+    source_id smallint NOT NULL,
+    kind text NOT NULL,
+    actor_id bigint NOT NULL,
     args jsonb DEFAULT '{}'::jsonb NOT NULL,
     status text DEFAULT 'running'::text NOT NULL,
-    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     finished_at timestamp with time zone,
-    trials_fetched integer DEFAULT 0 NOT NULL,
-    trials_changed integer DEFAULT 0 NOT NULL,
-    trials_failed integer DEFAULT 0 NOT NULL,
-    error text,
-    CONSTRAINT fetch_run_check CHECK (((status = 'running'::text) = (finished_at IS NULL))),
-    CONSTRAINT fetch_run_kind_check CHECK ((kind = ANY (ARRAY['fetch'::text, 'seed'::text, 'sync'::text]))),
-    CONSTRAINT fetch_run_status_check CHECK ((status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text])))
+    counts jsonb DEFAULT '{}'::jsonb NOT NULL,
+    errors jsonb DEFAULT '{}'::jsonb NOT NULL,
+    CONSTRAINT ingest_run_check CHECK (((status = 'running'::text) = (finished_at IS NULL))),
+    CONSTRAINT ingest_run_kind_check CHECK ((kind = ANY (ARRAY['list'::text, 'transfer'::text]))),
+    CONSTRAINT ingest_run_status_check CHECK ((status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text])))
 );
 
 
 --
--- Name: fetch_run_id_seq; Type: SEQUENCE; Schema: ctis; Owner: -
+-- Name: ingest_run_id_seq; Type: SEQUENCE; Schema: core; Owner: -
 --
 
-ALTER TABLE ctis.fetch_run ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
-    SEQUENCE NAME ctis.fetch_run_id_seq
+ALTER TABLE core.ingest_run ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.ingest_run_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -76,28 +655,31 @@ ALTER TABLE ctis.fetch_run ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
 
 
 --
--- Name: search_export_snapshot; Type: TABLE; Schema: ctis; Owner: -
+-- Name: organisation; Type: TABLE; Schema: core; Owner: -
 --
 
-CREATE TABLE ctis.search_export_snapshot (
+CREATE TABLE core.organisation (
     id bigint NOT NULL,
-    ct_number text NOT NULL,
-    fetch_run_id bigint NOT NULL,
-    captured_on date NOT NULL,
-    source_file text NOT NULL,
-    content_hash bytea NOT NULL,
-    payload jsonb NOT NULL,
-    CONSTRAINT search_export_snapshot_content_hash_check CHECK ((length(content_hash) = 32))
+    name text NOT NULL,
+    name_key text GENERATED ALWAYS AS (lower(regexp_replace(btrim(name), '\s+'::text, ' '::text, 'g'::text))) STORED,
+    kind text,
+    country text,
+    commercial boolean,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL,
+    first_source smallint NOT NULL,
+    merged_into bigint,
+    CONSTRAINT organisation_check CHECK ((merged_into IS DISTINCT FROM id)),
+    CONSTRAINT organisation_name_check CHECK ((btrim(name) <> ''::text))
 );
-ALTER TABLE ONLY ctis.search_export_snapshot ALTER COLUMN payload SET COMPRESSION lz4;
 
 
 --
--- Name: search_export_snapshot_id_seq; Type: SEQUENCE; Schema: ctis; Owner: -
+-- Name: organisation_id_seq; Type: SEQUENCE; Schema: core; Owner: -
 --
 
-ALTER TABLE ctis.search_export_snapshot ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
-    SEQUENCE NAME ctis.search_export_snapshot_id_seq
+ALTER TABLE core.organisation ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.organisation_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -107,54 +689,59 @@ ALTER TABLE ctis.search_export_snapshot ALTER COLUMN id ADD GENERATED ALWAYS AS 
 
 
 --
--- Name: trial; Type: TABLE; Schema: ctis; Owner: -
+-- Name: organisation_identifier; Type: TABLE; Schema: core; Owner: -
 --
 
-CREATE TABLE ctis.trial (
-    ct_number text NOT NULL,
-    first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
-    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT trial_ct_number_check CHECK ((ct_number ~ '^\d{4}-\d{6}-\d{2}-\d{2}$'::text))
+CREATE TABLE core.organisation_identifier (
+    scheme text NOT NULL,
+    value text NOT NULL,
+    organisation_id bigint NOT NULL,
+    source_id smallint NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL
 );
 
 
 --
--- Name: trial_snapshot; Type: TABLE; Schema: ctis; Owner: -
+-- Name: page; Type: TABLE; Schema: core; Owner: -
 --
 
-CREATE TABLE ctis.trial_snapshot (
+CREATE TABLE core.page (
+    file_sha256 bytea NOT NULL,
+    page_no integer NOT NULL,
+    text text NOT NULL,
+    extractor text NOT NULL,
+    tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, text)) STORED,
+    CONSTRAINT page_page_no_check CHECK ((page_no >= 1))
+);
+
+
+--
+-- Name: possible_duplicate; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.possible_duplicate (
     id bigint NOT NULL,
-    ct_number text NOT NULL,
-    fetch_run_id bigint NOT NULL,
-    fetched_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    content_hash bytea NOT NULL,
-    payload jsonb NOT NULL,
-    CONSTRAINT trial_snapshot_content_hash_check CHECK ((length(content_hash) = 32))
+    trial_a bigint NOT NULL,
+    trial_b bigint NOT NULL,
+    evidence jsonb NOT NULL,
+    status text DEFAULT 'open'::text NOT NULL,
+    decided_by bigint,
+    decided_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL,
+    CONSTRAINT possible_duplicate_check CHECK ((trial_a < trial_b)),
+    CONSTRAINT possible_duplicate_check1 CHECK (((status = 'open'::text) = (decided_at IS NULL))),
+    CONSTRAINT possible_duplicate_status_check CHECK ((status = ANY (ARRAY['open'::text, 'merged'::text, 'distinct'::text])))
 );
-ALTER TABLE ONLY ctis.trial_snapshot ALTER COLUMN payload SET COMPRESSION lz4;
 
 
 --
--- Name: trial_latest; Type: VIEW; Schema: ctis; Owner: -
+-- Name: possible_duplicate_id_seq; Type: SEQUENCE; Schema: core; Owner: -
 --
 
-CREATE VIEW ctis.trial_latest AS
- SELECT DISTINCT ON (ct_number) id,
-    ct_number,
-    fetch_run_id,
-    fetched_at,
-    content_hash,
-    payload
-   FROM ctis.trial_snapshot
-  ORDER BY ct_number, fetched_at DESC;
-
-
---
--- Name: trial_snapshot_id_seq; Type: SEQUENCE; Schema: ctis; Owner: -
---
-
-ALTER TABLE ctis.trial_snapshot ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
-    SEQUENCE NAME ctis.trial_snapshot_id_seq
+ALTER TABLE core.possible_duplicate ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.possible_duplicate_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -164,57 +751,111 @@ ALTER TABLE ctis.trial_snapshot ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY
 
 
 --
--- Name: bruckner_document; Type: TABLE; Schema: gold; Owner: -
+-- Name: source; Type: TABLE; Schema: core; Owner: -
 --
 
-CREATE TABLE gold.bruckner_document (
-    ct_number text NOT NULL,
-    fetch_run_id bigint NOT NULL,
-    source_file text NOT NULL,
-    results_posted_on date NOT NULL,
-    reviewers_agreed boolean NOT NULL,
-    final_comment text,
-    content_hash bytea NOT NULL,
-    payload jsonb NOT NULL,
-    CONSTRAINT bruckner_document_content_hash_check CHECK ((length(content_hash) = 32))
+CREATE TABLE core.source (
+    id smallint NOT NULL,
+    code text NOT NULL,
+    kind text NOT NULL,
+    name text NOT NULL,
+    url text,
+    adapter text NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL,
+    CONSTRAINT source_code_check CHECK ((code ~ '^[a-z][a-z0-9-]*$'::text)),
+    CONSTRAINT source_kind_check CHECK ((kind = ANY (ARRAY['registry'::text, 'publications'::text, 'manual'::text])))
 );
 
 
 --
--- Name: bruckner_review; Type: TABLE; Schema: gold; Owner: -
+-- Name: source_id_seq; Type: SEQUENCE; Schema: core; Owner: -
 --
 
-CREATE TABLE gold.bruckner_review (
-    ct_number text NOT NULL,
-    reviewer text NOT NULL,
-    participants boolean,
-    outcomes boolean,
-    cancelled boolean,
-    asked_to_check boolean,
-    comment text,
-    CONSTRAINT bruckner_review_reviewer_check CHECK ((reviewer = ANY (ARRAY['first'::text, 'second'::text, 'third'::text])))
+ALTER TABLE core.source ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.source_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
 );
 
 
 --
--- Name: bruckner_verdict; Type: TABLE; Schema: gold; Owner: -
+-- Name: trial; Type: TABLE; Schema: core; Owner: -
 --
 
-CREATE TABLE gold.bruckner_verdict (
-    ct_number text NOT NULL,
-    fetch_run_id bigint NOT NULL,
-    source_file text NOT NULL,
-    verdict text NOT NULL,
-    results_document text NOT NULL,
-    lay_summary boolean NOT NULL,
-    days_to_results integer,
-    comment text,
-    content_hash bytea NOT NULL,
-    payload jsonb NOT NULL,
-    CONSTRAINT bruckner_verdict_check CHECK (((days_to_results IS NULL) = (verdict !~~ 'reported fully%'::text))),
-    CONSTRAINT bruckner_verdict_content_hash_check CHECK ((length(content_hash) = 32)),
-    CONSTRAINT bruckner_verdict_results_document_check CHECK ((results_document = ANY (ARRAY['full'::text, 'incomplete'::text, 'none'::text]))),
-    CONSTRAINT bruckner_verdict_verdict_check CHECK ((verdict = ANY (ARRAY['reported fully on time'::text, 'reported fully late'::text, 'not fully reported'::text, 'extended'::text, 'cancelled'::text])))
+CREATE TABLE core.trial (
+    id bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL,
+    first_source smallint NOT NULL,
+    merged_into bigint,
+    CONSTRAINT trial_check CHECK ((merged_into IS DISTINCT FROM id))
+);
+
+
+--
+-- Name: trial_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.trial ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.trial_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: trial_identifier; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.trial_identifier (
+    scheme text NOT NULL,
+    value text NOT NULL,
+    trial_id bigint NOT NULL,
+    source_id smallint NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL
+);
+
+
+--
+-- Name: trial_record_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.trial_record ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.trial_record_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: trial_sponsor; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.trial_sponsor (
+    trial_id bigint NOT NULL,
+    organisation_id bigint NOT NULL,
+    is_primary boolean NOT NULL,
+    source_id smallint NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL,
+    removed_at timestamp with time zone,
+    removed_by bigint,
+    removal text,
+    CONSTRAINT trial_sponsor_check CHECK ((((removed_at IS NULL) = (removed_by IS NULL)) AND ((removed_at IS NULL) = (removal IS NULL)))),
+    CONSTRAINT trial_sponsor_removal_check CHECK ((removal = ANY (ARRAY['source'::text, 'person'::text])))
 );
 
 
@@ -228,157 +869,251 @@ CREATE TABLE public.schema_migrations (
 
 
 --
--- Name: age_group; Type: TABLE; Schema: ref; Owner: -
+-- Name: evidence evidence_pkey; Type: CONSTRAINT; Schema: checks; Owner: -
 --
 
-CREATE TABLE ref.age_group (
-    code smallint NOT NULL,
-    label text NOT NULL
-);
+ALTER TABLE ONLY checks.evidence
+    ADD CONSTRAINT evidence_pkey PRIMARY KEY (id);
 
 
 --
--- Name: document_type; Type: TABLE; Schema: ref; Owner: -
+-- Name: judgement judgement_pkey; Type: CONSTRAINT; Schema: checks; Owner: -
 --
 
-CREATE TABLE ref.document_type (
-    code smallint NOT NULL,
-    label text NOT NULL,
-    is_result boolean DEFAULT false NOT NULL
-);
+ALTER TABLE ONLY checks.judgement
+    ADD CONSTRAINT judgement_pkey PRIMARY KEY (run_id, trial_id);
 
 
 --
--- Name: early_termination_reason; Type: TABLE; Schema: ref; Owner: -
+-- Name: question question_pkey; Type: CONSTRAINT; Schema: checks; Owner: -
 --
 
-CREATE TABLE ref.early_termination_reason (
-    code smallint NOT NULL,
-    label text NOT NULL
-);
+ALTER TABLE ONLY checks.question
+    ADD CONSTRAINT question_pkey PRIMARY KEY (run_id, trial_id, key);
 
 
 --
--- Name: member_state; Type: TABLE; Schema: ref; Owner: -
+-- Name: run run_pkey; Type: CONSTRAINT; Schema: checks; Owner: -
 --
 
-CREATE TABLE ref.member_state (
-    iso2 character(2) NOT NULL,
-    name text NOT NULL,
-    is_eu boolean NOT NULL
-);
+ALTER TABLE ONLY checks.run
+    ADD CONSTRAINT run_pkey PRIMARY KEY (id);
 
 
 --
--- Name: sponsor_type; Type: TABLE; Schema: ref; Owner: -
+-- Name: step step_pkey; Type: CONSTRAINT; Schema: checks; Owner: -
 --
 
-CREATE TABLE ref.sponsor_type (
-    code smallint NOT NULL,
-    label text NOT NULL
-);
+ALTER TABLE ONLY checks.step
+    ADD CONSTRAINT step_pkey PRIMARY KEY (run_id, trial_id, seq);
 
 
 --
--- Name: trial_phase; Type: TABLE; Schema: ref; Owner: -
+-- Name: actor actor_kind_name_key; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
-CREATE TABLE ref.trial_phase (
-    code smallint NOT NULL,
-    label text NOT NULL
-);
+ALTER TABLE ONLY core.actor
+    ADD CONSTRAINT actor_kind_name_key UNIQUE (kind, name);
 
 
 --
--- Name: trial_region; Type: TABLE; Schema: ref; Owner: -
+-- Name: actor actor_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
-CREATE TABLE ref.trial_region (
-    code smallint NOT NULL,
-    label text NOT NULL
-);
+ALTER TABLE ONLY core.actor
+    ADD CONSTRAINT actor_pkey PRIMARY KEY (id);
 
 
 --
--- Name: trial_status; Type: TABLE; Schema: ref; Owner: -
+-- Name: audit_log audit_log_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
-CREATE TABLE ref.trial_status (
-    code smallint NOT NULL,
-    label text NOT NULL
-);
+ALTER TABLE ONLY core.audit_log
+    ADD CONSTRAINT audit_log_pkey PRIMARY KEY (id);
 
 
 --
--- Name: fetch_run fetch_run_pkey; Type: CONSTRAINT; Schema: ctis; Owner: -
+-- Name: document_kind document_kind_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY ctis.fetch_run
-    ADD CONSTRAINT fetch_run_pkey PRIMARY KEY (id);
-
-
---
--- Name: search_export_snapshot search_export_snapshot_pkey; Type: CONSTRAINT; Schema: ctis; Owner: -
---
-
-ALTER TABLE ONLY ctis.search_export_snapshot
-    ADD CONSTRAINT search_export_snapshot_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY core.document_kind
+    ADD CONSTRAINT document_kind_pkey PRIMARY KEY (code);
 
 
 --
--- Name: search_export_snapshot search_export_snapshot_row_key; Type: CONSTRAINT; Schema: ctis; Owner: -
+-- Name: document document_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY ctis.search_export_snapshot
-    ADD CONSTRAINT search_export_snapshot_row_key UNIQUE (ct_number, captured_on, source_file, content_hash);
-
-
---
--- Name: trial trial_pkey; Type: CONSTRAINT; Schema: ctis; Owner: -
---
-
-ALTER TABLE ONLY ctis.trial
-    ADD CONSTRAINT trial_pkey PRIMARY KEY (ct_number);
+ALTER TABLE ONLY core.document
+    ADD CONSTRAINT document_pkey PRIMARY KEY (id);
 
 
 --
--- Name: trial_snapshot trial_snapshot_ct_number_fetched_at_key; Type: CONSTRAINT; Schema: ctis; Owner: -
+-- Name: document document_source_id_source_key_key; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY ctis.trial_snapshot
-    ADD CONSTRAINT trial_snapshot_ct_number_fetched_at_key UNIQUE (ct_number, fetched_at);
-
-
---
--- Name: trial_snapshot trial_snapshot_pkey; Type: CONSTRAINT; Schema: ctis; Owner: -
---
-
-ALTER TABLE ONLY ctis.trial_snapshot
-    ADD CONSTRAINT trial_snapshot_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY core.document
+    ADD CONSTRAINT document_source_id_source_key_key UNIQUE (source_id, source_key);
 
 
 --
--- Name: bruckner_document bruckner_document_pkey; Type: CONSTRAINT; Schema: gold; Owner: -
+-- Name: document_version document_version_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY gold.bruckner_document
-    ADD CONSTRAINT bruckner_document_pkey PRIMARY KEY (ct_number);
-
-
---
--- Name: bruckner_review bruckner_review_pkey; Type: CONSTRAINT; Schema: gold; Owner: -
---
-
-ALTER TABLE ONLY gold.bruckner_review
-    ADD CONSTRAINT bruckner_review_pkey PRIMARY KEY (ct_number, reviewer);
+ALTER TABLE ONLY core.document_version
+    ADD CONSTRAINT document_version_pkey PRIMARY KEY (id);
 
 
 --
--- Name: bruckner_verdict bruckner_verdict_pkey; Type: CONSTRAINT; Schema: gold; Owner: -
+-- Name: evidence_transfer evidence_transfer_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY gold.bruckner_verdict
-    ADD CONSTRAINT bruckner_verdict_pkey PRIMARY KEY (ct_number);
+ALTER TABLE ONLY core.evidence_transfer
+    ADD CONSTRAINT evidence_transfer_pkey PRIMARY KEY (source_id, source_key);
+
+
+--
+-- Name: file file_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.file
+    ADD CONSTRAINT file_pkey PRIMARY KEY (sha256);
+
+
+--
+-- Name: identifier_scheme identifier_scheme_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.identifier_scheme
+    ADD CONSTRAINT identifier_scheme_pkey PRIMARY KEY (code);
+
+
+--
+-- Name: ingest_run ingest_run_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.ingest_run
+    ADD CONSTRAINT ingest_run_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: organisation_identifier organisation_identifier_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.organisation_identifier
+    ADD CONSTRAINT organisation_identifier_pkey PRIMARY KEY (scheme, value);
+
+
+--
+-- Name: organisation organisation_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.organisation
+    ADD CONSTRAINT organisation_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: page page_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.page
+    ADD CONSTRAINT page_pkey PRIMARY KEY (file_sha256, page_no);
+
+
+--
+-- Name: possible_duplicate possible_duplicate_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.possible_duplicate
+    ADD CONSTRAINT possible_duplicate_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: possible_duplicate possible_duplicate_trial_a_trial_b_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.possible_duplicate
+    ADD CONSTRAINT possible_duplicate_trial_a_trial_b_key UNIQUE (trial_a, trial_b);
+
+
+--
+-- Name: source source_adapter_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.source
+    ADD CONSTRAINT source_adapter_key UNIQUE (adapter);
+
+
+--
+-- Name: source source_code_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.source
+    ADD CONSTRAINT source_code_key UNIQUE (code);
+
+
+--
+-- Name: source_listing source_listing_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.source_listing
+    ADD CONSTRAINT source_listing_pkey PRIMARY KEY (source_id, source_key);
+
+
+--
+-- Name: source source_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.source
+    ADD CONSTRAINT source_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: trial_document trial_document_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_document
+    ADD CONSTRAINT trial_document_pkey PRIMARY KEY (trial_id, document_id);
+
+
+--
+-- Name: trial_identifier trial_identifier_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_identifier
+    ADD CONSTRAINT trial_identifier_pkey PRIMARY KEY (scheme, value);
+
+
+--
+-- Name: trial trial_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial
+    ADD CONSTRAINT trial_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: trial_record trial_record_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_record
+    ADD CONSTRAINT trial_record_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: trial_source trial_source_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_source
+    ADD CONSTRAINT trial_source_pkey PRIMARY KEY (source_id, source_key);
+
+
+--
+-- Name: trial_sponsor trial_sponsor_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_sponsor
+    ADD CONSTRAINT trial_sponsor_pkey PRIMARY KEY (trial_id, organisation_id);
 
 
 --
@@ -390,238 +1125,750 @@ ALTER TABLE ONLY public.schema_migrations
 
 
 --
--- Name: age_group age_group_label_key; Type: CONSTRAINT; Schema: ref; Owner: -
+-- Name: evidence_question_idx; Type: INDEX; Schema: checks; Owner: -
 --
 
-ALTER TABLE ONLY ref.age_group
-    ADD CONSTRAINT age_group_label_key UNIQUE (label);
-
-
---
--- Name: age_group age_group_pkey; Type: CONSTRAINT; Schema: ref; Owner: -
---
-
-ALTER TABLE ONLY ref.age_group
-    ADD CONSTRAINT age_group_pkey PRIMARY KEY (code);
+CREATE INDEX evidence_question_idx ON checks.evidence USING btree (run_id, trial_id, key);
 
 
 --
--- Name: document_type document_type_label_key; Type: CONSTRAINT; Schema: ref; Owner: -
+-- Name: judgement_trial_idx; Type: INDEX; Schema: checks; Owner: -
 --
 
-ALTER TABLE ONLY ref.document_type
-    ADD CONSTRAINT document_type_label_key UNIQUE (label);
-
-
---
--- Name: document_type document_type_pkey; Type: CONSTRAINT; Schema: ref; Owner: -
---
-
-ALTER TABLE ONLY ref.document_type
-    ADD CONSTRAINT document_type_pkey PRIMARY KEY (code);
+CREATE INDEX judgement_trial_idx ON checks.judgement USING btree (trial_id, run_id DESC);
 
 
 --
--- Name: early_termination_reason early_termination_reason_label_key; Type: CONSTRAINT; Schema: ref; Owner: -
+-- Name: audit_log_actor_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY ref.early_termination_reason
-    ADD CONSTRAINT early_termination_reason_label_key UNIQUE (label);
-
-
---
--- Name: early_termination_reason early_termination_reason_pkey; Type: CONSTRAINT; Schema: ref; Owner: -
---
-
-ALTER TABLE ONLY ref.early_termination_reason
-    ADD CONSTRAINT early_termination_reason_pkey PRIMARY KEY (code);
+CREATE INDEX audit_log_actor_idx ON core.audit_log USING btree (actor_id, at);
 
 
 --
--- Name: member_state member_state_name_key; Type: CONSTRAINT; Schema: ref; Owner: -
+-- Name: audit_log_row_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY ref.member_state
-    ADD CONSTRAINT member_state_name_key UNIQUE (name);
-
-
---
--- Name: member_state member_state_pkey; Type: CONSTRAINT; Schema: ref; Owner: -
---
-
-ALTER TABLE ONLY ref.member_state
-    ADD CONSTRAINT member_state_pkey PRIMARY KEY (iso2);
+CREATE INDEX audit_log_row_idx ON core.audit_log USING btree (table_name, row_key);
 
 
 --
--- Name: sponsor_type sponsor_type_label_key; Type: CONSTRAINT; Schema: ref; Owner: -
+-- Name: document_version_current_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY ref.sponsor_type
-    ADD CONSTRAINT sponsor_type_label_key UNIQUE (label);
-
-
---
--- Name: sponsor_type sponsor_type_pkey; Type: CONSTRAINT; Schema: ref; Owner: -
---
-
-ALTER TABLE ONLY ref.sponsor_type
-    ADD CONSTRAINT sponsor_type_pkey PRIMARY KEY (code);
+CREATE UNIQUE INDEX document_version_current_idx ON core.document_version USING btree (document_id) WHERE (replaced_at IS NULL);
 
 
 --
--- Name: trial_phase trial_phase_label_key; Type: CONSTRAINT; Schema: ref; Owner: -
+-- Name: document_version_file_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY ref.trial_phase
-    ADD CONSTRAINT trial_phase_label_key UNIQUE (label);
-
-
---
--- Name: trial_phase trial_phase_pkey; Type: CONSTRAINT; Schema: ref; Owner: -
---
-
-ALTER TABLE ONLY ref.trial_phase
-    ADD CONSTRAINT trial_phase_pkey PRIMARY KEY (code);
+CREATE INDEX document_version_file_idx ON core.document_version USING btree (file_sha256);
 
 
 --
--- Name: trial_region trial_region_label_key; Type: CONSTRAINT; Schema: ref; Owner: -
+-- Name: file_text_fingerprint_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY ref.trial_region
-    ADD CONSTRAINT trial_region_label_key UNIQUE (label);
-
-
---
--- Name: trial_region trial_region_pkey; Type: CONSTRAINT; Schema: ref; Owner: -
---
-
-ALTER TABLE ONLY ref.trial_region
-    ADD CONSTRAINT trial_region_pkey PRIMARY KEY (code);
+CREATE INDEX file_text_fingerprint_idx ON core.file USING btree (text_fingerprint) WHERE (text_fingerprint IS NOT NULL);
 
 
 --
--- Name: trial_status trial_status_label_key; Type: CONSTRAINT; Schema: ref; Owner: -
+-- Name: ingest_run_source_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY ref.trial_status
-    ADD CONSTRAINT trial_status_label_key UNIQUE (label);
-
-
---
--- Name: trial_status trial_status_pkey; Type: CONSTRAINT; Schema: ref; Owner: -
---
-
-ALTER TABLE ONLY ref.trial_status
-    ADD CONSTRAINT trial_status_pkey PRIMARY KEY (code);
+CREATE INDEX ingest_run_source_idx ON core.ingest_run USING btree (source_id, started_at DESC);
 
 
 --
--- Name: search_export_snapshot_fetch_run_idx; Type: INDEX; Schema: ctis; Owner: -
+-- Name: organisation_identifier_organisation_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-CREATE INDEX search_export_snapshot_fetch_run_idx ON ctis.search_export_snapshot USING btree (fetch_run_id);
-
-
---
--- Name: trial_snapshot_fetch_run_idx; Type: INDEX; Schema: ctis; Owner: -
---
-
-CREATE INDEX trial_snapshot_fetch_run_idx ON ctis.trial_snapshot USING btree (fetch_run_id);
+CREATE INDEX organisation_identifier_organisation_idx ON core.organisation_identifier USING btree (organisation_id);
 
 
 --
--- Name: trial_snapshot_latest_idx; Type: INDEX; Schema: ctis; Owner: -
+-- Name: organisation_name_key_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-CREATE INDEX trial_snapshot_latest_idx ON ctis.trial_snapshot USING btree (ct_number, fetched_at DESC);
-
-
---
--- Name: bruckner_document_fetch_run_idx; Type: INDEX; Schema: gold; Owner: -
---
-
-CREATE INDEX bruckner_document_fetch_run_idx ON gold.bruckner_document USING btree (fetch_run_id);
+CREATE INDEX organisation_name_key_idx ON core.organisation USING btree (name_key);
 
 
 --
--- Name: bruckner_verdict_fetch_run_idx; Type: INDEX; Schema: gold; Owner: -
+-- Name: page_tsv_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-CREATE INDEX bruckner_verdict_fetch_run_idx ON gold.bruckner_verdict USING btree (fetch_run_id);
-
-
---
--- Name: search_export_snapshot search_export_snapshot_ct_number_fkey; Type: FK CONSTRAINT; Schema: ctis; Owner: -
---
-
-ALTER TABLE ONLY ctis.search_export_snapshot
-    ADD CONSTRAINT search_export_snapshot_ct_number_fkey FOREIGN KEY (ct_number) REFERENCES ctis.trial(ct_number);
+CREATE INDEX page_tsv_idx ON core.page USING gin (tsv);
 
 
 --
--- Name: search_export_snapshot search_export_snapshot_fetch_run_id_fkey; Type: FK CONSTRAINT; Schema: ctis; Owner: -
+-- Name: trial_document_document_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY ctis.search_export_snapshot
-    ADD CONSTRAINT search_export_snapshot_fetch_run_id_fkey FOREIGN KEY (fetch_run_id) REFERENCES ctis.fetch_run(id);
-
-
---
--- Name: trial_snapshot trial_snapshot_ct_number_fkey; Type: FK CONSTRAINT; Schema: ctis; Owner: -
---
-
-ALTER TABLE ONLY ctis.trial_snapshot
-    ADD CONSTRAINT trial_snapshot_ct_number_fkey FOREIGN KEY (ct_number) REFERENCES ctis.trial(ct_number);
+CREATE INDEX trial_document_document_idx ON core.trial_document USING btree (document_id);
 
 
 --
--- Name: trial_snapshot trial_snapshot_fetch_run_id_fkey; Type: FK CONSTRAINT; Schema: ctis; Owner: -
+-- Name: trial_identifier_trial_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY ctis.trial_snapshot
-    ADD CONSTRAINT trial_snapshot_fetch_run_id_fkey FOREIGN KEY (fetch_run_id) REFERENCES ctis.fetch_run(id);
-
-
---
--- Name: bruckner_document bruckner_document_ct_number_fkey; Type: FK CONSTRAINT; Schema: gold; Owner: -
---
-
-ALTER TABLE ONLY gold.bruckner_document
-    ADD CONSTRAINT bruckner_document_ct_number_fkey FOREIGN KEY (ct_number) REFERENCES ctis.trial(ct_number);
+CREATE INDEX trial_identifier_trial_idx ON core.trial_identifier USING btree (trial_id);
 
 
 --
--- Name: bruckner_document bruckner_document_fetch_run_id_fkey; Type: FK CONSTRAINT; Schema: gold; Owner: -
+-- Name: trial_record_latest_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY gold.bruckner_document
-    ADD CONSTRAINT bruckner_document_fetch_run_id_fkey FOREIGN KEY (fetch_run_id) REFERENCES ctis.fetch_run(id);
-
-
---
--- Name: bruckner_review bruckner_review_ct_number_fkey; Type: FK CONSTRAINT; Schema: gold; Owner: -
---
-
-ALTER TABLE ONLY gold.bruckner_review
-    ADD CONSTRAINT bruckner_review_ct_number_fkey FOREIGN KEY (ct_number) REFERENCES gold.bruckner_document(ct_number);
+CREATE INDEX trial_record_latest_idx ON core.trial_record USING btree (source_id, source_key, fetched_at DESC, id DESC);
 
 
 --
--- Name: bruckner_verdict bruckner_verdict_ct_number_fkey; Type: FK CONSTRAINT; Schema: gold; Owner: -
+-- Name: trial_source_trial_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY gold.bruckner_verdict
-    ADD CONSTRAINT bruckner_verdict_ct_number_fkey FOREIGN KEY (ct_number) REFERENCES ctis.trial(ct_number);
+CREATE INDEX trial_source_trial_idx ON core.trial_source USING btree (trial_id);
 
 
 --
--- Name: bruckner_verdict bruckner_verdict_fetch_run_id_fkey; Type: FK CONSTRAINT; Schema: gold; Owner: -
+-- Name: trial_sponsor_organisation_idx; Type: INDEX; Schema: core; Owner: -
 --
 
-ALTER TABLE ONLY gold.bruckner_verdict
-    ADD CONSTRAINT bruckner_verdict_fetch_run_id_fkey FOREIGN KEY (fetch_run_id) REFERENCES ctis.fetch_run(id);
+CREATE INDEX trial_sponsor_organisation_idx ON core.trial_sponsor USING btree (organisation_id);
+
+
+--
+-- Name: actor actor_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER actor_audit AFTER DELETE OR UPDATE ON core.actor FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
+-- Name: audit_log audit_log_append_only; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER audit_log_append_only BEFORE DELETE OR UPDATE ON core.audit_log FOR EACH ROW EXECUTE FUNCTION core.refuse_change();
+
+
+--
+-- Name: audit_log audit_log_never_truncated; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER audit_log_never_truncated BEFORE TRUNCATE ON core.audit_log FOR EACH STATEMENT EXECUTE FUNCTION core.refuse_change();
+
+
+--
+-- Name: document document_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER document_audit AFTER INSERT OR DELETE OR UPDATE ON core.document FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
+-- Name: document_version document_version_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER document_version_audit AFTER INSERT OR DELETE OR UPDATE ON core.document_version FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
+-- Name: evidence_transfer evidence_transfer_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER evidence_transfer_audit AFTER INSERT OR DELETE OR UPDATE ON core.evidence_transfer FOR EACH ROW EXECUTE FUNCTION core.audit('source_id,source_key');
+
+
+--
+-- Name: file file_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER file_audit AFTER INSERT OR DELETE OR UPDATE ON core.file FOR EACH ROW EXECUTE FUNCTION core.audit('sha256', 'content');
+
+
+--
+-- Name: file file_never_changes; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER file_never_changes BEFORE DELETE OR UPDATE OF content, sha256, size_bytes ON core.file FOR EACH ROW EXECUTE FUNCTION core.refuse_change();
+
+
+--
+-- Name: organisation organisation_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER organisation_audit AFTER INSERT OR DELETE OR UPDATE ON core.organisation FOR EACH ROW EXECUTE FUNCTION core.audit('id', 'name_key');
+
+
+--
+-- Name: organisation_identifier organisation_identifier_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER organisation_identifier_audit AFTER INSERT OR DELETE OR UPDATE ON core.organisation_identifier FOR EACH ROW EXECUTE FUNCTION core.audit('scheme,value');
+
+
+--
+-- Name: organisation_identifier organisation_identifier_valid; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER organisation_identifier_valid BEFORE INSERT OR UPDATE ON core.organisation_identifier FOR EACH ROW EXECUTE FUNCTION core.check_identifier();
+
+
+--
+-- Name: page page_never_changes; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER page_never_changes BEFORE DELETE OR UPDATE ON core.page FOR EACH ROW EXECUTE FUNCTION core.refuse_change();
+
+
+--
+-- Name: possible_duplicate possible_duplicate_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER possible_duplicate_audit AFTER INSERT OR DELETE OR UPDATE ON core.possible_duplicate FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
+-- Name: source source_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER source_audit AFTER INSERT OR DELETE OR UPDATE ON core.source FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
+-- Name: trial trial_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER trial_audit AFTER INSERT OR DELETE OR UPDATE ON core.trial FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
+-- Name: trial_document trial_document_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER trial_document_audit AFTER INSERT OR DELETE OR UPDATE ON core.trial_document FOR EACH ROW EXECUTE FUNCTION core.audit('trial_id,document_id');
+
+
+--
+-- Name: trial_identifier trial_identifier_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER trial_identifier_audit AFTER INSERT OR DELETE OR UPDATE ON core.trial_identifier FOR EACH ROW EXECUTE FUNCTION core.audit('scheme,value');
+
+
+--
+-- Name: trial_identifier trial_identifier_valid; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER trial_identifier_valid BEFORE INSERT OR UPDATE ON core.trial_identifier FOR EACH ROW EXECUTE FUNCTION core.check_identifier();
+
+
+--
+-- Name: trial_record trial_record_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER trial_record_audit AFTER INSERT OR DELETE OR UPDATE ON core.trial_record FOR EACH ROW EXECUTE FUNCTION core.audit('id', 'payload,registered');
+
+
+--
+-- Name: trial_source trial_source_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER trial_source_audit AFTER INSERT OR DELETE OR UPDATE ON core.trial_source FOR EACH ROW EXECUTE FUNCTION core.audit('source_id,source_key');
+
+
+--
+-- Name: trial_sponsor trial_sponsor_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER trial_sponsor_audit AFTER INSERT OR DELETE OR UPDATE ON core.trial_sponsor FOR EACH ROW EXECUTE FUNCTION core.audit('trial_id,organisation_id');
+
+
+--
+-- Name: evidence evidence_document_version_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.evidence
+    ADD CONSTRAINT evidence_document_version_id_fkey FOREIGN KEY (document_version_id) REFERENCES core.document_version(id);
+
+
+--
+-- Name: evidence evidence_file_sha256_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.evidence
+    ADD CONSTRAINT evidence_file_sha256_fkey FOREIGN KEY (file_sha256) REFERENCES core.file(sha256);
+
+
+--
+-- Name: evidence evidence_run_id_trial_id_key_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.evidence
+    ADD CONSTRAINT evidence_run_id_trial_id_key_fkey FOREIGN KEY (run_id, trial_id, key) REFERENCES checks.question(run_id, trial_id, key);
+
+
+--
+-- Name: judgement judgement_run_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.judgement
+    ADD CONSTRAINT judgement_run_id_fkey FOREIGN KEY (run_id) REFERENCES checks.run(id);
+
+
+--
+-- Name: judgement judgement_trial_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.judgement
+    ADD CONSTRAINT judgement_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: judgement judgement_trial_record_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.judgement
+    ADD CONSTRAINT judgement_trial_record_id_fkey FOREIGN KEY (trial_record_id) REFERENCES core.trial_record(id);
+
+
+--
+-- Name: question question_run_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.question
+    ADD CONSTRAINT question_run_id_fkey FOREIGN KEY (run_id) REFERENCES checks.run(id);
+
+
+--
+-- Name: question question_trial_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.question
+    ADD CONSTRAINT question_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: run run_actor_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.run
+    ADD CONSTRAINT run_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES core.actor(id);
+
+
+--
+-- Name: step step_run_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.step
+    ADD CONSTRAINT step_run_id_fkey FOREIGN KEY (run_id) REFERENCES checks.run(id);
+
+
+--
+-- Name: step step_trial_id_fkey; Type: FK CONSTRAINT; Schema: checks; Owner: -
+--
+
+ALTER TABLE ONLY checks.step
+    ADD CONSTRAINT step_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: audit_log audit_log_actor_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.audit_log
+    ADD CONSTRAINT audit_log_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES core.actor(id);
+
+
+--
+-- Name: document document_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.document
+    ADD CONSTRAINT document_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: document document_kind_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.document
+    ADD CONSTRAINT document_kind_fkey FOREIGN KEY (kind) REFERENCES core.document_kind(code);
+
+
+--
+-- Name: document document_source_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.document
+    ADD CONSTRAINT document_source_id_fkey FOREIGN KEY (source_id) REFERENCES core.source(id);
+
+
+--
+-- Name: document_version document_version_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.document_version
+    ADD CONSTRAINT document_version_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: document_version document_version_document_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.document_version
+    ADD CONSTRAINT document_version_document_id_fkey FOREIGN KEY (document_id) REFERENCES core.document(id);
+
+
+--
+-- Name: document_version document_version_file_sha256_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.document_version
+    ADD CONSTRAINT document_version_file_sha256_fkey FOREIGN KEY (file_sha256) REFERENCES core.file(sha256);
+
+
+--
+-- Name: evidence_transfer evidence_transfer_ingest_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.evidence_transfer
+    ADD CONSTRAINT evidence_transfer_ingest_run_id_fkey FOREIGN KEY (ingest_run_id) REFERENCES core.ingest_run(id);
+
+
+--
+-- Name: evidence_transfer evidence_transfer_source_id_source_key_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.evidence_transfer
+    ADD CONSTRAINT evidence_transfer_source_id_source_key_fkey FOREIGN KEY (source_id, source_key) REFERENCES core.trial_source(source_id, source_key);
+
+
+--
+-- Name: evidence_transfer evidence_transfer_transferred_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.evidence_transfer
+    ADD CONSTRAINT evidence_transfer_transferred_by_fkey FOREIGN KEY (transferred_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: file file_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.file
+    ADD CONSTRAINT file_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: ingest_run ingest_run_actor_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.ingest_run
+    ADD CONSTRAINT ingest_run_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES core.actor(id);
+
+
+--
+-- Name: ingest_run ingest_run_source_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.ingest_run
+    ADD CONSTRAINT ingest_run_source_id_fkey FOREIGN KEY (source_id) REFERENCES core.source(id);
+
+
+--
+-- Name: organisation organisation_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.organisation
+    ADD CONSTRAINT organisation_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: organisation organisation_first_source_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.organisation
+    ADD CONSTRAINT organisation_first_source_fkey FOREIGN KEY (first_source) REFERENCES core.source(id);
+
+
+--
+-- Name: organisation_identifier organisation_identifier_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.organisation_identifier
+    ADD CONSTRAINT organisation_identifier_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: organisation_identifier organisation_identifier_organisation_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.organisation_identifier
+    ADD CONSTRAINT organisation_identifier_organisation_id_fkey FOREIGN KEY (organisation_id) REFERENCES core.organisation(id);
+
+
+--
+-- Name: organisation_identifier organisation_identifier_scheme_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.organisation_identifier
+    ADD CONSTRAINT organisation_identifier_scheme_fkey FOREIGN KEY (scheme) REFERENCES core.identifier_scheme(code);
+
+
+--
+-- Name: organisation_identifier organisation_identifier_source_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.organisation_identifier
+    ADD CONSTRAINT organisation_identifier_source_id_fkey FOREIGN KEY (source_id) REFERENCES core.source(id);
+
+
+--
+-- Name: organisation organisation_merged_into_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.organisation
+    ADD CONSTRAINT organisation_merged_into_fkey FOREIGN KEY (merged_into) REFERENCES core.organisation(id);
+
+
+--
+-- Name: page page_file_sha256_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.page
+    ADD CONSTRAINT page_file_sha256_fkey FOREIGN KEY (file_sha256) REFERENCES core.file(sha256);
+
+
+--
+-- Name: possible_duplicate possible_duplicate_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.possible_duplicate
+    ADD CONSTRAINT possible_duplicate_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: possible_duplicate possible_duplicate_decided_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.possible_duplicate
+    ADD CONSTRAINT possible_duplicate_decided_by_fkey FOREIGN KEY (decided_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: possible_duplicate possible_duplicate_trial_a_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.possible_duplicate
+    ADD CONSTRAINT possible_duplicate_trial_a_fkey FOREIGN KEY (trial_a) REFERENCES core.trial(id);
+
+
+--
+-- Name: possible_duplicate possible_duplicate_trial_b_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.possible_duplicate
+    ADD CONSTRAINT possible_duplicate_trial_b_fkey FOREIGN KEY (trial_b) REFERENCES core.trial(id);
+
+
+--
+-- Name: source source_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.source
+    ADD CONSTRAINT source_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: source_listing source_listing_last_run_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.source_listing
+    ADD CONSTRAINT source_listing_last_run_fkey FOREIGN KEY (last_run) REFERENCES core.ingest_run(id);
+
+
+--
+-- Name: source_listing source_listing_source_id_source_key_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.source_listing
+    ADD CONSTRAINT source_listing_source_id_source_key_fkey FOREIGN KEY (source_id, source_key) REFERENCES core.trial_source(source_id, source_key);
+
+
+--
+-- Name: trial trial_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial
+    ADD CONSTRAINT trial_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: trial_document trial_document_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_document
+    ADD CONSTRAINT trial_document_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: trial_document trial_document_document_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_document
+    ADD CONSTRAINT trial_document_document_id_fkey FOREIGN KEY (document_id) REFERENCES core.document(id);
+
+
+--
+-- Name: trial_document trial_document_removed_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_document
+    ADD CONSTRAINT trial_document_removed_by_fkey FOREIGN KEY (removed_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: trial_document trial_document_source_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_document
+    ADD CONSTRAINT trial_document_source_id_fkey FOREIGN KEY (source_id) REFERENCES core.source(id);
+
+
+--
+-- Name: trial_document trial_document_trial_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_document
+    ADD CONSTRAINT trial_document_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: trial trial_first_source_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial
+    ADD CONSTRAINT trial_first_source_fkey FOREIGN KEY (first_source) REFERENCES core.source(id);
+
+
+--
+-- Name: trial_identifier trial_identifier_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_identifier
+    ADD CONSTRAINT trial_identifier_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: trial_identifier trial_identifier_scheme_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_identifier
+    ADD CONSTRAINT trial_identifier_scheme_fkey FOREIGN KEY (scheme) REFERENCES core.identifier_scheme(code);
+
+
+--
+-- Name: trial_identifier trial_identifier_source_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_identifier
+    ADD CONSTRAINT trial_identifier_source_id_fkey FOREIGN KEY (source_id) REFERENCES core.source(id);
+
+
+--
+-- Name: trial_identifier trial_identifier_trial_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_identifier
+    ADD CONSTRAINT trial_identifier_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: trial trial_merged_into_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial
+    ADD CONSTRAINT trial_merged_into_fkey FOREIGN KEY (merged_into) REFERENCES core.trial(id);
+
+
+--
+-- Name: trial_record trial_record_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_record
+    ADD CONSTRAINT trial_record_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: trial_record trial_record_source_id_source_key_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_record
+    ADD CONSTRAINT trial_record_source_id_source_key_fkey FOREIGN KEY (source_id, source_key) REFERENCES core.trial_source(source_id, source_key);
+
+
+--
+-- Name: trial_source trial_source_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_source
+    ADD CONSTRAINT trial_source_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: trial_source trial_source_source_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_source
+    ADD CONSTRAINT trial_source_source_id_fkey FOREIGN KEY (source_id) REFERENCES core.source(id);
+
+
+--
+-- Name: trial_source trial_source_trial_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_source
+    ADD CONSTRAINT trial_source_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: trial_sponsor trial_sponsor_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_sponsor
+    ADD CONSTRAINT trial_sponsor_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: trial_sponsor trial_sponsor_organisation_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_sponsor
+    ADD CONSTRAINT trial_sponsor_organisation_id_fkey FOREIGN KEY (organisation_id) REFERENCES core.organisation(id);
+
+
+--
+-- Name: trial_sponsor trial_sponsor_removed_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_sponsor
+    ADD CONSTRAINT trial_sponsor_removed_by_fkey FOREIGN KEY (removed_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: trial_sponsor trial_sponsor_source_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_sponsor
+    ADD CONSTRAINT trial_sponsor_source_id_fkey FOREIGN KEY (source_id) REFERENCES core.source(id);
+
+
+--
+-- Name: trial_sponsor trial_sponsor_trial_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_sponsor
+    ADD CONSTRAINT trial_sponsor_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
 
 
 --
@@ -636,4 +1883,5 @@ ALTER TABLE ONLY gold.bruckner_verdict
 --
 
 INSERT INTO public.schema_migrations (version) VALUES
-    ('20261030143522');
+    ('20261121120000'),
+    ('20261121180000');

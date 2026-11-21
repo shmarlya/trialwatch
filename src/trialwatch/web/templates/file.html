@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ owner.title or sha[:12] }} · TrialWatch{% endblock %}
+{% block content %}
+<h1>{{ owner.title or sha[:12] }}</h1>
+<p class="sub">{% if owner.trial_id %}<a href="/trials/{{ owner.trial_id }}">trial {{ owner.trial_id }}</a> · {% endif %}{{ pages | length }} pages · <a href="/files/{{ sha }}/raw" target="_blank">open the file</a>
+  · the text as extracted, which is what retrieval searches and quotes are checked against</p>
+{% if quote %}<p class="small">Quote on page {{ page }}: <mark>{{ quote }}</mark></p>{% endif %}
+{% for p in pages %}
+<div class="page {% if p.page_no == page %}target{% endif %}" id="p{{ p.page_no }}">
+  <h3>Page {{ p.page_no }}{% if p.blank %} · <span class="flag">no text (scanned?)</span>{% endif %}</h3>
+  <pre>{% for piece, is_quote in p.pieces %}{% if is_quote %}<mark>{{ piece }}</mark>{% else %}{{ piece }}{% endif %}{% endfor %}</pre>
+</div>
+{% else %}<p class="muted">The text of this file has not been extracted yet.</p>{% endfor %}
+<script>
+  // Scroll to the marked quote, or to the chosen page, below the sticky header
+  const marked = document.querySelector(".page.target mark") || document.querySelector(".page.target");
+  if (marked) marked.scrollIntoView({block: "center"});
+</script>
+{% endblock %}

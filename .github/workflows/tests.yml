@@ -1,0 +1,44 @@
+# Runs the whole test suite on every push and pull request, against a Postgres of its own: the tests
+# create their own database from db/migrations/ (tests/conftest.py). No model or CTIS calls: those
+# are faked in the tests.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: trialwatch
+          POSTGRES_PASSWORD: trialwatch
+          POSTGRES_DB: trialwatch
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trialwatch -d trialwatch"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://trialwatch:trialwatch@localhost:5432/trialwatch
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.12.13"
+          enable-cache: true
+
+      - name: Tests
+        run: uv run --locked pytest -q

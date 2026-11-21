@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job.id }} · TrialWatch{% endblock %}
+{% block content %}
+<h1>Job {{ job.id }} · {{ steps[job.request.step] }}{% if job.request.dry_run %} <span class="muted">(dry run)</span>{% endif %}</h1>
+<p class="sub">
+  Status: <b id="status">{{ job.status }}</b>
+  <span id="run-link">{% if job.run_id and job.request.step == "evidence" %} · <a href="/runs/{{ job.run_id }}">run {{ job.run_id }}</a>{% elif job.run_id %} · ingest run {{ job.run_id }}{% endif %}</span>
+  · {% if job.request.every %}every trial{% endif %}
+  {% if job.request.source %}{{ job.request.source }}{% endif %}
+  {% if job.request.which %} · {{ job.request.which }}{% endif %}
+  {% if job.request.keys %} · {{ job.request.keys[:10] | join(", ") }}{% if job.request.keys | length > 10 %} and {{ job.request.keys | length - 10 }} more{% endif %}{% endif %}
+  {% if job.request.trial_ids %}trial {{ job.request.trial_ids | join(", ") }}{% endif %}
+  · started by {{ job.actor }}
+  {% if job.request.limit %} · limit {{ job.request.limit }}{% endif %}
+  {% if job.request.step == "evidence" %} · setup {{ job.request.config }}{% endif %}
+</p>
+{% if job.status == "running" %}<form method="post" action="/jobs/{{ job.id }}/stop" id="stop" class="actions"><button class="secondary" {% if job.stop_requested %}disabled{% endif %}>Stop after the current trial</button></form>{% endif %}
+<pre id="log">{% for line in lines %}{{ line }}
+{% endfor %}</pre>
+<p class="small"><a href="/">← Workflow</a>{% if job.request.source %} · <a href="/sources/{{ job.request.source }}">{{ job.request.source }}</a>{% endif %}</p>
+<script>
+  // Poll the job's progress every second until it ends, appending new lines to the log
+  const log = document.getElementById("log");
+  const statusEl = document.getElementById("status");
+  let seen = {{ lines | length }};
+  async function poll() {
+    const response = await fetch(`/jobs/{{ job.id }}/progress?after=${seen}`);
+    const data = await response.json();
+    for (const line of data.lines) log.textContent += line + "\n";
+    seen = data.total;
+    statusEl.textContent = data.status;
+    if (data.run_id && data.step === "evidence") document.getElementById("run-link").innerHTML = ` · <a href="/runs/${data.run_id}">run ${data.run_id}</a>`;
+    else if (data.run_id) document.getElementById("run-link").textContent = ` · ingest run ${data.run_id}`;
+    if (data.status === "running") setTimeout(poll, 1000);
+    else if (document.getElementById("stop")) document.getElementById("stop").remove();
+  }
+  if (statusEl.textContent === "running") setTimeout(poll, 1000);
+</script>
+{% endblock %}

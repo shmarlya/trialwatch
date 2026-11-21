@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% from "macros.html" import label, part, outcome, when %}
+{% block title %}{{ item.key }} · {{ dataset.ref }} · TrialWatch{% endblock %}
+{% block content %}
+<p class="small"><a href="/gold?dataset={{ dataset.ref }}">← {{ dataset.ref }}</a></p>
+<h1>{{ item.key }}</h1>
+<p class="sub">{{ item.title or "No title in the dataset" }}</p>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+
+<div class="actions">
+  {% if trial_id is not none %}
+  <a class="button secondary" href="/trials/{{ trial_id }}">Open our trial {{ trial_id }}</a>
+  {% endif %}
+  {% if trial_id is not none and ready %}
+  <form method="post" action="/jobs">
+    <input type="hidden" name="step" value="evidence">
+    <input type="hidden" name="trial_ids" value="{{ trial_id }}">
+    <input type="hidden" name="config" value="{{ defaults.config }}">
+    <input type="hidden" name="back" value="/gold/{{ dataset.ref }}/{{ item.key }}">
+    <button {% if running %}disabled{% endif %}>Check it (setup {{ defaults.config }})</button>
+  </form>
+  {% elif ct_numbers %}
+  <form method="post" action="/jobs">
+    <input type="hidden" name="step" value="transfer">
+    <input type="hidden" name="source" value="ctis">
+    <input type="hidden" name="key_text" value="{{ ct_numbers | join(' ') }}">
+    <input type="hidden" name="back" value="/gold/{{ dataset.ref }}/{{ item.key }}">
+    <button {% if running %}disabled{% endif %}>Transfer evidence from CTIS</button>
+  </form>
+  <span class="small muted">{% if trial_id is not none %}its evidence is not transferred completely yet{% else %}not in our database yet{% endif %}: brings in its record and documents and reads them, then you can check it</span>
+  {% else %}
+  <span class="small muted">Not in our database. Add it on the <a href="/trials/new">new trial page</a>.</span>
+  {% endif %}
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <h3 class="panel-title">Expected (gold)</h3>
+    <p class="verdict">Label {{ label(item.expected_label) }}</p>
+    <dl class="kv">
+      {% for name in dataset.parts %}<dt>{{ name }}</dt><dd>{{ part(item.expected_parts[name]) }}</dd>{% endfor %}
+    </dl>
+    {% if item.expected_label is none %}<p class="small muted">No label: the reviewers had no document to read for this trial.</p>{% endif %}
+  </div>
+  <div class="panel">
+    <h3 class="panel-title">Identity and evidence</h3>
+    <dl class="kv">
+      {% for identifier in item.identifiers %}<dt>{{ identifier.scheme }}</dt><dd>{{ identifier.value }}</dd>{% endfor %}
+      {% for document in item.evidence %}<dt>read</dt><dd>{{ document.kind }}{% if document.posted_on %}, posted {{ document.posted_on }}{% endif %}</dd>{% endfor %}
+      <dt>scope</dt><dd class="small">{{ dataset.evidence.description }}</dd>
+    </dl>
+  </div>
+  <div class="panel">
+    <h3 class="panel-title">Details from the dataset</h3>
+    <dl class="kv">
+      {% for name, value in item.details.items() %}{% if value is not none %}<dt>{{ name }}</dt><dd class="small">{% if value is sameas true %}yes{% elif value is sameas false %}no{% else %}{{ value }}{% endif %}</dd>{% endif %}{% endfor %}
+    </dl>
+  </div>
+</div>
+
+{% if item.comment %}<h2>Comment</h2><p>{{ item.comment }}</p>{% endif %}
+
+<h2>Reviewers</h2>
+{% if reviewers_disagreed %}<p class="small"><span class="label undecided">disagreed</span> the reviewers answered some part differently{% if item.reviewers_agreed %}, then agreed{% endif %}.</p>{% endif %}
+<div class="table-wrap"><table>
+  <tr><th>Reviewer</th>{% for name in dataset.parts %}<th>{{ name }}</th>{% endfor %}<th>Asked for a check</th><th>Comment</th></tr>
+  {% for review in item.reviews %}
+  <tr><td>{{ review.reviewer }}</td>
+    {% for name in dataset.parts %}<td>{{ part(review.parts[name]) }}</td>{% endfor %}
+    <td class="small">{% if review.asked_to_check %}yes{% elif review.asked_to_check is sameas false %}no{% else %}—{% endif %}</td>
+    <td class="small">{{ review.comment or "" }}</td></tr>
+  {% else %}<tr><td colspan="{{ 3 + dataset.parts | length }}" class="muted">No reviews for this item.</td></tr>{% endfor %}
+</table></div>
+
+<h2>Ours</h2>
+{% if trial_id is none %}
+<p class="muted">Not in our database, so not checked.</p>
+{% else %}
+<p class="small muted">Every finished judgement of our trial {{ trial_id }} under {{ dataset.requirements }}, newest first. Our documents may differ from what the reviewers read: see the scope above and the documents below.</p>
+<div class="table-wrap"><table>
+  <tr><th>Run</th><th>Ours</th>{% for name in dataset.parts %}<th>{{ name }}</th>{% endfor %}<th>Label</th></tr>
+  {% for judgement, comparison in compared %}
+  <tr>
+    <td><a href="/trials/{{ trial_id }}?run={{ judgement.run_id }}">run {{ judgement.run_id }}</a><br><span class="small muted">{{ judgement.model }} · {{ when(judgement.started_at) }}</span></td>
+    <td>{{ label(judgement.label) }}</td>
+    {% for name in dataset.parts %}<td class="small">{{ part(judgement.parts[name]) }}{% if comparison %} {{ outcome(comparison.parts[name]) }}{% endif %}</td>{% endfor %}
+    <td>{% if comparison %}{{ outcome(comparison.label) }}{% if comparison.false_accusation %} <span class="flag">false accusation</span>{% endif %}{% else %}<span class="muted" title="this judgement read a document posted after the reviewers read theirs">set aside</span>{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="{{ 3 + dataset.parts | length }}" class="muted">Not checked yet under {{ dataset.requirements }}.</td></tr>{% endfor %}
+</table></div>
+<h3>Our documents for this trial</h3>
+<div class="table-wrap"><table>
+  <tr><th>Kind</th><th>Title</th><th>Version</th><th>Fetched</th></tr>
+  {% for document in documents %}
+  <tr><td class="small">{{ document.kind_label }}</td><td class="small"><a href="/files/{{ document.sha256.hex() }}">{{ document.title or "untitled" }}</a></td>
+    <td class="small">{{ document.version }}{% if document.versions > 1 %} <span class="muted">({{ document.versions }} versions)</span>{% endif %}</td>
+    <td class="small">{{ when(document.fetched_at) }}</td></tr>
+  {% else %}<tr><td colspan="4" class="muted">No documents.</td></tr>{% endfor %}
+</table></div>
+{% endif %}
+{% endblock %}

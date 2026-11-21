@@ -1,0 +1,308 @@
+{% extends "base.html" %}
+{% from "macros.html" import label, part, when, outcome, found_answer, evidence_state, setup_select %}
+{% block title %}{{ row.name }} · TrialWatch{% endblock %}
+{% block content %}
+<h1>{{ row.name }}</h1>
+<p class="sub">{{ row.title or "No registered information yet" }}{% if row.sponsor %} · {{ row.sponsor }}{% endif %}{% if row.status %} · {{ row.status }}{% endif %}</p>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<div class="actions">
+  {% for transfer in transferable %}
+  <form method="post" action="/trials/{{ row.id }}/transfer"><input type="hidden" name="source" value="{{ transfer.source }}"><button class="secondary" {% if running %}disabled{% endif %}>{% if transfer.status == "not transferred" %}Transfer evidence{% else %}Transfer again{% endif %} from {{ transfer.source }}</button></form>
+  {% endfor %}
+  {% if transferable %}<span class="small muted">fetches the record and the source's configured documents, then reads their page text</span>{% endif %}
+  <a class="button secondary" href="#upload">Upload a document</a>
+</div>
+{% if row.open_duplicates %}<div class="alert">This trial may be the same as another one: its identifiers came in together. A person decides (merged or distinct).</div>{% endif %}
+
+<div class="grid">
+  <div class="panel">
+    <h3 class="panel-title">Identity</h3>
+    <dl class="kv">
+      <dt>Our id</dt><dd>trial {{ row.id }}</dd>
+      {% for identifier in identifiers %}
+      <dt>{{ identifier.label }}</dt><dd>{{ identifier.value }} <span class="small muted">from {{ identifier.source }}</span></dd>
+      {% endfor %}
+      <dt>Added</dt><dd class="small">{{ when(row.created_at) }} by {{ row.created_by }}</dd>
+    </dl>
+  </div>
+  <div class="panel">
+    <h3 class="panel-title">Sources</h3>
+    {% for transfer in transfers %}
+    <div class="stat"><span><a href="/sources/{{ transfer.source }}">{{ transfer.source }}</a> · {{ transfer.source_key }}</span>{{ evidence_state(transfer.status) }}</div>
+    <div class="small muted">
+      {% if transfer.delisted_at %}no longer listed since {{ when(transfer.delisted_at) }}{% elif transfer.listed %}listed{% if transfer.source_updated_on %}, changed at the source {{ transfer.source_updated_on }}{% endif %}{% else %}not in the source's list{% endif %}
+      {% if transfer.transferred_at %}<br>transferred {{ when(transfer.transferred_at) }}: {{ transfer.documents }} documents, {{ transfer.pages }} pages{% endif %}
+    </div>
+    {% for where, message in (transfer.errors or {}).items() %}<div class="small"><span class="flag">{{ where }}</span> {{ message }}</div>{% endfor %}
+    {% endfor %}
+    {% for source in sources %}
+    <div class="small muted">{{ source.source }} record: {{ source.versions }} version{% if source.versions != 1 %}s{% endif %}, first {{ when(source.first_fetched) }}, latest {{ when(source.last_fetched) }}</div>
+    {% endfor %}
+    {% if not transfers %}<p class="muted">No source records.</p>{% endif %}
+  </div>
+  <div class="panel">
+    <h3 class="panel-title">Registered primary endpoints</h3>
+    {% if registered and registered.primary_endpoints %}
+    <ol class="small endpoints">{% for endpoint in registered.primary_endpoints %}<li>{{ endpoint.text }}</li>{% endfor %}</ol>
+    {% else %}<p class="muted">None registered.</p>{% endif %}
+  </div>
+</div>
+
+<h2 id="sponsors">Sponsors</h2>
+<div class="table-wrap"><table>
+  <tr><th>Organisation</th><th>Role</th><th>Kind · country</th><th>Identifiers</th><th>From</th><th></th></tr>
+  {% for sponsor in sponsors %}
+  <tr {% if sponsor.removed_at %}class="muted"{% endif %}>
+    <td><a href="/sponsors/{{ sponsor.organisation_id }}">{{ sponsor.name }}</a></td>
+    <td class="small">{% if sponsor.removed_at %}<s>{% if sponsor.is_primary %}primary{% else %}co-sponsor{% endif %}</s>
+      <br>removed {{ when(sponsor.removed_at) }} by {{ sponsor.removed_by }}{% if sponsor.removal == "source" %} (no longer listed by {{ sponsor.source }}){% endif %}
+      {% elif sponsor.is_primary %}<b>primary</b>{% else %}co-sponsor{% endif %}</td>
+    <td class="small">{{ sponsor.kind or "—" }}{% if sponsor.country %} · {{ sponsor.country }}{% endif %}{% if sponsor.commercial is sameas true %} · commercial{% elif sponsor.commercial is sameas false %} · non-commercial{% endif %}</td>
+    <td class="small">{{ sponsor.identifiers | join(", ") or "—" }}</td>
+    <td class="small muted">{{ sponsor.source }} · {{ when(sponsor.created_at) }} · {{ sponsor.created_by }}</td>
+    <td>{% if not sponsor.removed_at %}<form method="post" action="/trials/{{ row.id }}/sponsors/{{ sponsor.organisation_id }}/remove"><button class="secondary small">Remove</button></form>{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="6" class="muted">No sponsors known.</td></tr>{% endfor %}
+</table></div>
+<form class="search" method="post" action="/trials/{{ row.id }}/sponsors">
+  <input type="text" name="name" placeholder="Add a sponsor by name">
+  <label class="small"><input type="checkbox" name="primary" value="true"> primary</label>
+  <button class="secondary">Add sponsor</button>
+</form>
+
+{% if gold_items %}
+<div class="panel gold-box">
+  <h3 class="panel-title">In gold datasets</h3>
+  {% for dataset, item, comparison in gold_items %}
+  <div class="stat"><span><a href="/gold/{{ dataset.ref }}/{{ item.key }}">{{ dataset.ref }}</a> · gold {{ label(item.expected_label) }}{% for name in dataset.parts %} · {{ name }} {{ part(item.expected_parts[name]) }}{% endfor %}</span>
+    <b>{% if comparison %}ours {{ outcome(comparison.label) }}{% if comparison.false_accusation %} <span class="flag">false accusation</span>{% endif %}{% else %}<span class="small muted">not compared (not checked under {{ dataset.requirements }}, or set aside: we read a document posted after the reviewers' day)</span>{% endif %}</b></div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<h2>Evidence check</h2>
+<div class="grid two">
+  <div>
+  {% if judgement %}
+    {% if judgements | length > 1 %}
+    <div class="tabs">
+      {% for other in judgements %}
+      <a href="/trials/{{ row.id }}?run={{ other.run_id }}" class="{% if other.run_id == judgement.run_id %}on{% endif %}">run {{ other.run_id }} · {{ other.label or "error" }}</a>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <p class="small muted">Run <a href="/runs/{{ judgement.run_id }}">{{ judgement.run_id }}</a> · {{ judgement.model }}{% if judgement.served_by %}{% for served in judgement.served_by %}{% if served != judgement.model %} (answered by {{ served }}){% endif %}{% endfor %}{% endif %} · requirements <a href="/requirements?show={{ judgement.requirements }}#{{ judgement.requirements }}">{{ judgement.requirements }}</a> · prompt <a href="/prompts?show={{ judgement.prompt }}#{{ judgement.prompt }}">{{ judgement.prompt }}</a> · {{ when(judgement.started_at) }}
+      {% if judgement.input_tokens %} · tokens in {{ "{:,}".format(judgement.input_tokens) }}, out {{ "{:,}".format(judgement.output_tokens) }}{% endif %}
+      {% if judgement.duration_ms %} · {{ "%.1f" | format(judgement.duration_ms / 1000) }} s{% endif %}</p>
+    {% if judgement.error %}
+      <div class="alert">{{ judgement.error }}</div>
+    {% else %}
+    <p class="verdict">Label {{ label(judgement.label) }}{% for name, value in judgement.parts.items() %} · {{ name }} {{ part(value) }}{% if judgement.trace and judgement.trace[name] %} <span class="small muted">({{ judgement.trace[name].rule }})</span>{% endif %}{% endfor %}</p>
+    <p class="small muted">Read at that moment: trial record {{ judgement.trial_record_id or "—" }} and {{ judgement.document_versions | length }} document version{% if judgement.document_versions | length != 1 %}s{% endif %} (listed under "Documents and pages read" below).</p>
+    <div class="table-wrap"><table>
+      <tr><th>Question</th><th>Value · rule</th><th>Evidence</th></tr>
+      {% for q in questions %}{% set settled = judgement.trace[q.key] if judgement.trace and q.key in judgement.trace else none %}
+      <tr>
+        <td><b>{{ q.key }}</b>{% if q.item_text %}<br><span class="small">{{ q.item_text }}</span>{% endif %}
+          <br><span class="small muted">{{ q.pages | length }} pages shown{% if q.widened %}, asked again with every page{% endif %}</span></td>
+        <td>{% if settled %}{{ part(settled.value) }}<br><span class="small muted">{{ settled.rule }}</span>{% endif %}</td>
+        <td class="small">
+          {% if q.found %}
+            {% if q.kind %}<code>{{ q.kind }}</code>{% endif %}
+            {% if q.verified %}<span class="label full">verified</span>{% else %}<span class="label not-full">not on the page</span>{% endif %}
+            {% if q.quote %}<br>“{{ q.quote }}”{% endif %}
+            {% if q.file_sha256 %}<br><a href="/files/{{ q.file_sha256.hex() }}?page={{ q.page_no }}&quote={{ q.quote | urlencode }}#p{{ q.page_no }}">{% if files[q.file_sha256.hex()] %}{{ files[q.file_sha256.hex()].title or "document" }}, {% endif %}page {{ q.page_no }} →</a>{% endif %}
+          {% elif q.found is not none %}<span class="muted">not found</span>{% elif q.evidence_id is not none %}<span class="label undecided">the model doesn't know</span>{% else %}<span class="muted">no answer</span>{% endif %}
+          {% if q.note %}<br><span class="muted">{{ q.note }}</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% endif %}
+
+    <h3 class="section">Trace, start to finish</h3>
+    <ol class="trace">
+    {% for step in steps %}
+      <li class="trace-step {{ step.name }}">
+        <details {% if step.name in ("rules", "error") %}open{% endif %}>
+          <summary><b>{{ step_titles.get(step.name, step.name) }}{% if step.name == "call" %} {{ step.data.call }}{% endif %}</b>
+            <span class="small muted">{{ step.at.strftime("%H:%M:%S") }}{% if step.duration_ms %} · {{ "%.1f" | format(step.duration_ms / 1000) }} s{% endif %}</span>
+            {% if step.name == "call" %}<span class="small muted"> · {{ step.data.pages | length }} pages · {{ step.data.questions | length }} questions · tokens {{ step.data.input_tokens }} in, {{ step.data.output_tokens }} out{% if step.data.error %} · <span class="flag">{{ step.data.error }}</span>{% endif %}</span>{% endif %}
+            {% if step.name == "retrieval" %}<span class="small muted"> · {% if step.data.method == "files" %}{{ step.data.reason }}{% if step.data.not_sent %}; not sent: {% for item in step.data.not_sent %}{{ item.title }} ({{ item.reason }}) {% endfor %}{% endif %}{% elif step.data.whole %}whole document ({{ step.data.reason }}){% else %}search, top {{ step.data.top_k }} per question{% endif %}</span>{% endif %}
+          </summary>
+          <div class="trace-body">
+          {% if step.name == "questions" %}
+            {% if step.data.requirements %}<p class="small">Requirement set <a href="/requirements?show={{ step.data.requirements }}#{{ step.data.requirements }}">{{ step.data.requirements }}</a> <span class="muted">(sha256 {{ step.data.requirements_sha256[:12] }})</span>{% if step.data.record %} · registered information from {{ step.data.record.source }}, record {{ step.data.record.id }} fetched {{ step.data.record.fetched_at[:16].replace("T", " ") }}{% endif %}</p>{% endif %}
+            <table class="inner">
+              <tr><th>Key</th><th>Question</th><th>Part · rule</th></tr>
+              {% for question in step.data.questions %}
+              <tr><td class="small"><b>{{ question.key }}</b></td>
+                  <td class="small">{{ question.text }}{% if question.guidance %}<br><span class="muted">{{ question.guidance }}</span>{% endif %}</td>
+                  <td class="small">{% if question.part %}{{ question.part }} · <code>{{ question.rule }}</code>{% endif %}</td></tr>
+              {% endfor %}
+            </table>
+          {% elif step.name == "pages" %}
+            <p class="small">{{ step.data.total_pages }} pages{% if not step.data.every_page_readable %} · <span class="flag">not every page could be read</span> (so nothing counts as "the whole document"){% endif %}</p>
+            <ul class="small">{% for document in step.data.documents %}<li>document {{ document.doc }}: <a href="/files/{{ document.file }}">{{ document.title or document.file[:12] }}</a> ({{ document.kind }}, {{ document.pages }} pages{% if document.unreadable_pages %}; no text on pages {{ document.unreadable_pages | join(", ") }}{% endif %})</li>{% endfor %}</ul>
+            {% if step.data.documents_without_text %}<p class="small flag">Linked but not read yet: {{ step.data.documents_without_text | join(", ") }}</p>{% endif %}
+          {% elif step.name == "retrieval" and not step.data.whole %}
+            <p class="small muted">Full-text search over the pages read, once per question: the best {{ step.data.top_k }} pages by rank, each sent with the page before and after it.</p>
+            {% for question in step.data.questions %}
+            <div class="retrieval">
+              <p class="small"><b>{{ question.key }}</b> · searched for: <span class="terms">{% for term in question.terms %}<code>{{ term }}</code> {% endfor %}</span></p>
+              {% for hit in question.ranked %}
+              <div class="hit small">
+                <a href="/files/{{ hit.file }}?page={{ hit.page }}#p{{ hit.page }}">{% if files[hit.file] %}{{ files[hit.file].title or "document" }} · {% endif %}page {{ hit.page }}</a>
+                <span class="muted">rank {{ hit.rank }}{% if hit.terms_found %} · matched {{ hit.terms_found | join(", ") }}{% endif %}</span>
+                {% if hit.snippet %}<div class="snippet">{{ hit.snippet }}</div>{% endif %}
+              </div>
+              {% else %}<p class="small muted">No page matched any term.</p>{% endfor %}
+              <p class="small muted">Sent for this question, with neighbours: {% for ref in question.chosen %}{% if files[ref.file] %}d{{ files[ref.file].doc }}{% endif %}p{{ ref.page }}{% if not loop.last %}, {% endif %}{% endfor %}</p>
+            </div>
+            {% endfor %}
+          {% elif step.name == "call" %}{% set call = calls[step.seq] %}
+            <p class="small">{{ step.data.model }} · effort {{ step.data.effort }}{% if step.data.served_by and step.data.served_by != step.data.model %} · <b>answered by {{ step.data.served_by }}</b>{% endif %} · stopped: {{ step.data.stop_reason or "—" }} · tokens {{ step.data.input_tokens }} in, {{ step.data.output_tokens }} out</p>
+
+            <h4>What we asked: {{ call.asked | length }} question{% if call.asked | length != 1 %}s{% endif %}</h4>
+            <ul class="small">{% for question in call.asked %}<li><b>{{ question.key }}</b>{% if question.text %}: {{ question.text }}{% endif %}</li>{% endfor %}</ul>
+
+            {% if step.data.method == "files" %}
+            <h4>Files sent whole: {{ step.data.files | length }}</h4>
+            <ul class="small">{% for file in step.data.files %}<li>document {{ file.doc }}: <a href="/files/{{ file.file }}">{{ file.title }}</a> · <a href="/files/{{ file.file }}/raw" target="_blank">file</a> · {{ "{:,}".format(file.bytes) }} bytes</li>{% endfor %}</ul>
+            {% else %}
+            <h4>Documents and pages sent: {{ step.data.pages | length }} page{% if step.data.pages | length != 1 %}s{% endif %}</h4>
+            <p class="small">{% for ref in step.data.pages %}<a href="/files/{{ ref.file }}?page={{ ref.page }}#p{{ ref.page }}">{% if files[ref.file] %}d{{ files[ref.file].doc }}{% endif %}p{{ ref.page }}</a>{% if not loop.last %} {% endif %}{% endfor %}</p>
+            {% endif %}
+
+            <details class="sent"><summary><b>System prompt</b> <span class="small muted">sent with every call of this run</span></summary>
+              <pre>{{ prompt_text or "(not stored)" }}</pre></details>
+            {% if call.message %}
+            <details class="sent"><summary><b>Message sent</b> <span class="small muted">{{ "{:,}".format(call.message | length) }} characters: the pages, then the questions</span></summary>
+              <pre class="message">{{ call.message }}</pre></details>
+            <details class="sent"><summary><b>Answer format required</b> <span class="small muted">JSON schema the model must follow</span></summary>
+              <pre class="json">{{ call.schema }}</pre></details>
+            <details class="sent"><summary><b>Request settings</b></summary>
+              <dl class="kv small">{% for name, value in call.settings.items() %}<dt>{{ name }}</dt><dd>{{ value }}</dd>{% endfor %}</dl></details>
+            {% else %}
+            <p class="small muted">The exact message and schema were not stored for runs before this was added; check the trial again to see them.</p>
+            {% endif %}
+
+            <h4>What the model returned</h4>
+            {% if step.data.error %}<p class="small flag">{{ step.data.error }}</p>{% endif %}
+            {% if call.answers %}
+            <table class="inner">
+              <tr><th>Question</th><th>Found</th><th>Kind</th><th>Quote</th><th>Where</th><th>Note</th></tr>
+              {% for answer in call.answers %}
+              <tr>
+                <td class="small"><b>{{ answer.key }}</b></td>
+                <td class="small">{{ found_answer(answer.found) }}</td>
+                <td class="small"><code>{{ answer.kind }}</code></td>
+                <td class="small">{% if answer.quote %}“{{ answer.quote }}”{% else %}<span class="muted">—</span>{% endif %}</td>
+                <td class="small">{% if answer.found is sameas true or answer.found == "yes" %}d{{ answer.document }}p{{ answer.page }}{% else %}—{% endif %}</td>
+                <td class="small muted">{{ answer.note }}</td>
+              </tr>
+              {% endfor %}
+            </table>
+            {% endif %}
+            {% if call.answer_error %}<p class="small flag">{{ call.answer_error }}</p>{% endif %}
+            <details class="sent"><summary><b>Raw answer</b> <span class="small muted">exactly as received{% if call.answers %}, formatted{% endif %}</span></summary>
+              <pre class="json">{{ call.answer_text or "(no text)" }}</pre></details>
+          {% elif step.name == "widening" %}
+            <p class="small">{{ step.data.skipped }}: {{ step.data.questions | join(", ") }}</p>
+          {% elif step.name == "verification" %}
+            <table class="inner">
+              <tr><th>Question</th><th>Quote</th><th>Cited</th><th>Verified</th></tr>
+              {% for item in step.data.evidence %}
+              <tr><td class="small">{{ item.key }}</td>
+                  <td class="small">{% if item.found %}“{{ item.quote }}” <code>{{ item.kind }}</code>{% elif item.found is none %}<span class="label undecided">the model doesn't know</span>{% else %}<span class="muted">not found{% if item.whole_document %} in the whole document{% else %} in the pages shown{% endif %}</span>{% endif %}</td>
+                  <td class="small">{% if item.cited %}<a href="/files/{{ item.cited.file }}?page={{ item.cited.page }}&quote={{ item.quote | urlencode }}#p{{ item.cited.page }}">d{{ item.cited.doc }}p{{ item.cited.page }}</a>{% else %}—{% endif %}</td>
+                  <td>{% if item.found %}{% if item.verified %}<span class="label full">yes</span>{% else %}<span class="label not-full">no</span>{% endif %}{% endif %}</td></tr>
+              {% endfor %}
+            </table>
+          {% elif step.name == "rules" %}
+            <table class="inner">
+              <tr><th>Part</th><th>Value</th><th>Rule</th></tr>
+              {% for key, settled in step.data.trace.items() %}
+              <tr><td class="small">{{ key }}</td><td>{{ part(settled.value) }}</td><td class="small">{{ settled.rule }}</td></tr>
+              {% endfor %}
+            </table>
+            <p class="small">requirements {{ step.data.requirements }} → {% for name, value in step.data.parts.items() %}{{ name }} {{ part(value) }} · {% endfor %}label {{ label(step.data.label) }}</p>
+          {% elif step.name == "error" %}
+            <p class="small flag">{{ step.data.error }}</p>
+          {% endif %}
+          </div>
+        </details>
+      </li>
+    {% else %}<li class="muted">No trace recorded.</li>{% endfor %}
+    </ol>
+  {% else %}
+    <p class="muted">No evidence run has checked this trial yet.</p>
+  {% endif %}
+  </div>
+
+  {% if not ready %}
+  <div class="panel step">
+    <h3>Check this trial</h3>
+    <span class="small muted">It can't be checked yet: {{ not_ready }}. A check reads a trial only when every source that holds it gave all of its evidence and it is still current. Transfer it first{% if transferable %} (button at the top){% else %}, or upload its documents below{% endif %}.</span>
+  </div>
+  {% else %}
+  <form class="panel step" method="post" action="/jobs">
+    <h3>Check this trial {% if judgement %}again{% endif %}</h3>
+    <span class="small muted">Starts an evidence run on this trial only. Run it with another setup to compare runs side by side (tabs on the left).</span>
+    <input type="hidden" name="step" value="evidence">
+    <input type="hidden" name="trial_ids" value="{{ row.id }}">
+    <input type="hidden" name="back" value="/trials/{{ row.id }}">
+    {{ setup_select(configs, judgement_config or defaults.config) }}
+    <label class="check"><input type="checkbox" name="dry_run" value="true"> dry run (send nothing)</label>
+    <button {% if running %}disabled{% endif %}>Check</button>
+  </form>
+  {% endif %}
+</div>
+
+<h2 id="documents">Documents</h2>
+{% if documents %}
+<div class="table-wrap"><table>
+  <tr><th>Kind</th><th>Title</th><th>Version</th><th>Pages</th><th>Linked</th><th class="num">Size</th><th></th></tr>
+  {% for d in documents %}
+  <tr>
+    <td class="small">{{ d.kind_label }}{% if d.language %} <span class="muted">({{ d.language }})</span>{% endif %}</td>
+    <td class="small">{{ d.title or "—" }}</td>
+    <td class="small">v{{ d.version }}{% if d.versions > 1 %} <span class="muted">({{ d.versions }} kept)</span>{% endif %}<br><span class="muted">{{ when(d.fetched_at) }}</span></td>
+    <td class="small">{% if d.pages %}{% if d.readable_pages < d.pages %}<span class="flag">{{ d.readable_pages }}</span>/{% endif %}{{ d.pages }}{% else %}<span class="muted">not read</span>{% endif %}</td>
+    <td class="small">{{ d.basis }} · {{ d.link_source }}{% if d.confidence < 1 %} · {{ "%.0f" | format(d.confidence * 100) }}%{% endif %}<br><span class="muted">{{ when(d.linked_at) }} by {{ d.linked_by }}</span></td>
+    <td class="num small">{{ "%.1f" | format(d.size_bytes / 1048576) }} MB</td>
+    <td class="small">{% if d.pages %}<a href="/files/{{ d.sha256.hex() }}">text</a> · {% endif %}<a href="/files/{{ d.sha256.hex() }}/raw" target="_blank">file</a></td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="muted">No documents linked.</p>{% endif %}
+
+<form id="upload" class="panel step upload" method="post" action="/trials/{{ row.id }}/documents" enctype="multipart/form-data">
+  <h3>Upload a document</h3>
+  <span class="small muted">Linked to this trial by you; PDFs get their page text extracted straight away, so the next check reads them. The same file twice on one trial is refused.</span>
+  <div class="row">
+    <label>File<input type="file" name="file" required accept=".pdf,application/pdf"></label>
+    <label>It is
+      <select name="kind">
+        {% for code, kind_label in kinds %}<option value="{{ code }}">{{ kind_label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Title (optional)<input type="text" name="title" placeholder="the file name"></label>
+  </div>
+  <div class="row end"><span></span><button>Upload</button></div>
+</form>
+
+<h2>History</h2>
+<p class="small muted">Who added or changed this trial, its identifiers, records and document links, and when (core.audit_log).</p>
+<div class="table-wrap"><table>
+  <tr><th>When</th><th>Who</th><th>What</th><th>Details</th></tr>
+  {% for entry in history %}
+  <tr>
+    <td class="small">{{ entry.at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+    <td class="small">{{ entry.actor }} <span class="muted">({{ entry.actor_kind }})</span></td>
+    <td class="small">{{ entry.action }} {{ entry.table_name.replace("core.", "") }}</td>
+    <td class="small muted">{% set changed = entry.new_row or entry.old_row %}{% if entry.table_name == "core.trial_identifier" %}{{ changed.scheme }} {{ changed.value }}{% elif entry.table_name == "core.trial_document" %}document {{ changed.document_id }} ({{ changed.basis }}){% elif entry.table_name == "core.trial_record" %}{{ "record from source" }} {{ changed.source_key }}{% elif entry.table_name == "core.trial_source" %}source key {{ changed.source_key }}{% endif %}{% if entry.note %} · {{ entry.note }}{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="4" class="muted">No history.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

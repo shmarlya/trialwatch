@@ -29,9 +29,10 @@ AS_BUILT = [
     "data/bruckner/README.md",
 ]
 SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache"}
-# A file name with one of these extensions, optionally with directories: ctis/store.py, db/migrations/*.sql
+# A file name with one of these extensions, optionally with directories: sources/ctis.py, db/migrations/*.sql
 FILE_REF = re.compile(r"(?<![\w.~/*-])((?:[\w.-]+/)*[\w*-][\w.*-]*\.(?:md|py|sql|ya?ml|toml|sh|excalidraw|json))(?![\w/])")
-TABLE_REF = re.compile(r"\b((?:ctis|ref|gold|public)\.\w+)")
+# Not inside a file path: db/core.py is a file, core.trial a table
+TABLE_REF = re.compile(r"(?<![/\w.])((?:core|ctis|ref|gold|checks|public)\.\w+)")
 NOTATION = {"ref.x"}  # external-apis: "ref.x = code decoded by that table"
 PLACEHOLDER = ("…", "<", "{", "NNN", "00n")
 # First line of every image render.mjs writes: the sha256 of the .excalidraw it was rendered from
@@ -73,7 +74,7 @@ def schema_objects() -> set[str]:
 
 
 def cli_commands() -> set[str]:
-    """Every command as typed after `trialwatch`, e.g. {"version", "ctis fetch", "ctis seed"}."""
+    """Every command as typed after `trialwatch`, e.g. {"version", "ctis sync", "ctis seed"}."""
     found = set()
 
     def walk(cmd, prefix):
@@ -96,7 +97,7 @@ def compose_services() -> set[str]:
 
 
 def test_checker_catches_a_missing_file():
-    assert missing_files("Not here (see ROADMAP.md), but ctis/store.py and db/migrations/*.sql are", repo_files()) == {"ROADMAP.md"}
+    assert missing_files("Not here (see ROADMAP.md), but sources/ctis.py and db/migrations/*.sql are", repo_files()) == {"ROADMAP.md"}
 
 
 def test_as_built_docs_name_only_files_that_exist():

@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% from "macros.html" import when %}
+{% block title %}Prompts · TrialWatch{% endblock %}
+{% block content %}
+<h1>Prompts</h1>
+<p class="sub">The system prompts in src/trialwatch/checks/prompts/, exactly as they are sent. There is one current text per prompt (nothing is versioned before production); every run stores the text it sent, and its sha256, so an earlier run always shows its own text below. The evidence check also sends a message per trial (its pages and questions), shown in each trial's trace.</p>
+
+<h2>Prompt files now</h2>
+{% for prompt in current %}
+<details class="panel prompt" id="{{ prompt.name }}" {% if show == prompt.name %}open{% endif %}>
+  <summary><b>{{ prompt.name }}</b>{% if prompt.name == default_prompt %} <span class="label full">evidence check default</span>{% endif %}
+    <span class="small muted">sha256 {{ prompt.sha256.hex()[:12] }} · {{ "{:,}".format(prompt.text | length) }} characters</span></summary>
+  <pre>{{ prompt.text }}</pre>
+</details>
+{% endfor %}
+
+<h2>Used by check runs</h2>
+{% if uses %}
+<div class="table-wrap"><table>
+  <tr><th>Prompt</th><th>Text (sha256)</th><th class="num">Runs</th><th>Last used</th><th></th></tr>
+  {% for use in uses %}{% set key = use.prompt_sha256.hex() %}
+  <tr>
+    <td>{{ use.prompt }}</td>
+    <td class="small"><code>{{ key[:12] }}</code>{% if key not in current_hashes %} <span class="flag">differs from today's file</span>{% endif %}</td>
+    <td class="num">{{ use.runs }}</td>
+    <td class="small">{{ when(use.last_used) }} · <a href="/runs/{{ use.last_run }}">run {{ use.last_run }}</a></td>
+    <td class="small"><details><summary>text</summary><pre>{{ used_texts[key] }}</pre></details></td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="muted">No check runs yet.</p>{% endif %}
+{% endblock %}

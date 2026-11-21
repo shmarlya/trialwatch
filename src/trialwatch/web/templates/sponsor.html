@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% from "macros.html" import label, when %}
+{% block title %}{{ row.name }} · TrialWatch{% endblock %}
+{% block content %}
+<p class="small"><a href="/sponsors">← Sponsors</a></p>
+<h1>{{ row.name }}</h1>
+<p class="sub">{{ row.kind or "Organisation" }}{% if row.country %} · {{ row.country }}{% endif %}{% if row.commercial is sameas true %} · commercial{% elif row.commercial is sameas false %} · non-commercial{% endif %}</p>
+{% if row.merged_into %}<div class="alert">Merged into <a href="/sponsors/{{ row.merged_into }}">organisation {{ row.merged_into }}</a>.</div>{% endif %}
+<div class="panel">
+  <dl class="kv">
+    <dt>Our id</dt><dd>organisation {{ row.id }}</dd>
+    <dt>Identifiers</dt><dd>{{ row.identifiers | join(", ") or "—" }}</dd>
+    <dt>Added</dt><dd class="small">{{ when(row.created_at) }} by {{ row.created_by }}, from {{ row.first_source }}</dd>
+  </dl>
+</div>
+<h2>Trials</h2>
+<div class="table-wrap"><table>
+  <tr><th>Trial</th><th>Title</th><th>Role</th><th>Our label</th></tr>
+  {% for trial in trials %}
+  <tr {% if trial.removed_at %}class="muted"{% endif %}>
+    <td><a href="/trials/{{ trial.trial_id }}">{{ trial.name }}</a></td>
+    <td class="small">{{ trial.title or "" }}</td>
+    <td class="small">{% if trial.removed_at %}no longer a sponsor{% elif trial.is_primary %}primary{% else %}co-sponsor{% endif %}</td>
+    <td>{{ label(trial.label) }}{% if trial.label_run %} <a class="small muted" href="/runs/{{ trial.label_run }}">run {{ trial.label_run }}</a>{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="4" class="muted">No trials.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

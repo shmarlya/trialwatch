@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% from "macros.html" import label, evidence_state %}
+{% block title %}Trials · TrialWatch{% endblock %}
+{% block content %}
+<h1>Trials</h1>
+<p class="sub">Every trial in the central model, from any source, newest first. Evidence is its best state at any source: only trials with complete (or stale) evidence can be checked. Our label is the latest finished evidence run's.</p>
+<form class="search" method="get" action="/trials">
+  <input type="text" name="q" value="{{ q }}" placeholder="Search by identifier, title or sponsor">
+  <select name="evidence_state"><option value="">any evidence</option>{% for name in filters %}<option {% if name == evidence_state %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>
+  <button>Search</button>
+</form>
+{% macro pager() %}<div class="pager small">
+  {% if page > 1 %}<a href="/trials?q={{ q | urlencode }}&evidence_state={{ evidence_state | urlencode }}&page={{ page - 1 }}">← previous</a>{% endif %}
+  <span class="muted">{{ "{:,}".format(total) }} trials · page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="/trials?q={{ q | urlencode }}&evidence_state={{ evidence_state | urlencode }}&page={{ page + 1 }}">next →</a>{% endif %}
+</div>{% endmacro %}
+{{ pager() }}
+<div class="table-wrap"><table>
+  <tr><th>Trial</th><th>Title</th><th>Status</th><th>Evidence</th><th>Our label</th>
+      <th class="num">Documents</th><th class="num">Readable summary pages</th><th>Added</th></tr>
+  {% for row in rows %}
+  <tr>
+    <td><a href="/trials/{{ row.id }}">{{ row.name }}</a>
+      {% if row.open_duplicates %}<br><span class="label error">possible duplicate</span>{% endif %}</td>
+    <td class="small">{{ (row.title or "")[:110] }}{% if row.title and row.title | length > 110 %}…{% endif %}
+      {% if row.sponsor %}<br><span class="muted">{{ row.sponsor }}</span>{% endif %}</td>
+    <td class="small">{{ row.status or "—" }}</td>
+    <td>{{ evidence_state(row.evidence) }}</td>
+    <td>{{ label(row.label) }}{% if row.label_outdated %} <span class="flag" title="its documents or record changed since it was judged">outdated</span>{% endif %}{% if row.label_run %} <a class="small muted" href="/runs/{{ row.label_run }}">run {{ row.label_run }}</a>{% endif %}</td>
+    <td class="num">{{ row.documents }}</td>
+    <td class="num">{% if row.pages and row.readable_pages < row.pages %}<span class="flag">{{ row.readable_pages }}</span>/{{ row.pages }}{% else %}{{ row.readable_pages }}{% endif %}</td>
+    <td class="small muted">{{ row.created_at.strftime("%Y-%m-%d") }} · {{ row.created_by }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="8" class="muted">No trials{% if q or evidence_state %} match{% else %} yet. Bring some in from <a href="/sources">a source</a>{% endif %}.</td></tr>
+  {% endfor %}
+</table></div>
+{{ pager() }}
+{% endblock %}

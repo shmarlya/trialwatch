@@ -23,6 +23,7 @@ ROOT = Path(__file__).parent.parent
 PAGES = {
     "README.md": "index.md",
     "GLOSSARY.md": "glossary.md",
+    "STYLE.md": "STYLE.md",
     "data/bruckner/README.md": "data/bruckner/README.md",
 }
 # README.md links to docs/img/<name>.svg so the images show on GitHub; on the site, link the diagram's page.
@@ -32,34 +33,72 @@ DOCS_LINK = re.compile(r"\]\(docs/([^)\s]+)\)")
 
 def on_files(files: Files, *, config) -> Files:
     for source, page in PAGES.items():
-        files.append(File.generated(config, page, content=site_links((ROOT / source).read_text())))
+        markdown = (ROOT / source).read_text()
+        content = site_links(markdown)
+        files.append(File.generated(config, page, content=content))
     docs = Path(config.docs_dir)
     for diagram in sorted(docs.rglob("*.excalidraw")):
         rel = diagram.relative_to(docs)
-        files.append(File.generated(config, rel.with_suffix(".md").as_posix(), content=diagram_page(diagram, rel)))
+        page = rel.with_suffix(".md").as_posix()
+        content = diagram_page(diagram, rel)
+        files.append(File.generated(config, page, content=content))
     return files
 
 
 def site_links(markdown: str) -> str:
-    return DOCS_LINK.sub(r"](\1)", IMAGE_LINK.sub(r"](\1.md)", markdown))
+    # Image links first: DOCS_LINK would also match them and turn them into links to the SVG
+    with_page_links = IMAGE_LINK.sub(r"](\1.md)", markdown)
+    return DOCS_LINK.sub(r"](\1)", with_page_links)
 
 
 def md_escape(text: str) -> str:
     """Literal text inside Markdown: no tags (`<decision>`), emphasis or link brackets."""
-    return re.sub(r"([\\`*_\[\]])", r"\\\1", html.escape(text, quote=False))
+    html_escaped = html.escape(text, quote=False)
+    return re.sub(r"([\\`*_\[\]])", r"\\\1", html_escaped)
+
+
+def text_elements(diagram: Path) -> list[dict]:
+    """The diagram's text elements, leaving out deleted ones (Excalidraw keeps them in the file)."""
+    elements = json.loads(diagram.read_text())["elements"]
+    texts = []
+    for element in elements:
+        if element["type"] == "text" and not element.get("isDeleted"):
+            texts.append(element)
+    return texts
+
+
+def largest_text(texts: list[dict]) -> dict:
+    """The text in the largest font; the first one if several share that size."""
+    largest = texts[0]
+    for text in texts:
+        if text.get("fontSize", 0) > largest.get("fontSize", 0):
+            largest = text
+    return largest
+
+
+def reading_position(element: dict) -> tuple:
+    """Sort key: top to bottom, then left to right."""
+    return (element["y"], element["x"])
 
 
 def diagram_page(diagram: Path, rel: Path) -> str:
-    texts = [e for e in json.loads(diagram.read_text())["elements"] if e["type"] == "text" and not e.get("isDeleted")]
-    title = max(texts, key=lambda e: e.get("fontSize", 0))["text"].splitlines()[0] if texts else rel.stem
-    up = "../" * (len(rel.parts) - 1)  # the page sits next to its diagram, e.g. adr/ADR-001-….md
+    texts = text_elements(diagram)
+    # The title is the first line of the diagram's largest text, or the file name if it has no text
+    if texts:
+        title = largest_text(texts)["text"].splitlines()[0]
+    else:
+        title = rel.stem
+    folder_depth = len(rel.parts) - 1
+    up = "../" * folder_depth  # the page sits next to its diagram, e.g. adr/ADR-001-….md
     image = f"{up}img/{rel.with_suffix('.svg').as_posix()}"
     # Top to bottom, then left to right: roughly reading order for these diagrams. The newline after
     # <br> keeps words on either side of a line break apart in the search index.
-    paragraphs = "\n".join(
-        "<p>" + html.escape(e["text"]).replace("\n", "<br>\n") + "</p>"
-        for e in sorted(texts, key=lambda e: (e["y"], e["x"]))
-    )
+    paragraph_lines = []
+    for element in sorted(texts, key=reading_position):
+        escaped = html.escape(element["text"])
+        with_breaks = escaped.replace("\n", "<br>\n")
+        paragraph_lines.append("<p>" + with_breaks + "</p>")
+    paragraphs = "\n".join(paragraph_lines)
     return f"""---
 hide: [toc]
 ---

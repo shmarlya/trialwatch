@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% from "macros.html" import when %}
+{% block title %}Sources · TrialWatch{% endblock %}
+{% block content %}
+<h1>Sources</h1>
+<p class="sub">Where trials come from. Each registered source is read by an adapter and has its config: which trials its list holds, which evidence a transfer brings. <b>Sync the list</b> to get every listed trial (its key, title, identifiers), then <b>transfer the evidence</b> of the trials you want: their record and documents, with the page text read. Only trials whose transfer is complete can be checked.</p>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+
+<div class="table-wrap"><table>
+  <tr><th>Source</th><th>Adapter</th><th class="num">Listed</th><th class="num">Not transferred</th>
+      <th class="num">Complete</th><th class="num">Stale</th><th class="num">Failed</th><th class="num">No longer listed</th>
+      <th>List synced</th><th>Last transfer</th></tr>
+  {% for row in rows %}
+  <tr>
+    <td><a href="/sources/{{ row.code }}">{{ row.code }}</a>{% if not row.enabled %} <span class="label none">off</span>{% endif %}<br><span class="small muted">{{ row.name }}</span></td>
+    <td class="small">{{ row.adapter or "—" }}</td>
+    <td class="num">{{ "{:,}".format(row.listed) }}</td>
+    <td class="num">{{ "{:,}".format(row.not_transferred) }}</td>
+    <td class="num">{{ "{:,}".format(row.complete) }}</td>
+    <td class="num">{{ "{:,}".format(row.stale) }}</td>
+    <td class="num">{% if row.failed %}<span class="flag">{{ "{:,}".format(row.failed) }}</span>{% else %}0{% endif %}</td>
+    <td class="num">{{ "{:,}".format(row.delisted) }}</td>
+    <td class="small">{{ when(row.last_listed) }}</td>
+    <td class="small">{{ when(row.last_transferred) }}</td>
+  </tr>
+  {% endfor %}
+</table></div>
+
+{% if free_adapters %}
+<h2>Register a source</h2>
+<form class="panel step" method="post" action="/sources" style="max-width:520px">
+  <span class="small muted">Starts with the adapter's default config; change it on the source's page.</span>
+  <label>Adapter<select name="adapter">{% for name in free_adapters %}<option>{{ name }}</option>{% endfor %}</select></label>
+  <label>Code (optional)<input type="text" name="code" placeholder="the adapter's name"></label>
+  <label>Name (optional)<input type="text" name="name"></label>
+  <button>Register</button>
+</form>
+{% endif %}
+{% endblock %}

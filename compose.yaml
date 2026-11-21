@@ -5,19 +5,24 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       TZ: UTC
+      # For `check evidence`: put ANTHROPIC_API_KEY=... in .env (git-ignored); empty = no model calls
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # The gold datasets in the mounted data/ (the package's own path is inside the image's venv).
+      # They are read here; `gold build` runs on the host, where data/gold/ is writable.
+      TRIALWATCH_GOLD_DIR: /app/data/gold
     volumes:
-      # Research files, read-only, for `ctis seed`: data/bruckner/ is in git, the rest is local only
+      # Research files and gold datasets, read-only: data/bruckner/ and data/gold/ are in git
       - ./data:/app/data:ro
+      # Writable, git-ignored: `source transfer ctis --files-dir data/ctis/documents` writes copies of the PDFs there
+      - ./data/ctis:/app/data/ctis
     depends_on:
       migrate:
         condition: service_completed_successfully
 
   # Applies db/migrations/*.sql and writes db/schema.sql, then exits; the app starts only if this
-  # succeeds. Takes dbmate's arguments (`docker compose run --rm migrate rollback`). schema.sql
-  # leaves out dev_schema_migrations, which exists only where migrate-dev ran.
+  # succeeds. Takes dbmate's arguments (`docker compose run --rm migrate status`).
   migrate:
     image: ghcr.io/amacneil/dbmate:2.37.0
-    entrypoint: ["/bin/sh", "-c", "dbmate --no-dump-schema \"$$@\" && dbmate dump -- --exclude-table=public.dev_schema_migrations", "dbmate"]
     command: ["--wait", "up"]
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
@@ -27,27 +32,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-
-  # Optional, development and tests only: applies db/dev/*.sql (Bruckner et al.'s data) after
-  # migrate, recorded in its own table so production bookkeeping never sees it. db/dev/ is
-  # generated from data/bruckner/, not committed; build it with `uv run python scripts/dev_seed.py`.
-  # Profile dev keeps it out of `up`; start it with `docker compose run --rm migrate-dev`. Settings
-  # are env vars, not flags, so `run --rm migrate-dev rollback` / `status` also act on db/dev only.
-  migrate-dev:
-    image: ghcr.io/amacneil/dbmate:2.37.0
-    profiles: [dev]
-    command: ["--wait", "up"]
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
-      DBMATE_MIGRATION_LOCK: "true"
-      DBMATE_MIGRATIONS_DIR: /db/dev
-      DBMATE_MIGRATIONS_TABLE: dev_schema_migrations
-      DBMATE_NO_DUMP_SCHEMA: "true"
-    volumes:
-      - ./db:/db
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
 
   db:
     image: postgres:18-alpine

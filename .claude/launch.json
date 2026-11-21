@@ -4,8 +4,27 @@
     {
       "name": "docs",
       "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "--group", "docs", "mkdocs", "serve", "-a", "127.0.0.1:8000"],
+      "runtimeArgs": [
+        "run",
+        "--group",
+        "docs",
+        "mkdocs",
+        "serve",
+        "-a",
+        "127.0.0.1:8000"
+      ],
       "port": 8000
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "trialwatch",
+        "web",
+        "--reload"
+      ],
+      "port": 8010
     }
   ]
 }

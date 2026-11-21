@@ -1,12 +1,15 @@
 from datetime import date
+from pathlib import Path
 
 import pytest
 
 from trialwatch.checks.due_date import (
     completion_date, is_due, is_paediatric, months_before, parse_date, verdict,
 )
+from trialwatch.gold import bruckner
 
 AS_OF = date(2025, 11, 10)
+BRUCKNER = Path(__file__).parent.parent / "data" / "bruckner"
 
 
 def test_export_dates_parse_and_na_is_none():
@@ -48,13 +51,34 @@ def test_due_when_completed_more_than_12_or_6_months_before(completion, paediatr
 
 
 def test_verdict_follows_their_order_and_day_limits():
-    base = dict(cancelled=False, extended=False, reported_fully=True, paediatric=False)
-    assert verdict(**base, days_to_results=365) == "reported fully on time"
-    assert verdict(**base, days_to_results=366) == "reported fully late"
-    assert verdict(**base | {"paediatric": True}, days_to_results=183) == "reported fully on time"
-    assert verdict(**base | {"paediatric": True}, days_to_results=184) == "reported fully late"
-    assert verdict(**base | {"reported_fully": False}, days_to_results=None) == "not fully reported"
-    assert verdict(**base | {"extended": True}, days_to_results=900) == "extended"
-    assert verdict(**base | {"extended": True, "cancelled": True}, days_to_results=None) == "cancelled"
+    assert verdict(cancelled=False, extended=False, reported_fully=True, days_to_results=365,
+                   paediatric=False) == "reported fully on time"
+    assert verdict(cancelled=False, extended=False, reported_fully=True, days_to_results=366,
+                   paediatric=False) == "reported fully late"
+    assert verdict(cancelled=False, extended=False, reported_fully=True, days_to_results=183,
+                   paediatric=True) == "reported fully on time"
+    assert verdict(cancelled=False, extended=False, reported_fully=True, days_to_results=184,
+                   paediatric=True) == "reported fully late"
+    assert verdict(cancelled=False, extended=False, reported_fully=False, days_to_results=None,
+                   paediatric=False) == "not fully reported"
+    assert verdict(cancelled=False, extended=True, reported_fully=True, days_to_results=900,
+                   paediatric=False) == "extended"
+    assert verdict(cancelled=True, extended=True, reported_fully=True, days_to_results=None,
+                   paediatric=False) == "cancelled"
     with pytest.raises(ValueError):
-        verdict(**base, days_to_results=None)
+        verdict(cancelled=False, extended=False, reported_fully=True, days_to_results=None, paediatric=False)
+
+
+def test_our_rules_reproduce_their_verdicts_on_their_export():
+    """ADR-001's gate for the due-date rules: the same 277 due trials, and the same paediatric status,
+    completion date, days to results and verdict for each, from their files alone (no database)."""
+    result = bruckner.compare_due(BRUCKNER)
+    assert len(result.due_ours) == 277 and len(result.due_theirs) == 277
+    assert result.due_ours == result.due_theirs
+    assert result.disagreements == []
+    compared = {}
+    for name, counts in result.fields.items():
+        compared[name] = counts[0]
+        assert counts[0] == counts[1], name
+    assert compared["due"] == 277 and compared["verdict"] == 277
+    assert result.ended <= result.trials

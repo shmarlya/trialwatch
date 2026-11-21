@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% from "macros.html" import when, run_status, setup_select %}
+{% block title %}Workflow · TrialWatch{% endblock %}
+{% block content %}
+<h1>Workflow</h1>
+<p class="sub">Sync a source's list → transfer the evidence of the trials you want (or add a trial by hand) → check each trial against every results document linked to it. Only trials whose evidence came in completely can be checked. Changes are recorded as <b>{{ actor }}</b>.</p>
+
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% if running %}
+<div class="panel notice">
+  Running: <a href="/jobs/{{ running.id }}">job {{ running.id }} · {{ steps[running.request.step] }}</a>. Steps run one at a time.
+</div>
+{% endif %}
+
+<div class="grid">
+  <div class="panel">
+    <h3 class="panel-title">So far</h3>
+    {% for name, count in coverage %}
+      <div class="stat"><span>{{ name }}</span><b>{{ count }}</b></div>
+    {% endfor %}
+    <p class="small" style="margin:10px 0 0"><a href="/trials">Browse the trials →</a></p>
+  </div>
+
+  <div class="panel step">
+    <h3>1 · Sources</h3>
+    <span class="small muted">Each registered source (CTIS, …) has a list to sync and evidence to transfer: its record and documents, with their page text read. Choose the trials there.</span>
+    {% for source in sources %}
+    <div class="stat"><span><a href="/sources/{{ source.code }}">{{ source.code }}</a></span><span class="small">{{ "{:,}".format(source.listed) }} listed · {{ "{:,}".format(source.complete + source.stale) }} transferred{% if source.failed %} · <span class="flag">{{ source.failed }} failed</span>{% endif %}</span></div>
+    {% endfor %}
+    <a class="button" href="/sources">Open sources</a>
+  </div>
+
+  <form class="panel step" method="post" action="/jobs">
+    <h3>… or transfer from CTIS by EU CT number</h3>
+    <span class="small muted">Fetches each trial (matched to trials already here by all its identifiers), downloads the documents CTIS's config names, and reads their page text. Then it is ready for a check.</span>
+    <input type="hidden" name="step" value="transfer">
+    <input type="hidden" name="source" value="ctis">
+    <label>EU CT numbers<textarea name="key_text" placeholder="2022-500044-38-01, …" required></textarea></label>
+    <button {% if running %}disabled{% endif %}>Transfer</button>
+  </form>
+
+  <div class="panel step">
+    <h3>… or add a trial by hand</h3>
+    <span class="small muted">For a trial from another registry, a publication, or a document you have: its identifiers, title, primary endpoints and documents (PDF). Matched to trials already here first, so nothing is added twice.</span>
+    <a class="button" href="/trials/new">Add a trial</a>
+  </div>
+</div>
+
+<h2>2 · Evidence check</h2>
+<form class="panel step wide" method="post" action="/jobs">
+  <span class="small muted">Questions come from the registered primary endpoints; the model quotes evidence from the pages; code checks every quote; the requirement set's rules decide (see <a href="/requirements">Requirements</a>). Each run keeps its prompt and a step-by-step trace per trial. Model calls cost tokens: start with a dry run.</span>
+  <input type="hidden" name="step" value="evidence">
+  <div class="row">
+    <label>Trials with their evidence transferred (hold Ctrl or ⌘ to choose several)
+      <select name="trial_ids" multiple size="{{ [choices | length, 8] | min if choices else 2 }}">
+        {% for choice in choices %}
+        <option value="{{ choice.id }}" {% if not choice.readable_pages %}disabled{% endif %}>{{ choice.name }} · {{ (choice.title or "")[:70] }}{% if not choice.readable_pages %} — not ready: no readable results pages{% elif choice.label %} — {{ choice.label }}{% endif %}</option>
+        {% else %}
+        <option disabled>No trials with transferred evidence yet: transfer some from a source, or add one by hand</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="col">
+      <label class="check"><input type="checkbox" name="every" value="true"> every trial ready for a check</label>
+      <label>Limit<input type="number" name="limit" min="1" placeholder="all"></label>
+    </div>
+  </div>
+  <div class="row">
+    {{ setup_select(configs, defaults.config) }}
+    <span class="small muted">A setup is a file in checks/configs/ (model, effort, prompt, requirement set, how documents are read); every run records the one it used.</span>
+  </div>
+  <div class="row end">
+    <label class="check"><input type="checkbox" name="dry_run" value="true" checked> dry run (send nothing)</label>
+    <button {% if running %}disabled{% endif %}>Start</button>
+  </div>
+</form>
+
+<h2>Check runs</h2>
+{% if runs %}
+<div class="table-wrap"><table>
+  <tr><th>Run</th><th>Started</th><th>By</th><th>Model · effort</th><th>Prompt · requirements</th><th>Status</th>
+      <th class="num">Trials</th><th class="num">Full</th><th class="num">Not full</th><th class="num">Undecided</th>
+      <th class="num">Errors</th><th class="num">Tokens in</th></tr>
+  {% for run in runs %}
+  <tr>
+    <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
+    <td class="small">{{ when(run.started_at) }}</td>
+    <td class="small">{{ run.actor }}</td>
+    <td class="small">{{ run.model }} · {{ run.effort }}</td>
+    <td class="small">{{ run.prompt }} · {{ run.requirements }}</td>
+    <td>{{ run_status(run.status) }}</td>
+    <td class="num">{{ run.trials }}</td><td class="num">{{ run.full }}</td><td class="num">{{ run.not_full }}</td>
+    <td class="num">{{ run.undecided }}</td><td class="num">{{ run.errors }}</td>
+    <td class="num">{{ "{:,}".format(run.input_tokens) }}</td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="muted">No check runs yet.</p>{% endif %}
+
+<h2>Jobs started here</h2>
+{% if jobs %}
+<div class="table-wrap"><table>
+  <tr><th>Job</th><th>Step</th><th>Started</th><th>Status</th><th>Last line</th></tr>
+  {% for job in jobs %}
+  <tr>
+    <td><a href="/jobs/{{ job.id }}">{{ job.id }}</a></td>
+    <td>{{ steps[job.request.step] }}{% if job.request.dry_run %} <span class="muted">(dry run)</span>{% endif %}</td>
+    <td class="small">{{ when(job.started_at) }}</td>
+    <td>{{ run_status(job.status) }}</td>
+    <td class="small muted">{% if job.lines %}{{ job.lines[-1][:140] }}{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="muted">None since the server started.</p>{% endif %}
+{% endblock %}

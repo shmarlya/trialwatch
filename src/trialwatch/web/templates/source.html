@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% from "macros.html" import when, run_status, evidence_state %}
+{% block title %}{{ row.code }} · Sources · TrialWatch{% endblock %}
+{% block content %}
+<p class="small"><a href="/sources">← Sources</a></p>
+<h1>{{ row.code }}{% if not row.enabled %} <span class="label none">off</span>{% endif %}</h1>
+<p class="sub">{{ row.name }}{% if row.url %} · <a href="{{ row.url }}">{{ row.url }}</a>{% endif %} · adapter {{ row.adapter or "none" }}</p>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% if running %}<div class="panel notice">Running: <a href="/jobs/{{ running.id }}">job {{ running.id }} · {{ steps[running.request.step] }}</a>. Steps run one at a time.</div>{% endif %}
+
+<div class="grid">
+  <div class="panel">
+    <h3 class="panel-title">Trials</h3>
+    <div class="stat"><span>listed</span><b>{{ "{:,}".format(row.listed) }}</b></div>
+    <div class="stat"><span>not transferred</span><b>{{ "{:,}".format(row.not_transferred) }}</b></div>
+    <div class="stat"><span>complete (can be checked)</span><b>{{ "{:,}".format(row.complete) }}</b></div>
+    <div class="stat"><span>stale (changed at the source since)</span><b>{{ "{:,}".format(row.stale) }}</b></div>
+    <div class="stat"><span>failed</span><b>{{ "{:,}".format(row.failed) }}</b></div>
+    <div class="stat"><span>no longer listed</span><b>{{ "{:,}".format(row.delisted) }}</b></div>
+  </div>
+  {% if adapter and adapter.lists %}
+  <form class="panel step" method="post" action="/jobs">
+    <h3>1 · Sync the list</h3>
+    <span class="small muted">Reads the source's whole list (as the config's listing filters it) and makes each listed trial a trial here: its {{ adapter.key_label }}, title and identifiers. No records or documents. Last synced {{ when(row.last_listed) }}.</span>
+    <input type="hidden" name="step" value="list">
+    <input type="hidden" name="source" value="{{ row.code }}">
+    <input type="hidden" name="back" value="{{ here }}">
+    <button {% if running or not row.enabled %}disabled{% endif %}>Sync list</button>
+  </form>
+  {% endif %}
+  {% if adapter and adapter.transfers %}
+  <form class="panel step" method="post" action="/jobs">
+    <h3>2 · Transfer evidence</h3>
+    <span class="small muted">For each trial: its record and the documents the config names, then their page text. Complete only if all of it came in. About 1 s per request, a few requests per trial.</span>
+    <input type="hidden" name="step" value="transfer">
+    <input type="hidden" name="source" value="{{ row.code }}">
+    <input type="hidden" name="back" value="{{ here }}">
+    <label>Which trials
+      <select name="which">{% for name, text in choices.items() %}<option value="{{ name }}">{{ name }}: {{ text }}</option>{% endfor %}</select>
+    </label>
+    <label>Limit<input type="number" name="limit" min="1" placeholder="all"></label>
+    <button {% if running or not row.enabled %}disabled{% endif %}>Transfer</button>
+  </form>
+  <form class="panel step" method="post" action="/jobs">
+    <h3>… or by {{ adapter.key_label }}</h3>
+    <span class="small muted">Trials listed or not: a trial that is not here yet comes in with its record.</span>
+    <input type="hidden" name="step" value="transfer">
+    <input type="hidden" name="source" value="{{ row.code }}">
+    <input type="hidden" name="back" value="{{ here }}">
+    <label>{{ adapter.key_label }}s<textarea name="key_text" required></textarea></label>
+    <button {% if running or not row.enabled %}disabled{% endif %}>Transfer</button>
+  </form>
+  {% endif %}
+</div>
+
+<h2>Trials of {{ row.code }}</h2>
+<form class="search" method="get" action="/sources/{{ row.code }}">
+  <input type="text" name="q" value="{{ q }}" placeholder="Search key, title or listed details">
+  <select name="state"><option value="">every state</option>{% for name in filters %}<option {% if name == state %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>
+  <button>Search</button>
+</form>
+<form method="post" action="/jobs" id="selected">
+  <input type="hidden" name="source" value="{{ row.code }}">
+  <input type="hidden" name="back" value="{{ here }}">
+  <div class="selected-bar">
+    <span class="small muted"><span id="count">0</span> ticked of {{ "{:,}".format(total) }} shown in {{ pages }} page{% if pages != 1 %}s{% endif %}</span>
+    {% if adapter and adapter.transfers %}<button name="step" value="transfer" {% if running %}disabled{% endif %}>Transfer ticked</button>{% endif %}
+    <button class="secondary" name="step" value="evidence" {% if running %}disabled{% endif %}>Check ticked (setup {{ defaults.config }})</button>
+    <label class="check small"><input type="checkbox" name="dry_run" value="true" checked> dry run</label>
+  </div>
+  <div class="table-wrap"><table>
+    <tr><th><input type="checkbox" id="all" title="Tick every trial on this page"></th><th>{{ adapter.key_label if adapter else "Key" }}</th><th>Title</th>
+        {% if adapter %}{% for name, field in adapter.listing_columns %}<th>{{ name }}</th>{% endfor %}{% endif %}
+        <th>Changed at source</th><th>Evidence</th><th class="num">Docs · pages</th></tr>
+    {% for trial in trials %}
+    <tr>
+      <td><input type="checkbox" name="keys" value="{{ trial.source_key }}"></td>
+      <td><a href="/trials/{{ trial.trial_id }}">{{ trial.source_key }}</a>
+        {% if trial.delisted_at %}<br><span class="small muted">no longer listed</span>{% elif not trial.listed %}<br><span class="small muted">not listed</span>{% endif %}</td>
+      <td class="small">{{ (trial.title or "")[:110] }}{% if trial.title and trial.title | length > 110 %}…{% endif %}</td>
+      {% if adapter %}{% for name, field in adapter.listing_columns %}<td class="small">{{ (trial.summary or {}).get(field) or "—" }}</td>{% endfor %}{% endif %}
+      <td class="small">{{ trial.source_updated_on or "—" }}</td>
+      <td>{{ evidence_state(trial.status) }}{% if trial.transferred_at %}<br><span class="small muted">{{ when(trial.transferred_at) }}</span>{% endif %}
+        {% for where, message in (trial.errors or {}).items() %}<br><span class="small" title="{{ message }}"><span class="flag">{{ where }}</span> {{ message[:60] }}</span>{% endfor %}</td>
+      <td class="num small">{% if trial.transferred_at %}{{ trial.documents }} · {{ trial.pages }}{% else %}—{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="9" class="muted">No trials{% if state or q %} match{% elif adapter and adapter.lists %} yet: sync the list{% endif %}.</td></tr>
+    {% endfor %}
+  </table></div>
+</form>
+<div class="pager small">
+  {% if page > 1 %}<a href="/sources/{{ row.code }}?state={{ state | urlencode }}&q={{ q | urlencode }}&page={{ page - 1 }}">← previous</a>{% endif %}
+  <span class="muted">page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="/sources/{{ row.code }}?state={{ state | urlencode }}&q={{ q | urlencode }}&page={{ page + 1 }}">next →</a>{% endif %}
+</div>
+
+<h2 id="config">Config</h2>
+<form class="panel step" method="post" action="/sources/{{ row.code }}/config" style="max-width:760px">
+  {% if saved %}<span class="small"><b>Saved.</b> The next runs use it.</span>{% endif %}
+  <span class="small muted">One current config, as JSON; every run records the config it used.{% if row.adapter == "ctis" %} <code>listing.criteria</code> takes the fields of CTIS's search, e.g. <code>{"status": [8], "hasStudyResults": true}</code>; <code>evidence.document_kinds</code> the kinds to transfer (<code>null</code> for every kind).{% endif %}</span>
+  <textarea class="config" name="config">{{ config_text }}</textarea>
+  <label class="check"><input type="checkbox" name="enabled" value="true" {% if row.enabled %}checked{% endif %}> switched on</label>
+  <button>Save config</button>
+</form>
+
+<h2>Runs</h2>
+{% if runs %}
+<div class="table-wrap"><table>
+  <tr><th>Run</th><th>Kind</th><th>Started</th><th>By</th><th>Status</th><th>Counts</th><th class="num">Errors</th></tr>
+  {% for run in runs %}
+  <tr>
+    <td>{{ run.id }}</td><td>{{ run.kind }}{% if run.args.why %} · {{ run.args.why }}{% endif %}</td>
+    <td class="small">{{ when(run.started_at) }}</td><td class="small">{{ run.actor }}</td>
+    <td>{{ run_status(run.status) }}</td>
+    <td class="small">{% for name, value in run.counts.items() %}{% if value %}{{ name }} {{ value }}{% if not loop.last %} · {% endif %}{% endif %}{% endfor %}</td>
+    <td class="num">{{ run.errors | length }}</td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="muted">No runs yet.</p>{% endif %}
+
+<script>
+  // Tick every trial on this page, and count the ticked ones
+  const boxes = document.querySelectorAll('#selected input[name="keys"]');
+  const count = document.getElementById("count");
+  function recount() { let n = 0; boxes.forEach(b => { if (b.checked) n += 1; }); count.textContent = n; }
+  boxes.forEach(b => b.addEventListener("change", recount));
+  document.getElementById("all").addEventListener("change", e => { boxes.forEach(b => { b.checked = e.target.checked; }); recount(); });
+</script>
+{% endblock %}

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "macros.html" import label, part, when, run_status %}
+{% block title %}Run {{ run.id }} · TrialWatch{% endblock %}
+{% block content %}
+<h1>Evidence run {{ run.id }}</h1>
+<p class="sub">{{ run.model }} · effort {{ run.effort }} · prompt <a href="/prompts?show={{ run.prompt }}#{{ run.prompt }}">{{ run.prompt }}</a> · requirements <a href="/requirements?show={{ run.requirements }}#{{ run.requirements }}">{{ run.requirements }}</a> · started {{ when(run.started_at) }} by {{ run.actor }} · {{ run_status(run.status) }}</p>
+{% if run.error %}<div class="alert">Stopped: {{ run.error }}</div>{% endif %}
+
+<div class="grid">
+  <div class="panel">
+    <div class="stat"><span>Trials</span><b>{{ run.trials }}</b></div>
+    <div class="stat"><span>Full · not full · undecided</span><b>{{ run.full }} · {{ run.not_full }} · {{ run.undecided }}</b></div>
+    <div class="stat"><span>Errors</span><b>{{ run.errors }}</b></div>
+    <div class="stat"><span>Tokens in · out</span><b>{{ "{:,}".format(run.input_tokens) }} · {{ "{:,}".format(run.output_tokens) }}</b></div>
+    <div class="stat"><span>Finished</span><b>{{ when(run.finished_at) }}</b></div>
+  </div>
+  <div class="panel">
+    <h3 class="panel-title">Settings</h3>
+    <dl class="kv small">{% for key, value in params.items() %}<dt>{{ key }}</dt><dd>{{ value }}</dd>{% endfor %}</dl>
+  </div>
+</div>
+
+<details class="panel prompt">
+  <summary><b>System prompt</b> <span class="small muted">{{ run.prompt }}, as sent with every call of this run</span></summary>
+  <pre>{{ prompt_text }}</pre>
+</details>
+
+<h2>Judgements</h2>
+<div class="table-wrap"><table>
+  <tr><th>Trial</th><th>Label</th><th>Parts</th><th class="num">Tokens in</th><th class="num">Time</th><th></th></tr>
+  {% for j in judgements %}
+  <tr>
+    <td><a href="/trials/{{ j.trial_id }}?run={{ run.id }}">{{ j.name }}</a></td>
+    <td>{% if j.error %}<span class="label error">error</span>{% else %}{{ label(j.label) }}{% endif %}</td>
+    <td class="small">{% for name, value in j.parts.items() %}{{ name }} {{ part(value) }}{% if not loop.last %} · {% endif %}{% endfor %}</td>
+    <td class="num small">{% if j.input_tokens %}{{ "{:,}".format(j.input_tokens) }}{% endif %}</td>
+    <td class="num small">{% if j.duration_ms %}{{ "%.1f" | format(j.duration_ms / 1000) }} s{% endif %}</td>
+    <td class="small">{% if j.error %}<span class="muted">{{ j.error[:100] }}</span>{% else %}<a href="/trials/{{ j.trial_id }}?run={{ run.id }}">trace →</a>{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="8" class="muted">No trials judged.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

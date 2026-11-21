@@ -1,0 +1,37 @@
+{
+  "name": "bruckner",
+  "version": "2026-03-16",
+  "title": "Bruckner et al. 2026: results reporting of EU Phase II-IV trials in CTIS",
+  "description": "Two or three reviewers read each due trial's CTIS summary of results and answered three questions: does it report how many participants took part, does it give a result for every primary endpoint, and does it say nobody was enrolled. The expected label is 'full' when their final assessment of the scientific results document was full.",
+  "citation": "Bruckner T, Dike CE, Caquelin L, Freeman A, Aspromonti DA, DeVito NJ, Song Z, Karam G, Nilsonne G. Assessing Compliance with Reporting Requirements in European Phase II-IV Clinical Trials: A Cross-Sectional Observational Study. medRxiv preprint, 2026. doi:10.64898/2026.04.03.26350111",
+  "url": "https://osf.io/sn4j2/overview",
+  "requirements": "eu-ctr-results",
+  "parts": [
+    "participants",
+    "outcomes",
+    "cancelled"
+  ],
+  "labels": [
+    "full",
+    "not full"
+  ],
+  "evidence": {
+    "document_kinds": [
+      "results-summary"
+    ],
+    "as_of": "2025-11-10",
+    "description": "The summary of results posted in CTIS before the export of 2025-11-10. A trial whose results were submitted again later may now have documents the reviewers never read."
+  },
+  "built_from": [
+    {
+      "file": "data/bruckner/2026-03-16_ctis_study_final_dataset.csv",
+      "sha256": "f61346faf723d8dbaf7dca536b3c5bf6de1edbdeda980c2ba75cf1ca6bba8373"
+    },
+    {
+      "file": "data/bruckner/ctis_merged_reviews_consolidated_with_comments.csv",
+      "sha256": "840c646505c06ec82d28db35a24d59557624335d7c03781aa3569f50eb9786dc"
+    }
+  ],
+  "built_with": "trialwatch gold build bruckner",
+  "items": 277
+}

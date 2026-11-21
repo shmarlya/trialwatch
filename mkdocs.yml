@@ -36,7 +36,7 @@ theme:
 
 plugins:
   - search:
-      # Material's recommended word separator: diagram text like "(MockTransport)" or "ctis/store.py"
+      # Material's recommended word separator: diagram text like "(CtisClient.search)" or "sources/stages.py"
       # must split into words, not stay one token with its brackets and slashes.
       separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
 
@@ -62,8 +62,13 @@ nav:
       - AI architecture decisions: ai-architecture-decisions.md
       - ADR roadmap: adr-roadmap.md
       - "ADR-001: Success criteria": adr/ADR-001-success-criteria.md
+      - "ADR-002: Workflow or agent": adr/ADR-002-workflow-or-agent.md
+      - "ADR-003: Sources and gold datasets": adr/ADR-003-sources-and-gold-datasets.md
+      - "ADR-004: Generic check, requirements as data": adr/ADR-004-generic-check-requirements-as-data.md
+      - "ADR-005: Data sources in stages": adr/ADR-005-data-sources-in-stages.md
   - Benchmark data: data/bruckner/README.md
   - Glossary: glossary.md
+  - Code style: STYLE.md
 not_in_nav: |
   /adr/ADR-template.md
 

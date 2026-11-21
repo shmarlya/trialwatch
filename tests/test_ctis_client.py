@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from trialwatch.ctis.client import CtisClient, TrialNotFound
+from trialwatch.sources.ctis_client import CtisClient, TrialNotFound
 
 CT = "2025-522750-39-00"
 
@@ -64,3 +64,39 @@ def test_does_not_retry_client_errors():
     with client(handler) as c, pytest.raises(httpx.HTTPStatusError):
         c.retrieve(CT)
     assert len(calls) == 1
+
+
+UUID = "c04dae35-287b-4570-9e56-971c5e91ab11"
+LINK = "https://bucket.s3.eu-central-1.amazonaws.com/doc?X-Amz-Signature=abc"
+
+
+def test_download_document_follows_the_presigned_link():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.host == "euclinicaltrials.eu":
+            return httpx.Response(200, json={"url": LINK})
+        return httpx.Response(
+            200, content=b"%PDF-1.7 ...",
+            headers={"Content-Type": "application/pdf", "x-amz-meta-filename": "Results.pdf"},
+        )
+
+    with client(handler) as c:
+        file = c.download_document(CT, UUID)
+    assert (file.content, file.media_type, file.file_name) == (b"%PDF-1.7 ...", "application/pdf", "Results.pdf")
+    assert seen[0].url.path == f"/ctis-public-api/documents/{CT}/{UUID}/download"
+    assert str(seen[1].url) == LINK
+
+
+def test_download_document_rejects_a_non_https_link():
+    with client(lambda r: httpx.Response(200, json={"url": "http://example.org/x"})) as c, pytest.raises(ValueError):
+        c.download_document(CT, UUID)
+
+
+def test_download_document_rejects_a_malformed_uuid_without_calling_api():
+    def handler(request):
+        raise AssertionError("should not be called")
+
+    with client(handler) as c, pytest.raises(ValueError):
+        c.download_document(CT, "../retrieve")

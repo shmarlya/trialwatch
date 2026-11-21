@@ -7,7 +7,7 @@ The design docs are Excalidraw diagrams in `docs/` (open a `.excalidraw` file at
 
 - [Current system (as built)](docs/img/system-design.svg) · [High-level architecture](docs/img/architecture.svg) · [Database tables](docs/img/db.svg) · [External API interfaces](docs/img/external-apis.svg)
 - [AI architecture decisions & learning map](docs/img/ai-architecture-decisions.svg) · [ADR roadmap](docs/img/adr-roadmap.svg)
-- ADRs: [ADR-001 success criteria](docs/img/adr/ADR-001-success-criteria.svg) · [template](docs/img/adr/ADR-template.svg)
+- ADRs: [ADR-001 success criteria](docs/img/adr/ADR-001-success-criteria.svg) · [ADR-002 workflow or agent](docs/img/adr/ADR-002-workflow-or-agent.svg) · [ADR-003 sources and gold datasets](docs/img/adr/ADR-003-sources-and-gold-datasets.svg) · [ADR-004 generic check, requirements as data](docs/img/adr/ADR-004-generic-check-requirements-as-data.svg) · [ADR-005 data sources in stages](docs/img/adr/ADR-005-data-sources-in-stages.svg) · [template](docs/img/adr/ADR-template.svg)
 
 The images are generated, never edited by hand: `node tools/diagrams/render.mjs` renders every stale one with Excalidraw's own exporter in headless Chromium, and a pre-commit hook runs it whenever a commit touches a diagram. If an image changed, the commit stops so you can `git add docs/img` and commit again. `tests/test_docs.py` fails while any image is out of date. One-time setup (Node 24 and uv):
 
@@ -28,6 +28,56 @@ The same docs also build a website with MkDocs Material: Home from this README, 
 ```bash
 uv run --group docs mkdocs serve
 ```
+
+## Web interface
+
+A small local site for the workflow (ADR-005): on the Sources page, sync a registered source's list (every trial CTIS lists becomes a trial here, with its EU CT number and title), then transfer the evidence of the trials you tick or of all pending, failed or stale ones (each trial's record, the documents the source's config names, and their page text), or add a trial by hand with uploaded PDFs; then run the evidence check, as background jobs with live progress. A check reads a trial only when its evidence is ready: every source that holds the trial gave it completely (with the document kinds the check reads, where the source has them), and nothing changed at the source since. A stale trial is transferred again first, so a sponsor's corrected document is never judged by its old copy; the others are refused, with the reason. CTIS gives a trial's last change only as a day, so a trial changed on the day of its transfer stays stale until it is transferred again on a later day; and every transfer downloads each listed document again and compares its bytes, so a file replaced without a new version number is caught too. Browse every trial with its identifiers, documents and history (who added what, when), each check's judgement with a step-by-step trace from questions to rules (the prompt, retrieval, the model's raw answers, quote checks), and every run with its prompt and settings. A judgement whose documents or record changed since is marked outdated; a trial can be checked again, also with other settings to compare runs. The Gold page searches the gold datasets in data/gold/ (identifiers, titles, reviewers' comments; filters by gold label, reviewer disagreement and our result) and puts our newest judgement next to each item's expected answers, with false accusations flagged; a gold item whose evidence is not here yet can be transferred from its page, and a trial page shows the gold items that name it.
+
+```bash
+uv run trialwatch web --reload
+```
+
+It opens on http://127.0.0.1:8010 and reads the database and `ANTHROPIC_API_KEY` from `.env`. Model checks start as dry runs; untick "dry run" to send. Long jobs can be stopped between trials; what they did so far is kept. A job that dies with the server (a restart, `--reload`) leaves its run marked running, and the next run closes it as failed. The site has no login, so it answers only requests addressed to this machine (`TRIALWATCH_HOSTS` adds other names) and takes form posts only from its own pages; a stored PDF opens in the browser's viewer, any other file is downloaded.
+
+The same steps from the terminal:
+
+```bash
+uv run trialwatch source list
+```
+
+```bash
+uv run trialwatch source sync ctis
+```
+
+```bash
+uv run trialwatch source transfer ctis --which pending --limit 20
+```
+
+```bash
+uv run trialwatch check evidence --all --dry-run
+```
+
+`source transfer ctis 2025-522750-39-00 …` takes EU CT numbers instead; `source config ctis --config <file>` replaces a source's config (CTIS: `listing.criteria` are the fields of its search, e.g. `{"status": [8], "hasStudyResults": true}`; `evidence.document_kinds` the kinds to transfer, by default the summary of results and the clinical study report), `--disable` switches a source off, and `source register` adds a source read by another adapter. One process at a time syncs or transfers from a source. `check evidence --all` takes every trial whose evidence is ready; without `--dry-run` it calls the model. It runs with a named setup, `--config` (default `default`): a file in src/trialwatch/checks/configs/ that holds the model and its effort, the prompt, the requirement set and how documents reach the model (page text searched per question, or each PDF whole, as in `whole-files`). `check configs` lists the setups, the web forms offer them by name, and every run records the one it used, so runs made with the same setup can be compared; trying other settings means adding a setup file. The code is in src/trialwatch/sources/: registry.py, stages.py, and an adapter per source (sources/ctis.py with its HTTP client sources/ctis_client.py, sources/manual.py); the check is in src/trialwatch/checks/. Gold datasets are rebuilt from data/bruckner/ with `uv run trialwatch gold build bruckner` (on this machine, not in the container; a released version is never overwritten), listed with `uv run trialwatch gold datasets`, and `uv run trialwatch gold compare --run N` scores check run N against one (`--dataset bruckner/2026-03-16` picks which). The web interface's code is in src/trialwatch/web/ (app.py, jobs.py, templates/).
+
+## Database and tests
+
+Postgres runs in Docker Compose (compose.yaml): `db` holds the data and is reachable from this machine only, `migrate` applies db/migrations/*.sql with dbmate and writes db/schema.sql, and `app` runs the `trialwatch` command in a container. Copy `.env.example` to `.env` and set a password first. Every `trialwatch` command reads `.env`, so `uv run trialwatch …` on this machine uses the same database. This starts the database and applies the migrations:
+
+```bash
+docker compose run --rm migrate
+```
+
+The whole schema is one migration, db/migrations/20261121120000_init.sql, drawn in [Database tables](docs/img/db.svg). A database made with the migrations from before 2026-11-21 is not migrated: reset it with `docker compose down -v` (this deletes its data) and run `migrate` again.
+
+The tests never touch that database: tests/conftest.py makes `<database>_test` on the same server from the migrations for every run, and CTIS and the model are faked. .github/workflows/tests.yml runs them on every push and pull request, with a Postgres of its own.
+
+```bash
+uv run pytest
+```
+
+## Code style
+
+The Python is written to be read by people who don't read Python: plain loops and `if` statements instead of Python's shortcuts. The rules are in [STYLE.md](STYLE.md). All SQL lives in `src/trialwatch/db/`.
 
 ## Sources & acknowledgements
 

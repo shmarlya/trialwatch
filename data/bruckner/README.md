@@ -21,16 +21,16 @@ you reuse these files. The rows in the two CTIS exports are EMA data from the pu
 
 | File | What it is | Size | Read by |
 |---|---|---|---|
-| `CTIS_trials_Phases_II-IV_20251110.csv` | CTIS public search export, every Phase II–IV trial: **7,547 trials**, 24 columns | 13 MB | `trialwatch ctis seed` → `ctis.search_export_snapshot` |
-| `CTIS_trials_with_PIP_20251110.csv` | Same day's export of the trials with a paediatric investigation plan: **677 trials**. Decides paediatric status, which sets the 6- or 12-month results deadline | 1.5 MB | `trialwatch ctis seed` → `ctis.search_export_snapshot` |
-| `2026-03-16_ctis_study_final_dataset.csv` | Their answer key: the final verdict for each of the **277 due trials**, 40 columns | 500 KB | `trialwatch gold bruckner` → `gold.bruckner_verdict` |
-| `ctis_merged_reviews_consolidated_with_comments.csv` | Each reviewer's answers per results document: **206 documents**, two reviewers each and a third for 37 | 396 KB | `trialwatch gold bruckner-reviews` → `gold.bruckner_document`, `gold.bruckner_review` |
+| `CTIS_trials_Phases_II-IV_20251110.csv` | CTIS public search export, every Phase II–IV trial: **7,547 trials**, 24 columns | 13 MB | the due-date check |
+| `CTIS_trials_with_PIP_20251110.csv` | Same day's export of the trials with a paediatric investigation plan: **677 trials**. Decides paediatric status, which sets the 6- or 12-month results deadline | 1.5 MB | the due-date check |
+| `2026-03-16_ctis_study_final_dataset.csv` | Their answer key: the final verdict for each of the **277 due trials**, 40 columns | 500 KB | the gold dataset, the due-date check |
+| `ctis_merged_reviews_consolidated_with_comments.csv` | Each reviewer's answers per results document: **206 documents**, two reviewers each and a third for 37 | 396 KB | the gold dataset, the due-date check (posting dates, cancellations) |
 
 The full 37 MB OSF deposit also holds their R pipeline, a Phase I export and intermediate outputs. We
 don't read those, so they are not in git; get them from OSF if you need them.
 
-The merged reviews file is not valid UTF-8. Our loader replaces its 749 broken byte sequences with
-U+FFFD (�); only free-text comments are affected.
+The merged reviews file is not valid UTF-8. Our code reads its 749 broken byte sequences as U+FFFD
+(�); only free-text comments are affected.
 
 ## Where each came from in the OSF deposit
 
@@ -52,15 +52,28 @@ f61346faf723d8dbaf7dca536b3c5bf6de1edbdeda980c2ba75cf1ca6bba8373  2026-03-16_cti
 840c646505c06ec82d28db35a24d59557624335d7c03781aa3569f50eb9786dc  ctis_merged_reviews_consolidated_with_comments.csv
 ```
 
-## Loading them
+## How TrialWatch reads them
 
-`scripts/dev_seed.py` turns all four into one dev-only migration, `db/dev/`, which the `migrate-dev`
-compose service applies. That file is generated, not committed, because every loader change rewrites
-all 21 MB of it:
+Nothing loads these files into the database: src/trialwatch/gold/bruckner.py reads them where they
+are, for two things.
+
+**The gold dataset.** The two answer files are converted into the gold dataset version
+`bruckner/2026-03-16`, written to data/gold/bruckner/2026-03-16/: one item per due trial (277), of
+which the 206 with a reviewed results document carry the reviewers' consensus per part and a label.
+The web interface's Gold page searches it, and `trialwatch gold compare --run N` scores a check run
+against it. Build it on the host (the app container sees data/ read-only):
 
 ```bash
-uv run python scripts/dev_seed.py && docker compose run --rm migrate-dev
+uv run trialwatch gold build bruckner
 ```
 
-Then `trialwatch gold compare-due` runs our due-date rules over all 7,547 trials and compares the
-result with their 277 verdicts, trial by trial (ADR-001).
+The version is locked in data/gold/versions.lock: rebuilding it from these files gives the same
+bytes (a test checks that), and a released version is never overwritten. Their reviewers read the
+summaries of results posted before the exports of 2025-11-10 (`evidence.as_of` in its
+dataset.json), so `gold compare` sets a trial aside when our check read a document posted on or after
+that day: ours and theirs may then be different documents.
+
+**The due-date check.** tests/test_due_date.py runs our due-date rules
+(src/trialwatch/checks/due_date.py) over all 7,547 trials of the export, with the PIP export
+deciding which are paediatric, and checks that they reproduce all 277 of their verdicts, trial by
+trial (ADR-001).

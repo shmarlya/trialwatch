@@ -8,12 +8,11 @@ Started by `trialwatch web`. Pages are rendered on the server from templates/; t
 the job page's polling of its own progress and small conveniences (scroll to a quote). All SQL is in
 trialwatch.db (db/overview.py for these pages).
 
-Who may do what is the action → role chart in trialwatch.auth.actions (ADR-006): anyone may browse
-what is public, and every action needs a signed-in admin or moderator whose role the chart allows.
-What is public (ADR-007): trials, sponsors and their documents, the judgements staff published (with
-their quotes, not their traces), runs, prompts and requirement sets; people are shown only as staff.
-Pages that show both decide once with staff_view() and load staff-only data only for staff, so a
-template can't show the public what it was never given. Each route that
+Who may do what is the action → role chart in trialwatch.auth.actions (ADR-006). Anyone not signed in
+sees only the home page (what TrialWatch is, and counts of what is published) and the sign-in page;
+every other page and every action needs a signed-in admin or moderator whose role the chart allows.
+Pages that once also served the public (ADR-007) still decide once with staff_view() what to load, so
+opening them to the public again is a change to the chart, not to the pages. Each route that
 changes something names its action (`Depends(Requires(...))`), and its writes are recorded as the
 signed-in person. It also answers only requests addressed to this machine's names (a web page can't
 reach it through a domain name pointing here) and takes form posts only from its own pages (a web
@@ -36,6 +35,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import psycopg
@@ -97,6 +97,8 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(title="TrialWatch", lifespan=lifespan)
+# The brand and UI components: static/brand.css (tokens), static/components.css, the logo and favicon
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 # The names this machine answers to; TRIALWATCH_HOSTS adds others (comma-separated), e.g. when
 # `trialwatch web --host` serves it on a network
@@ -907,7 +909,8 @@ TRIALS_PER_PAGE = 100
 
 
 @app.get("/trials", response_class=HTMLResponse)
-def trials_page(request: Request, q: str = "", evidence_state: str = "", page: int = 1) -> HTMLResponse:
+def trials_page(request: Request, q: str = "", evidence_state: str = "", page: int = 1,
+                user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
     staff = staff_view(request)
     search = q.strip()
     if not search:
@@ -1100,7 +1103,8 @@ def review_page(request: Request, user: auth_db.User = Depends(Requires("view.in
 
 
 @app.get("/sponsors", response_class=HTMLResponse)
-def sponsors_page(request: Request, q: str = "") -> HTMLResponse:
+def sponsors_page(request: Request, q: str = "",
+                  user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
     search = q.strip()
     if not search:
         search = None
@@ -1110,7 +1114,8 @@ def sponsors_page(request: Request, q: str = "") -> HTMLResponse:
 
 
 @app.get("/sponsors/{organisation_id}", response_class=HTMLResponse)
-def sponsor_page(request: Request, organisation_id: int) -> HTMLResponse:
+def sponsor_page(request: Request, organisation_id: int,
+                 user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
     with db.connect_system() as conn:
         row = overview.organisation_row(conn, organisation_id)
         if row is None:
@@ -1121,7 +1126,8 @@ def sponsor_page(request: Request, organisation_id: int) -> HTMLResponse:
 
 
 @app.get("/trials/{trial_id}", response_class=HTMLResponse)
-def trial_page(request: Request, trial_id: int, run: int | None = None, error: str | None = None) -> HTMLResponse:
+def trial_page(request: Request, trial_id: int, run: int | None = None, error: str | None = None,
+               user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
     staff = staff_view(request)
     with db.connect_system() as conn:
         row = overview.trial_row(conn, trial_id, default_settings().requirements, published_only=not staff)
@@ -1302,7 +1308,8 @@ def save_source_config(code: str, config: Annotated[str, Form()], enabled: Annot
 
 
 @app.get("/files/{sha_hex}", response_class=HTMLResponse)
-def file_page(request: Request, sha_hex: str, page: int | None = None, quote: str | None = None) -> HTMLResponse:
+def file_page(request: Request, sha_hex: str, page: int | None = None, quote: str | None = None,
+              user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
     """The page text of one stored file, as retrieval and quote checks see it, with a quote marked."""
     sha = _file_hash(sha_hex)
     with db.connect_system() as conn:
@@ -1322,7 +1329,8 @@ def file_page(request: Request, sha_hex: str, page: int | None = None, quote: st
 
 
 @app.get("/files/{sha_hex}/raw")
-def file_raw(request: Request, sha_hex: str) -> Response:
+def file_raw(request: Request, sha_hex: str,
+             user: auth_db.User = Depends(Requires("view"))) -> Response:
     """The stored bytes, to open the document itself in the browser."""
     sha = _file_hash(sha_hex)
     with db.connect_system() as conn:
@@ -1345,7 +1353,8 @@ def file_raw(request: Request, sha_hex: str) -> Response:
 # --- prompts -------------------------------------------------------------------------------------
 
 @app.get("/prompts", response_class=HTMLResponse)
-def prompts_page(request: Request, show: str | None = None) -> HTMLResponse:
+def prompts_page(request: Request, show: str | None = None,
+                 user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
     """Every prompt file as it is now, and every prompt text check runs used (an edited file is a
     different text: the runs keep the one they sent)."""
     with db.connect_system() as conn:
@@ -1366,7 +1375,8 @@ def prompts_page(request: Request, show: str | None = None) -> HTMLResponse:
 
 
 @app.get("/requirements", response_class=HTMLResponse)
-def requirements_page(request: Request, show: str | None = None) -> HTMLResponse:
+def requirements_page(request: Request, show: str | None = None,
+                      user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
     """Every requirement set as it is now: what a trial must report and how "enough" is decided."""
     sets = []
     for name in requirement_sets.set_names():
@@ -1379,7 +1389,8 @@ def requirements_page(request: Request, show: str | None = None) -> HTMLResponse
 # --- check runs ----------------------------------------------------------------------------------
 
 @app.get("/runs/{run_id}", response_class=HTMLResponse)
-def run_page(request: Request, run_id: int) -> HTMLResponse:
+def run_page(request: Request, run_id: int,
+             user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
     with db.connect_system() as conn:
         run = overview.run_row(conn, run_id)
         if run is None:

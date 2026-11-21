@@ -63,7 +63,7 @@
 {% if item.comment %}<h2>Comment</h2><p>{{ item.comment }}</p>{% endif %}
 
 <h2>Reviewers</h2>
-{% if reviewers_disagreed %}<p class="small"><span class="label undecided">disagreed</span> the reviewers answered some part differently{% if item.reviewers_agreed %}, then agreed{% endif %}.</p>{% endif %}
+{% if reviewers_disagreed %}<p class="small"><span class="badge undecided">disagreed</span> the reviewers answered some part differently{% if item.reviewers_agreed %}, then agreed{% endif %}.</p>{% endif %}
 <div class="table-wrap"><table>
   <tr><th>Reviewer</th>{% for name in dataset.parts %}<th>{{ name }}</th>{% endfor %}<th>Asked for a check</th><th>Comment</th></tr>
   {% for review in item.reviews %}

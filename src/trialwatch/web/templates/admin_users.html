@@ -36,7 +36,7 @@
 </table></div>
 
 <h2>Add a user</h2>
-<form class="panel step" method="post" action="/admin/users" style="max-width:420px">
+<form class="panel step narrow" method="post" action="/admin/users">
   <label>Email (what they sign in with)<input type="email" name="email" autocomplete="off" required></label>
   <label>Password (at least {{ minimum }} characters)<input type="password" name="password" minlength="{{ minimum }}" autocomplete="new-password" required></label>
   <label>Role<select name="role">{% for role in roles %}<option>{{ role }}</option>{% endfor %}</select></label>

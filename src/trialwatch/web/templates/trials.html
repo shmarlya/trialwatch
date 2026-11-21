@@ -21,7 +21,7 @@
   {% for row in rows %}
   <tr>
     <td><a href="/trials/{{ row.id }}">{{ row.name }}</a>
-      {% if row.open_duplicates %}<br><span class="label error">possible duplicate</span>{% endif %}</td>
+      {% if row.open_duplicates %}<br><span class="badge error">possible duplicate</span>{% endif %}</td>
     <td class="small">{{ (row.title or "")[:110] }}{% if row.title and row.title | length > 110 %}…{% endif %}
       {% if row.sponsor %}<br><span class="muted">{{ row.sponsor }}</span>{% endif %}</td>
     <td class="small">{{ row.status or "—" }}</td>

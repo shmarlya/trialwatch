@@ -4,11 +4,13 @@ The "as built" docs are checked strictly: every file, table and CLI command they
 every table, command and compose service must appear in its diagram. The plan docs (decision map,
 roadmap, ADRs) name files that are still to be written, so only their links to other diagrams are
 checked. Text in a box starting "Not built yet" is a plan too. Every diagram must also have an
-up-to-date image in docs/img/ (rendered by tools/diagrams/render.mjs). Runs with the suite and from
-the Stop hook in .claude/settings.json.
+up-to-date image in docs/img/ (rendered by tools/diagrams/render.mjs). The decisions are kept in the repo
+only, not on the docs site (NOT_ON_SITE in tools/site_hooks.py). Runs with the suite and from the Stop
+hook in .claude/settings.json.
 """
 
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
@@ -37,6 +39,14 @@ NOTATION = {"ref.x"}  # external-apis: "ref.x = code decoded by that table"
 PLACEHOLDER = ("…", "<", "{", "NNN", "00n")
 # First line of every image render.mjs writes: the sha256 of the .excalidraw it was rendered from
 IMAGE_STAMP = re.compile(r"<!-- Rendered from (\S+) sha256=([0-9a-f]{64}) ")
+
+
+def site_hooks():
+    """tools/site_hooks.py, which is not a package (loaded by MkDocs from its path)."""
+    spec = importlib.util.spec_from_file_location("site_hooks", ROOT / "tools/site_hooks.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def text_of(path: Path) -> str:
@@ -147,12 +157,23 @@ def test_every_diagram_has_an_up_to_date_image():
     assert not orphans, f"images whose diagram is gone, run `node tools/diagrams/render.mjs`: {orphans}"
 
 
-def test_every_diagram_is_in_the_site_nav():
-    """tools/site_hooks.py makes a page for each diagram; mkdocs.yml must list it (nav or not_in_nav)."""
+def test_every_diagram_on_the_site_is_in_the_nav_and_no_decision_is():
+    """tools/site_hooks.py makes a page for each diagram on the site; mkdocs.yml must list it. The
+    decisions (NOT_ON_SITE) stay in the repo, so the nav must not name them."""
+    hooks = site_hooks()
     config = (ROOT / "mkdocs.yml").read_text()
     docs = ROOT / "docs"
-    pages = (p.relative_to(docs).with_suffix(".md").as_posix() for p in docs.rglob("*.excalidraw"))
-    assert not sorted(p for p in pages if not re.search(rf"(?<![\w-]){re.escape(p)}\b", config)), "diagrams missing from mkdocs.yml nav"
+    on_site, kept_out = [], []
+    for diagram in docs.rglob("*.excalidraw"):
+        rel = diagram.relative_to(docs).as_posix()
+        page = rel.removesuffix(".excalidraw") + ".md"
+        if hooks.shown_on_site(rel):
+            on_site.append(page)
+        else:
+            kept_out.append(page)
+    assert kept_out, "NOT_ON_SITE matches no diagram"
+    assert not sorted(p for p in on_site if not re.search(rf"(?<![\w-]){re.escape(p)}\b", config)), "diagrams missing from mkdocs.yml nav"
+    assert not sorted(p for p in kept_out if re.search(rf"(?<![\w-]){re.escape(p)}\b", config)), "decisions in mkdocs.yml, keep them off the site"
 
 
 def test_links_between_diagrams_resolve():

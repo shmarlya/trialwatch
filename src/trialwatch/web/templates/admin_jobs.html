@@ -42,7 +42,7 @@
       {% if can("schedule.edit") %}
       <form method="post" action="/admin/schedules/{{ schedule.id }}" class="inline">
         <select name="weekday">{% for day in range(1, 8) %}<option value="{{ day }}" {% if day == schedule.weekday %}selected{% endif %}>{{ weekdays[day] }}</option>{% endfor %}</select>
-        <input type="number" name="hour_utc" min="0" max="23" value="{{ schedule.hour_utc }}" style="width:4em">:00
+        <input type="number" name="hour_utc" min="0" max="23" value="{{ schedule.hour_utc }}" class="tiny">:00
         <label class="check"><input type="checkbox" name="enabled" value="true" {% if schedule.enabled %}checked{% endif %}> on</label>
         <button class="small secondary">Save</button>
       </form>

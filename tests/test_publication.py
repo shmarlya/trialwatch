@@ -1,6 +1,6 @@
-"""What the public sees (ADR-007): a judgement only once staff published it, with its answers and
-quotes but not its trace; staff-only pages; people shown only as staff; files a person uploaded kept
-from the public until a published judgement cites them."""
+"""Publishing (ADR-007) and what the public sees: anyone not signed in sees only the home page, which
+counts the published judgements; every other page is for staff. Staff publish and withdraw judgements;
+the queries keep the published-only views a public page would use."""
 
 import psycopg
 import pytest
@@ -42,31 +42,27 @@ def trial(app_conn):
     return seed(app_conn)
 
 
-def test_the_public_sees_a_judgement_only_once_published_and_never_its_trace(app_conn, trial):
+def test_publishing_counts_on_the_public_home_page_and_withdrawing_takes_it_back(app_conn, trial):
     run_id = judged(app_conn, trial)
     public = TestClient(web.app)
-    page = public.get(f"/trials/{trial}").text
-    assert "not full" not in page and QUOTE not in page
-    assert "No published result yet" in page
-    assert public.get("/trials").text.count("not full") == 0
 
+    def published_count():
+        home = public.get("/").text
+        return home.split("with a published result</span><b>", 1)[1].split("<", 1)[0]
+
+    assert published_count() == "0"
     moderator = signed_in_client(app_conn, "moderator", "mona@test.example")
     staff_page = moderator.get(f"/trials/{trial}").text
     assert "Publish" in staff_page and "not public" in staff_page and "Trace, start to finish" in staff_page
     assert moderator.post(f"/trials/{trial}/judgements/{run_id}/publish", follow_redirects=False).status_code == 303
-
-    page = public.get(f"/trials/{trial}").text
-    assert "not full" in page and QUOTE in page
-    # the trace, the model's notes and the staff controls stay with staff
-    assert "Trace, start to finish" not in page and "Publish" not in page and "Sources</h3>" not in page
-    assert "mona@test.example" not in page
-    assert "not full" in public.get("/trials").text
-    assert f"/trials/{trial}?run={run_id}" in public.get(f"/runs/{run_id}").text
+    assert published_count() == "1"
+    assert overview.trial_row(app_conn, trial, SET.name, published_only=True).label == "not full"
+    # the home page names no trial, quote or person
+    home = public.get("/").text
+    assert QUOTE not in home and "mona@test.example" not in home and f"/trials/{trial}" not in home
 
     moderator.post(f"/trials/{trial}/judgements/{run_id}/withdraw", data={"note": "quote misread"})
-    page = public.get(f"/trials/{trial}").text
-    assert QUOTE not in page and "No published result yet" in page
-    assert f"/trials/{trial}?run={run_id}" not in public.get(f"/runs/{run_id}").text
+    assert published_count() == "0"
 
 
 def test_a_judgement_with_an_error_cannot_be_published(app_conn, trial):
@@ -101,39 +97,37 @@ def test_the_public_view_is_the_newest_live_publication_and_each_change_is_audit
     assert [row[0] for row in actions] == ["insert", "insert", "update"]
 
 
-def test_staff_only_pages_send_the_public_to_sign_in(app_conn, trial):
+def test_every_page_but_home_sends_the_public_to_sign_in(app_conn, trial):
+    run_id = judged(app_conn, trial)
+    sha = app_conn.execute(
+        "SELECT d.file_sha256 FROM core.trial_document l JOIN core.document_current d ON d.id = l.document_id "
+        "WHERE l.trial_id = %s LIMIT 1", (trial,)).fetchone()[0].hex()
+    core.act_as(app_conn, "test-person")
+    core.add_trial_sponsor(app_conn, trial, core.Sponsor(name="Acme Pharma", primary=True), "manual")
+    sponsor = app_conn.execute("SELECT max(id) FROM core.organisation").fetchone()[0]
     public = TestClient(web.app)
-    for path in ("/sources", "/sources/ctis", "/gold"):
+    paths = ("/trials", f"/trials/{trial}", "/sponsors", f"/sponsors/{sponsor}", "/prompts", "/requirements",
+             f"/runs/{run_id}", f"/files/{sha}", f"/files/{sha}/raw", "/sources", "/sources/ctis", "/gold")
+    for path in paths:
         assert public.get(path).status_code == 401, path
         page = public.get(path, headers={"accept": "text/html"}, follow_redirects=False)
         assert page.headers["location"].startswith("/login?next="), path
+    assert public.get("/").status_code == 200 and public.get("/login").status_code == 200
     home = public.get("/").text
-    assert "with a published result" in home and "Sources</a>" not in home and "Gold</a>" not in home
+    assert "with a published result" in home
+    for link in ("Trials</a>", "Sponsors</a>", "Prompts</a>", "Requirements</a>", "Sources</a>", "Gold</a>"):
+        assert link not in home, link
     moderator = signed_in_client(app_conn, "moderator")
-    for path in ("/sources", "/sources/ctis", "/gold"):
+    for path in paths:
         assert moderator.get(path).status_code == 200, path
 
 
-def test_people_are_shown_to_the_public_only_as_staff(app_conn, trial):
-    core.act_as(app_conn, "pat@test.example")
-    core.add_trial_sponsor(app_conn, trial, core.Sponsor(name="Pat's Pharma", primary=False), "manual")
-    public = TestClient(web.app).get(f"/trials/{trial}").text
-    assert "pat@test.example" not in public and web.STAFF in public
-    # a process keeps its name: the public may see which source's adapter brought something in
-    staff = signed_in_client(app_conn, "admin").get(f"/trials/{trial}").text
-    assert "pat@test.example" in staff
-
-
-def test_a_file_a_person_uploaded_is_public_only_once_a_published_judgement_cites_it(app_conn, trial):
+def test_files_staff_see_are_marked_public_only_when_a_published_judgement_or_the_registry_has_them(app_conn, trial):
     core.act_as(app_conn, "test-person")
     uploaded = store_file(app_conn, "upload-pdf", b"%PDF-1.7 an internal note", "application/pdf")
-    public = TestClient(web.app)
-    assert public.get(f"/files/{uploaded.hex()}/raw").status_code == 404
     assert signed_in_client(app_conn, "moderator").get(f"/files/{uploaded.hex()}/raw").status_code == 200
-    # a document CTIS published is public
     registry_file = app_conn.execute(
         "SELECT d.file_sha256 FROM core.trial_document l JOIN core.document_current d ON d.id = l.document_id "
         "WHERE l.trial_id = %s LIMIT 1", (trial,)).fetchone()[0]
-    assert public.get(f"/files/{registry_file.hex()}").status_code == 200
     assert overview.file_is_public(app_conn, registry_file)
     assert not overview.file_is_public(app_conn, uploaded)

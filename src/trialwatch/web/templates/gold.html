@@ -56,7 +56,7 @@
       {% if row.item.comment %}<br><span class="muted">{{ row.item.comment[:140] }}{% if row.item.comment | length > 140 %}…{% endif %}</span>{% endif %}</td>
     <td>{{ label(row.item.expected_label) }}</td>
     {% for name in dataset.parts %}<td class="small">{{ part(row.item.expected_parts[name]) }}</td>{% endfor %}
-    <td class="small">{{ row.item.reviews | length }}{% if row.reviewers_disagreed %} <span class="label undecided">disagreed</span>{% endif %}</td>
+    <td class="small">{{ row.item.reviews | length }}{% if row.reviewers_disagreed %} <span class="badge undecided">disagreed</span>{% endif %}</td>
     <td class="small">{% if row.trial_id is none %}<span class="muted">not synced</span>
       {% elif row.judgement %}<a href="/trials/{{ row.trial_id }}?run={{ row.judgement.run_id }}">{{ label(row.judgement.label) }}</a> <span class="muted">run {{ row.judgement.run_id }}</span>
       {% else %}<a href="/trials/{{ row.trial_id }}">not checked</a>{% endif %}</td>

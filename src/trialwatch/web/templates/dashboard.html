@@ -4,18 +4,18 @@
 {% block content %}
 {% if not can("view.internal") %}
 <h1>TrialWatch</h1>
-<p class="sub">We follow clinical trials in the EU register and check whether their sponsors posted the results the law requires. A model reads each trial's results documents and quotes what it finds; a person on our team checks every result before it is published here.</p>
+<p class="sub">We follow clinical trials in the EU register and check whether their sponsors posted the results the law requires. A model reads each trial's results documents and quotes what it finds, and every quote is checked against the document's page before it counts.</p>
 <div class="grid">
   <div class="panel">
     <h3 class="panel-title">So far</h3>
     {% for name, count in coverage %}
       <div class="stat"><span>{{ name }}</span><b>{{ "{:,}".format(count) }}</b></div>
     {% endfor %}
-    <p class="small" style="margin:10px 0 0"><a href="/trials">Browse the trials →</a> · <a href="/sponsors">sponsors →</a></p>
   </div>
   <div class="panel">
-    <h3 class="panel-title">How we check</h3>
-    <p class="small">What a trial must report is a <a href="/requirements">requirement set</a>; what the model is asked is in <a href="/prompts">its prompt</a>. Every quote is checked against the document's page before it counts.</p>
+    <h3 class="panel-title">For our team</h3>
+    <p class="small">The trials, their documents and our results are open to the TrialWatch team for now.</p>
+    <p class="more"><a class="button" href="/login">Sign in</a></p>
   </div>
 </div>
 {% else %}
@@ -35,7 +35,7 @@
     {% for name, count in coverage %}
       <div class="stat"><span>{{ name }}</span><b>{{ count }}</b></div>
     {% endfor %}
-    <p class="small" style="margin:10px 0 0"><a href="/trials">Browse the trials →</a></p>
+    <p class="small more"><a href="/trials">Browse the trials →</a></p>
   </div>
 
   <div class="panel step">

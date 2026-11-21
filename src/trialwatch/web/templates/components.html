@@ -1,0 +1,53 @@
+{#- TrialWatch UI components (styles in static/components.css, tokens in static/brand.css).
+    Import what a page uses:  {% from "components.html" import badge, button, alert %}
+    Status badges with fixed meanings (label, run_status, …) are in macros.html, built on badge. -#}
+
+{# A small pill. tone: full · not-full · undecided · error · info · none #}
+{% macro badge(text, tone="none", title=none) -%}
+  <span class="badge {{ tone }}"{% if title %} title="{{ title }}"{% endif %}>{{ text }}</span>
+{%- endmacro %}
+
+{# A form button. kind: primary · secondary · danger; small for compact rows #}
+{% macro button(text, kind="primary", small=false, type="submit", name=none, value=none, disabled=false) -%}
+  <button type="{{ type }}" class="{% if kind != 'primary' %}{{ kind }}{% endif %}{% if small %} small{% endif %}"
+    {%- if name %} name="{{ name }}"{% endif %}{% if value is not none %} value="{{ value }}"{% endif %}
+    {%- if disabled %} disabled{% endif %}>{{ text }}</button>
+{%- endmacro %}
+
+{# A link that looks like a button #}
+{% macro link_button(href, text, kind="primary", small=false) -%}
+  <a class="button{% if kind != 'primary' %} {{ kind }}{% endif %}{% if small %} small{% endif %}" href="{{ href }}">{{ text }}</a>
+{%- endmacro %}
+
+{# A message box; the content is the call block. tone: error · warn · info · success #}
+{% macro alert(tone="error") -%}
+  <div class="alert{% if tone != 'error' %} {{ tone }}{% endif %}" role="{{ 'alert' if tone == 'error' else 'status' }}">{{ caller() }}</div>
+{%- endmacro %}
+
+{# A bordered card with an optional title; the content is the call block #}
+{% macro card(title=none, class="") -%}
+  <section class="panel {{ class }}">{% if title %}<h3 class="panel-title">{{ title }}</h3>{% endif %}{{ caller() }}</section>
+{%- endmacro %}
+
+{# The page's title and a muted line under it #}
+{% macro page_header(title, sub=none) -%}
+  <div class="page-header"><h1>{{ title }}</h1>{% if sub %}<p class="sub">{{ sub }}</p>{% endif %}</div>
+{%- endmacro %}
+
+{# Pill tabs: items are (href, text) pairs; the one whose href is current is marked #}
+{% macro tabs(items, current) -%}
+  <nav class="tabs">{% for href, text in items %}<a href="{{ href }}"{% if href == current %} class="on" aria-current="page"{% endif %}>{{ text }}</a>{% endfor %}</nav>
+{%- endmacro %}
+
+{# A labelled input. type: text · number · email · password #}
+{% macro field(label, name, type="text", value="", required=false, placeholder=none, autocomplete=none) -%}
+  <label>{{ label }}
+    <input type="{{ type }}" name="{{ name }}" value="{{ value }}"{% if required %} required{% endif %}
+      {%- if placeholder %} placeholder="{{ placeholder }}"{% endif %}{% if autocomplete %} autocomplete="{{ autocomplete }}"{% endif %}>
+  </label>
+{%- endmacro %}
+
+{# One "name … value" line of a stat list #}
+{% macro stat(name, value) -%}
+  <div class="stat"><span>{{ name }}</span><b>{{ value }}</b></div>
+{%- endmacro %}

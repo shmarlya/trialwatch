@@ -56,3 +56,14 @@ These are part of how the libraries are used and read naturally: `with` blocks, 
 
 Behaviour, public function names, CLI options and output, SQL text, and test expectations. A
 style edit that changes a test result is a bug.
+
+## UI (web interface)
+
+The brand and components live in `src/trialwatch/web/`:
+
+- `static/brand.css` holds the tokens: brand ink navy and teal accent, warm neutral greys, status colours, type scale, spacing, radius and focus ring, for light and dark. It is the only file with raw colours or sizes. Status colours have fixed meanings: full = green, not full = red, undecided = amber. `tests/test_web.py` fails if a text colour on its background falls below WCAG AA (4.5:1) in either theme.
+- `static/components.css` holds the components built from those tokens: app header, button (primary, secondary, danger, small), badge, card (`.panel`), alert (error, warn, info, success), table, form field, tabs, stat list, key-value list, pager.
+- `templates/components.html` holds the macros that render them (`badge`, `button`, `link_button`, `alert`, `card`, `page_header`, `tabs`, `field`, `stat`). `templates/macros.html` holds the status badges built on them (`label`, `run_status`, `outcome`, `evidence_state`).
+- `static/logo.svg` and `static/favicon.svg` are the mark: an eye whose pupil is a check (we watch the register, we verify what it says).
+
+Use a macro or a component class rather than a new one-off class, and never a `style="…"` attribute. A style only one page needs goes in the `<style>` block of `base.html`, written with tokens. Keyboard focus must stay visible (`:focus-visible` uses the focus ring), and the current page's nav link carries `aria-current="page"`.

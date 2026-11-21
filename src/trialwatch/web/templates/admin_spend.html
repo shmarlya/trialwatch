@@ -17,7 +17,7 @@
     <p class="small">Checks TrialWatch starts by itself (the weekly refresh) are held once this month's spend reaches the cap, and go on by themselves next month or when the cap is raised. Checks a person starts always run.</p>
     {% if can("spend.cap.set") %}
     <form method="post" action="/admin/spend/cap" class="inline">
-      <label>US dollars <input name="cap" value="{% if cap is not none %}{{ cap }}{% endif %}" placeholder="no cap" style="width:8em"></label>
+      <label>US dollars <input name="cap" value="{% if cap is not none %}{{ cap }}{% endif %}" placeholder="no cap" class="short"></label>
       <button class="small">Save</button>
     </form>
     {% else %}<p>{% if cap is none %}No cap.{% else %}{{ dollars(cap) }} a month.{% endif %}</p>{% endif %}

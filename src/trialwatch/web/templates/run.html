@@ -37,12 +37,12 @@
   {% for j in judgements %}
   <tr>
     <td><a href="/trials/{{ j.trial_id }}?run={{ run.id }}">{{ j.name }}</a></td>
-    <td>{% if j.error %}<span class="label error">error</span>{% else %}{{ label(j.label) }}{% endif %}</td>
+    <td>{% if j.error %}<span class="badge error">error</span>{% else %}{{ label(j.label) }}{% endif %}</td>
     <td class="small">{% for name, value in j.parts.items() %}{{ name }} {{ part(value) }}{% if not loop.last %} · {% endif %}{% endfor %}</td>
     <td class="num small">{% if j.input_tokens %}{{ "{:,}".format(j.input_tokens) }}{% endif %}</td>
     {% if can("spend.view") %}<td class="num small">{% if j.cost_usd is not none %}{{ dollars(j.cost_usd) }}{% elif j.input_tokens %}<span class="muted">unpriced</span>{% endif %}</td>{% endif %}
     <td class="num small">{% if j.duration_ms %}{{ "%.1f" | format(j.duration_ms / 1000) }} s{% endif %}</td>
-    <td class="small">{% if j.error %}<span class="muted">{{ j.error[:100] }}</span>{% else %}<a href="/trials/{{ j.trial_id }}?run={{ run.id }}">{% if can("view.internal") %}trace{% else %}answers{% endif %} →</a>{% if j.published and can("view.internal") %} <span class="label full">public</span>{% endif %}{% endif %}</td>
+    <td class="small">{% if j.error %}<span class="muted">{{ j.error[:100] }}</span>{% else %}<a href="/trials/{{ j.trial_id }}?run={{ run.id }}">{% if can("view.internal") %}trace{% else %}answers{% endif %} →</a>{% if j.published and can("view.internal") %} <span class="badge full">public</span>{% endif %}{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="8" class="muted">No trials judged.</td></tr>{% endfor %}
 </table></div>

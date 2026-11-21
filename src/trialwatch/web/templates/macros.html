@@ -1,9 +1,9 @@
 {% macro label(value) -%}
-  {%- if value is none -%}<span class="label none">—</span>
-  {%- elif value == "full" -%}<span class="label full">full</span>
-  {%- elif value == "not full" -%}<span class="label not-full">not full</span>
-  {%- elif value == "undecided" -%}<span class="label undecided">undecided</span>
-  {%- else -%}<span class="label error">{{ value }}</span>
+  {%- if value is none -%}<span class="badge none">—</span>
+  {%- elif value == "full" -%}<span class="badge full">full</span>
+  {%- elif value == "not full" -%}<span class="badge not-full">not full</span>
+  {%- elif value == "undecided" -%}<span class="badge undecided">undecided</span>
+  {%- else -%}<span class="badge error">{{ value }}</span>
   {%- endif -%}
 {%- endmacro %}
 
@@ -19,18 +19,18 @@
 {%- endmacro %}
 
 {% macro run_status(status) -%}
-  {%- if status == "succeeded" -%}<span class="label full">succeeded</span>
-  {%- elif status in ("running", "held") -%}<span class="label undecided">{{ status }}</span>
-  {%- elif status in ("failed", "stopped") -%}<span class="label not-full">{{ status }}</span>
-  {%- else -%}<span class="label none">{{ status }}</span>
+  {%- if status == "succeeded" -%}<span class="badge full">succeeded</span>
+  {%- elif status in ("running", "held") -%}<span class="badge undecided">{{ status }}</span>
+  {%- elif status in ("failed", "stopped") -%}<span class="badge not-full">{{ status }}</span>
+  {%- else -%}<span class="badge none">{{ status }}</span>
   {%- endif -%}
 {%- endmacro %}
 
 {% macro outcome(value) -%}
-  {%- if value == "agree" -%}<span class="label full">agree</span>
-  {%- elif value == "disagree" -%}<span class="label not-full">disagree</span>
-  {%- elif value == "ours open" -%}<span class="label undecided">ours open</span>
-  {%- else -%}<span class="label none">{{ value }}</span>
+  {%- if value == "agree" -%}<span class="badge full">agree</span>
+  {%- elif value == "disagree" -%}<span class="badge not-full">disagree</span>
+  {%- elif value == "ours open" -%}<span class="badge undecided">ours open</span>
+  {%- else -%}<span class="badge none">{{ value }}</span>
   {%- endif -%}
 {%- endmacro %}
 
@@ -38,15 +38,15 @@
 {% macro found_answer(value) -%}
   {%- if value is sameas true or value == "yes" -%}yes
   {%- elif value is sameas false or value == "no" -%}<span class="muted">no</span>
-  {%- else -%}<span class="label undecided">don't know</span>
+  {%- else -%}<span class="badge undecided">don't know</span>
   {%- endif -%}
 {%- endmacro %}
 
 {% macro evidence_state(state) -%}
-  {%- if state == "complete" -%}<span class="label full">complete</span>
-  {%- elif state == "stale" -%}<span class="label undecided" title="transferred, but the source changed the trial since">stale</span>
-  {%- elif state == "failed" -%}<span class="label not-full">failed</span>
-  {%- else -%}<span class="label none">{{ state }}</span>
+  {%- if state == "complete" -%}<span class="badge full">complete</span>
+  {%- elif state == "stale" -%}<span class="badge undecided" title="transferred, but the source changed the trial since">stale</span>
+  {%- elif state == "failed" -%}<span class="badge not-full">failed</span>
+  {%- else -%}<span class="badge none">{{ state }}</span>
   {%- endif -%}
 {%- endmacro %}
 

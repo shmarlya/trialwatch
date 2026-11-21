@@ -3,6 +3,8 @@ form posts only from its own pages, serves stored files without letting them run
 shows on its pages what the stages and checks decided."""
 
 import hashlib
+import re
+from pathlib import Path
 from urllib.parse import unquote
 
 from fastapi.testclient import TestClient
@@ -51,16 +53,71 @@ def test_only_requests_addressed_to_this_machine_are_answered(monkeypatch):
     client = TestClient(web.app)
     # a page on another domain whose name points at this machine (DNS rebinding) is not answered
     for host in ("evil.example", "evil.example:8010", "127.0.0.1.evil.example", "localhost.evil.example"):
-        assert client.get("/requirements", headers={"host": host}).status_code == 403, host
-    refused = client.get("/requirements", headers={"host": "evil.example:8010"})
+        assert client.get("/login", headers={"host": host}).status_code == 403, host
+    refused = client.get("/login", headers={"host": "evil.example:8010"})
     assert refused.text == "refused: unknown host 'evil.example'"
     for host in ("127.0.0.1:8010", "localhost", "LOCALHOST:8010", "[::1]:8010", "testserver"):
-        assert client.get("/requirements", headers={"host": host}).status_code == 200, host
+        assert client.get("/login", headers={"host": host}).status_code == 200, host
     # names it is served under on a network are added by hand
-    assert client.get("/requirements", headers={"host": "trialwatch.lan:8010"}).status_code == 403
+    assert client.get("/login", headers={"host": "trialwatch.lan:8010"}).status_code == 403
     monkeypatch.setenv("TRIALWATCH_HOSTS", "trialwatch.lan, 192.168.1.20")
-    assert client.get("/requirements", headers={"host": "trialwatch.lan:8010"}).status_code == 200
-    assert client.get("/requirements", headers={"host": "192.168.1.20"}).status_code == 200
+    assert client.get("/login", headers={"host": "trialwatch.lan:8010"}).status_code == 200
+    assert client.get("/login", headers={"host": "192.168.1.20"}).status_code == 200
+
+
+def test_pages_carry_the_brand_and_its_styles_are_served(admin_client):
+    client = TestClient(web.app)
+    page = client.get("/login").text
+    assert '<img src="/static/logo.svg"' in page and 'href="/static/brand.css"' in page
+    staff_page = admin_client.get("/requirements").text
+    assert '<a href="/requirements" aria-current="page">Requirements</a>' in staff_page
+    for name, kind in (("brand.css", "text/css"), ("components.css", "text/css"), ("logo.svg", "image/svg+xml"),
+                       ("favicon.svg", "image/svg+xml")):
+        response = client.get(f"/static/{name}")
+        assert response.status_code == 200 and response.headers["content-type"].startswith(kind), name
+
+
+def test_brand_colours_meet_wcag_aa_contrast_in_both_themes():
+    """Every text colour on the background it is drawn on reaches 4.5:1, light and dark (brand.css)."""
+    css = (Path(web.__file__).parent / "static/brand.css").read_text()
+    light, dark = css.split("@media (prefers-color-scheme: dark)")
+    pairs = [("text", "bg"), ("text", "surface"), ("muted", "surface"), ("muted", "bg"), ("link", "surface"),
+             ("link", "bg"), ("on-primary", "primary"), ("on-danger", "danger"), ("header-text", "header-bg"),
+             ("header-link", "header-bg"), ("full", "full-bg"), ("notfull", "notfull-bg"),
+             ("undecided", "undecided-bg"), ("info", "info-bg")]
+    for name, block in (("light", light), ("dark", dark + light)):
+        tokens = colour_tokens(block)
+        for fore, back in pairs:
+            ratio = contrast(tokens[fore], tokens[back])
+            assert ratio >= 4.5, f"{name}: --{fore} on --{back} is {ratio:.2f}:1"
+
+
+def colour_tokens(css):
+    """--name: #rrggbb, following var(--other); the first definition wins (dark before light)."""
+    tokens = {}
+    for name, value in re.findall(r"--([\w-]+):\s*([^;]+);", css):
+        tokens.setdefault(name, value.strip())
+    resolved = {}
+    for name in tokens:
+        value = tokens[name]
+        while value.startswith("var(--"):
+            value = tokens[value[6:-1]]
+        resolved[name] = value
+    return resolved
+
+
+def contrast(one, two):
+    def luminance(colour):
+        channels = []
+        for start in (1, 3, 5):
+            c = int(colour[start:start + 2], 16) / 255
+            if c <= 0.03928:
+                channels.append(c / 12.92)
+            else:
+                channels.append(((c + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+    high, low = sorted((luminance(one), luminance(two)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
 
 
 def test_form_posts_are_taken_only_from_the_interfaces_own_pages(admin_client):

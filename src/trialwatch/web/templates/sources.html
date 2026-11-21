@@ -12,7 +12,7 @@
       <th>List synced</th><th>Last transfer</th></tr>
   {% for row in rows %}
   <tr>
-    <td><a href="/sources/{{ row.code }}">{{ row.code }}</a>{% if not row.enabled %} <span class="label none">off</span>{% endif %}<br><span class="small muted">{{ row.name }}</span></td>
+    <td><a href="/sources/{{ row.code }}">{{ row.code }}</a>{% if not row.enabled %} <span class="badge none">off</span>{% endif %}<br><span class="small muted">{{ row.name }}</span></td>
     <td class="small">{{ row.adapter or "—" }}</td>
     <td class="num">{{ "{:,}".format(row.listed) }}</td>
     <td class="num">{{ "{:,}".format(row.not_transferred) }}</td>
@@ -28,7 +28,7 @@
 
 {% if free_adapters and can("source.register") %}
 <h2>Register a source</h2>
-<form class="panel step" method="post" action="/sources" style="max-width:520px">
+<form class="panel step medium" method="post" action="/sources">
   <span class="small muted">Starts with the adapter's default config; change it on the source's page.</span>
   <label>Adapter<select name="adapter">{% for name in free_adapters %}<option>{{ name }}</option>{% endfor %}</select></label>
   <label>Code (optional)<input type="text" name="code" placeholder="the adapter's name"></label>

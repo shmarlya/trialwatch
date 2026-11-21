@@ -8,7 +8,7 @@
 <h2>Prompt files now</h2>
 {% for prompt in current %}
 <details class="panel prompt" id="{{ prompt.name }}" {% if show == prompt.name %}open{% endif %}>
-  <summary><b>{{ prompt.name }}</b>{% if prompt.name == default_prompt %} <span class="label full">evidence check default</span>{% endif %}
+  <summary><b>{{ prompt.name }}</b>{% if prompt.name == default_prompt %} <span class="badge full">evidence check default</span>{% endif %}
     <span class="small muted">sha256 {{ prompt.sha256.hex()[:12] }} · {{ "{:,}".format(prompt.text | length) }} characters</span></summary>
   <pre>{{ prompt.text }}</pre>
 </details>

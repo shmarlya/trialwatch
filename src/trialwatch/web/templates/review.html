@@ -27,7 +27,7 @@
     <td class="small">{{ kind.describe() }}</td>
     <td class="num">{{ tally.agreed }}</td><td class="num">{{ tally.compared }}</td>
     <td class="num">{{ "%.0f" | format(tally.share * 100) }}%</td>
-    <td class="small">{% if kind.label in ("full", "not full") and tally.compared >= min_gold_items and tally.share >= auto_publish_at %}<span class="label full">yes</span>{% elif tally.compared < min_gold_items %}<span class="muted">not yet: fewer than {{ min_gold_items }} items</span>{% else %}<span class="muted">no</span>{% endif %}</td>
+    <td class="small">{% if kind.label in ("full", "not full") and tally.compared >= min_gold_items and tally.share >= auto_publish_at %}<span class="badge full">yes</span>{% elif tally.compared < min_gold_items %}<span class="muted">not yet: fewer than {{ min_gold_items }} items</span>{% else %}<span class="muted">no</span>{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="5" class="muted">No judgement of a gold item yet: every result waits for a person.</td></tr>{% endfor %}
 </table></div>

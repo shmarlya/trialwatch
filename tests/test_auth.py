@@ -22,12 +22,10 @@ OPEN_POSTS = ("/login", "/logout")
 
 # --- the chart -----------------------------------------------------------------------------------
 
-def test_the_chart_gives_the_public_only_browsing():
+def test_the_chart_gives_the_public_nothing():
+    """Anyone not signed in sees only the home page and the sign-in page, which need no action."""
     for action in actions.ACTIONS:
-        if action.name == "view":
-            assert actions.allowed(None, action.name)
-        else:
-            assert not actions.allowed(None, action.name), action.name
+        assert not actions.allowed(None, action.name), action.name
 
 
 def test_an_admin_may_do_everything_and_a_moderator_curates():
@@ -149,13 +147,13 @@ def post_as(client, path, data=None):
     return client.post(path, data=data, follow_redirects=False)
 
 
-def test_anyone_may_browse_but_not_act(app_conn):
+def test_the_public_sees_only_the_home_page_and_may_not_act(app_conn):
     trial_id = listed_only(app_conn)
     client = TestClient(web.app)
-    for path in ("/", "/trials", f"/trials/{trial_id}", "/sponsors", "/prompts", "/requirements"):
+    for path in ("/", "/login"):
         assert client.get(path).status_code == 200, path
-    # sources, transfers and gold datasets are for staff (ADR-007)
-    for path in ("/sources", "/sources/ctis", "/gold"):
+    for path in ("/trials", f"/trials/{trial_id}", "/sponsors", "/prompts", "/requirements", "/sources",
+                 "/sources/ctis", "/gold"):
         assert client.get(path).status_code == 401, path
     # a browser is sent to sign in, and back to the page afterwards
     page = client.get("/trials/new", headers={"accept": "text/html"}, follow_redirects=False)

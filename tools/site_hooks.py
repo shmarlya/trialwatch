@@ -7,7 +7,9 @@
   collapsed block so the site search finds what's in the diagram.
 
 Pages exist only in the build; nothing is written to docs/. A new diagram gets a page automatically but
-still needs a nav entry in mkdocs.yml.
+still needs a nav entry in mkdocs.yml. Decisions (NOT_ON_SITE: the ADRs, their roadmap and the AI decision
+map) stay in the repo only: they get no page, their files are left out of the site, and links to them go
+to their image on GitHub.
 """
 
 import html
@@ -26,12 +28,28 @@ PAGES = {
     "STYLE.md": "STYLE.md",
     "data/bruckner/README.md": "data/bruckner/README.md",
 }
+# Diagrams kept in the repo but not on the site (paths relative to docs/; a trailing / is a folder)
+NOT_ON_SITE = ("adr/", "adr-roadmap.excalidraw", "ai-architecture-decisions.excalidraw")
+REPO_BLOB = "https://github.com/shmarlya/trialwatch/blob/main/"
 # README.md links to docs/img/<name>.svg so the images show on GitHub; on the site, link the diagram's page.
 IMAGE_LINK = re.compile(r"\]\(docs/img/([^)\s]+)\.svg\)")
 DOCS_LINK = re.compile(r"\]\(docs/([^)\s]+)\)")
 
 
+def shown_on_site(rel: str) -> bool:
+    """False for a diagram, or its image under img/, that stays in the repo only (NOT_ON_SITE)."""
+    if rel.startswith("img/"):
+        rel = rel.removeprefix("img/").removesuffix(".svg") + ".excalidraw"
+    for kept_out in NOT_ON_SITE:
+        if rel == kept_out or (kept_out.endswith("/") and rel.startswith(kept_out)):
+            return False
+    return True
+
+
 def on_files(files: Files, *, config) -> Files:
+    for file in list(files):
+        if not shown_on_site(file.src_uri):
+            files.remove(file)
     for source, page in PAGES.items():
         markdown = (ROOT / source).read_text()
         content = site_links(markdown)
@@ -39,6 +57,8 @@ def on_files(files: Files, *, config) -> Files:
     docs = Path(config.docs_dir)
     for diagram in sorted(docs.rglob("*.excalidraw")):
         rel = diagram.relative_to(docs)
+        if not shown_on_site(rel.as_posix()):
+            continue
         page = rel.with_suffix(".md").as_posix()
         content = diagram_page(diagram, rel)
         files.append(File.generated(config, page, content=content))
@@ -47,8 +67,16 @@ def on_files(files: Files, *, config) -> Files:
 
 def site_links(markdown: str) -> str:
     # Image links first: DOCS_LINK would also match them and turn them into links to the SVG
-    with_page_links = IMAGE_LINK.sub(r"](\1.md)", markdown)
+    with_page_links = IMAGE_LINK.sub(image_link, markdown)
     return DOCS_LINK.sub(r"](\1)", with_page_links)
+
+
+def image_link(match: re.Match) -> str:
+    """A diagram's page on the site, or its image on GitHub if the diagram is not on the site."""
+    name = match[1]
+    if shown_on_site(name + ".excalidraw"):
+        return f"]({name}.md)"
+    return f"]({REPO_BLOB}docs/img/{name}.svg)"
 
 
 def md_escape(text: str) -> str:

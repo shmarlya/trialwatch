@@ -3,7 +3,7 @@
 {% block title %}{{ row.code }} · Sources · TrialWatch{% endblock %}
 {% block content %}
 <p class="small"><a href="/sources">← Sources</a></p>
-<h1>{{ row.code }}{% if not row.enabled %} <span class="label none">off</span>{% endif %}</h1>
+<h1>{{ row.code }}{% if not row.enabled %} <span class="badge none">off</span>{% endif %}</h1>
 <p class="sub">{{ row.name }}{% if row.url %} · <a href="{{ row.url }}">{{ row.url }}</a>{% endif %} · adapter {{ row.adapter or "none" }}</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 {% if running %}<div class="panel notice">Running: <a href="/jobs/{{ running.id }}">job {{ running.id }} · {{ steps[running.kind] }}</a>. Jobs run one at a time; the others wait in the <a href="/admin/jobs?tab=queued">queue</a>.</div>{% endif %}
@@ -97,7 +97,7 @@
 
 <h2 id="config">Config</h2>
 {% if can("source.configure") %}
-<form class="panel step" method="post" action="/sources/{{ row.code }}/config" style="max-width:760px">
+<form class="panel step wide-form" method="post" action="/sources/{{ row.code }}/config">
   {% if saved %}<span class="small"><b>Saved.</b> The next runs use it.</span>{% endif %}
   <span class="small muted">One current config, as JSON; every run records the config it used.{% if row.adapter == "ctis" %} <code>listing.criteria</code> takes the fields of CTIS's search, e.g. <code>{"status": [8], "hasStudyResults": true}</code>; <code>evidence.document_kinds</code> the kinds to transfer (<code>null</code> for every kind).{% endif %}</span>
   <textarea class="config" name="config">{{ config_text }}</textarea>

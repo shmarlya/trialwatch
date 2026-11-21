@@ -1,0 +1,83 @@
+/* TrialWatch brand tokens: the only place with raw colours, sizes and fonts. components.css and the
+   templates use these variables, never literal values. Light by default, dark from the system setting.
+   Every text/background pair here meets WCAG AA (4.5:1) in both themes (tests/test_web.py checks). */
+
+:root {
+  /* Brand */
+  --brand-ink: #14213d;          /* deep ink navy: header, primary buttons */
+  --brand-accent: #0f766e;       /* teal: links, focus, the check in the logo */
+  --brand-accent-soft: #ccf0ea;
+  --on-brand: #ffffff;           /* text on --brand-ink */
+  --header-bg: var(--brand-ink);
+  --header-text: #ffffff;
+  --header-link: #c9d3e6;
+
+  /* Neutrals (warm greys) */
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --text: #1d1d1b;
+  --muted: #64645f;
+  --line: #e2e1dc;
+  --code: #f1f0ec;
+  --mark: #ffe58a;
+
+  /* Actions */
+  --primary: var(--brand-ink);
+  --on-primary: #ffffff;
+  --link: var(--brand-accent);
+  --focus: #0d9488;
+  --danger: #b3361f;
+  --on-danger: #ffffff;
+
+  /* Status: what a judgement or step says. Meanings are fixed: full = green, not full = red,
+     undecided = amber. */
+  --full: #1f7a4d;       --full-bg: #e4f3ea;
+  --notfull: #b3361f;    --notfull-bg: #fbe7e2;
+  --undecided: #845f00;  --undecided-bg: #fbf1d6;
+  --info: #0f6b64;       --info-bg: #dcf3ef;
+
+  /* Type */
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --fs-xs: 12px; --fs-sm: 13px; --fs-base: 15px; --fs-md: 17px; --fs-lg: 22px;
+  --lh: 1.5;
+
+  /* Space, radius, elevation */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+  --radius-sm: 6px; --radius-md: 10px; --radius-pill: 999px;
+  --shadow-1: 0 1px 2px rgb(0 0 0 / .06);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --brand-ink: #0e1628;
+    --brand-accent: #5eead4;
+    --brand-accent-soft: #134e4a;
+    --header-bg: #0e1628;
+    --header-text: #ecebe6;
+    --header-link: #a9b6cf;
+
+    --bg: #161615;
+    --surface: #1f1f1d;
+    --text: #ecebe6;
+    --muted: #a3a29b;
+    --line: #34332f;
+    --code: #2a2a27;
+    --mark: #6b5a12;
+
+    --primary: #5eead4;
+    --on-primary: #0b1f1c;
+    --link: #5eead4;
+    --focus: #5eead4;
+    --danger: #ff9a85;
+    --on-danger: #2a0f09;
+
+    --full: #7fd6a4;       --full-bg: #1d3427;
+    --notfull: #ff9a85;    --notfull-bg: #3d211b;
+    --undecided: #f0c75e;  --undecided-bg: #3a3017;
+    --info: #5eead4;       --info-bg: #123a36;
+
+    --shadow-1: none;
+  }
+}

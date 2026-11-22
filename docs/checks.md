@@ -1,0 +1,186 @@
+# Automated checks
+
+A check judges whether a trial's results are reported completely. Every judgement without an error is published
+with its full trace and its agreement with the gold datasets ([ADR-007](adr/ADR-007-public-and-staff-data.md)).
+Today there are two: the **due-date rules** (plain code) and the **evidence check** (a model finds and quotes
+evidence, code checks the quotes, rules decide; [ADR-004](adr/ADR-004-generic-check-requirements-as-data.md)).
+Not built yet: the reviewers' per-part checks, the Europe PMC connector, the publication finder and the
+outcome-switch detector.
+
+```mermaid
+flowchart TB
+    ctis["CTIS<br>trials + results PDFs"] --> adapters["Source adapters<br>CTIS · manual uploads"]
+    epmc["Europe PMC<br>publications (planned)"] -.-> adapters
+    worker["Worker<br>job queue · weekly refresh · retries"] -- "triggers" --> adapters
+    adapters --> core["Central model (core)<br>trials · documents · files + page text"]
+    core --> due["Due-date rules<br>plain code"]
+    core --> evidence["Evidence check<br>requirement set + LLM + quote verify"]
+    core -.-> finder["Publication finder,<br>outcome-switch detector (planned)"]
+    evidence <--> claude["Claude API<br>priced per call · monthly cap"]
+    due --> judgements["Judgements<br>answers · quotes · trace"]
+    evidence --> judgements
+    finder -.-> judgements
+    judgements --> publish["Publish<br>every judgement, with its gold agreement"]
+    publish --> web["Web interface<br>public · staff · admin"]
+    publish -.-> planned["MCP server for AI agents,<br>reports, e.g. Poland (planned)"]
+    gold["Gold datasets<br>data/gold/ + frozen CTIS snapshot"] --> gold_eval["Gold evaluation in CI<br>gates: evals/gates.json"]
+    judgements -. "compared" .-> gold_eval
+```
+
+## How the evidence check judges a trial
+
+```mermaid
+flowchart TB
+    ready["A trial whose evidence is ready<br>every source complete and current"] --> questions["Questions<br>from the requirement set and the registered items,<br>e.g. one per primary endpoint"]
+    questions --> pages{"method"}
+    pages -- "text" --> retrieval["Retrieval<br>full-text search per question;<br>documents of ≤ 15 pages whole"]
+    pages -- "files" --> whole["Each PDF sent whole"]
+    retrieval --> model_call["Model call (Claude)<br>finds and quotes evidence,<br>or answers don't know"]
+    whole --> model_call
+    model_call --> verify["Verify quotes<br>on the cited page, as whole words"]
+    verify --> widen{"answered from<br>retrieved pages only?"}
+    widen -- "unanswered, or not reported" --> again["Ask again with every page"] --> verify
+    widen -- "settled" --> rules["Rules of the requirement set<br>count_stated · statement_present · numeric_result"]
+    rules --> judgement["Judgement<br>full · not full · undecided,<br>with its trace"]
+    judgement --> published["Published with its gold agreement"]
+```
+
+- **Ready evidence only.** A check reads a trial only when every source that holds it gave its evidence
+  completely and nothing changed at the source since (see [Sources](sources-and-gold.md#evidence-state)). A stale
+  trial is transferred again first, so a sponsor's corrected document is never judged by its old copy; the CLI,
+  the web interface and the jobs refuse the others and say why.
+- **Setup.** A check runs with a named setup, `--config` (default `default`): a file in
+  `src/trialwatch/checks/configs/` holding the model and its effort (how hard it thinks: low … max), the system
+  prompt, the requirement set, the check method and the retrieval settings. `check configs` lists them, the web
+  forms offer them by name, and every run records the setup's name and every value it used, so editing a file
+  never changes what an earlier run says. Trying other settings means adding a setup file (`whole-files` sends each
+  PDF whole).
+- **Requirement set.** What a trial must report and how "enough" is decided, as data:
+  `src/trialwatch/checks/requirement_sets/eu-ctr-results.json`, read by `checks/requirements.py`. It names the
+  document kinds to read, the requirements (a question, or one per registered item such as each primary endpoint,
+  with search hints and a rule type), the parts they count towards and how the parts make a label. The web
+  interface's Requirements page shows every set.
+- **System prompt.** `src/trialwatch/checks/prompts/evidence.md`. It names no registry, document type or
+  regulation; the trial, its documents and the questions are given per call from data, each fenced in tags. Text
+  in a PDF that looks like one of those tags (`<page`, `</document`) has its `<` replaced, so a document can't end
+  its page early and speak to the model as if it were our instructions.
+- **No versions before production.** One current text of each prompt, setup and requirement set; every run
+  stores the exact texts it used with their sha256, so an earlier run always shows its own.
+- **Method.** `text`: the documents' extracted page text, searched per question with the words of the
+  requirement's hints and of the registered item (Postgres full-text search, `checks/retrieval.py`). `files`:
+  each document's file sent whole, so the model also reads scanned pages and charts. Both use the same
+  requirement set, prompt, answer format, quote verification (against the page text), rules, tables and trace.
+- **Verified quotes only.** A quote counts only if it is at least 10 characters long and found on the page it
+  cites as whole words, ignoring case, spacing, dash and quote-mark variants and line-end hyphens
+  (`checks/verify.py`). A page counts as read only if its text layer holds at least 200 letters: on a scanned
+  page "not found" can't mean "not reported".
+- **Don't know, and widening.** The model may answer `dont_know` (stored as `checks.evidence.found` NULL) when it
+  can't tell. A question not answered from retrieved pages, or an endpoint found there only as not reported, is
+  asked again with every page, so a retrieval miss never becomes "not reported". What the rules still can't
+  settle is **undecided**, never a guess.
+- **Refusal fallback.** If the model's safety checks decline a request, the API may re-run it on another model
+  Anthropic recommends; the answer records which model served it.
+- **Trace.** Every step of judging one trial in one run is stored in order (`checks.step`): the questions, the
+  documents and pages read, retrieval (terms, ranks, snippets), each model call (the request exactly as sent, the
+  model that answered, tokens, time, its raw answer), quote verification and the rules. The system prompt is
+  stored once per run.
+- **Runs are versions.** Each run (`checks.run`) adds new rows, never updates; `checks.judgement_current` shows
+  the newest judgement per trial and requirement set. A judgement is **outdated** when a document version it read
+  was replaced or unlinked, a document of the kinds its set reads was linked since, or another record of the trial
+  came in after its run started. It still shows, marked outdated; check the trial again. A run whose process died
+  is closed as failed by the next run (an advisory lock is held while it is alive).
+
+## Publication
+
+Every judgement without an error is published by its run as the run finishes (also when it stopped part-way),
+whatever its label (full, not full or undecided) and however well judgements of its kind agree with the gold
+datasets; nobody publishes by hand and nothing waits for review. Each publication records that agreement for
+everyone to see: the share of gold items that judgements of the same kind (model, prompt text, requirement set,
+label, quotes verified, asked again with every page, a question unanswered) agreed with, once at least 20 were
+compared, and in words how many agreed of how many, from which datasets (`src/trialwatch/checks/publishing.py`).
+
+A moderator or admin may withdraw a published judgement with a reason (`judgement.withdraw`); it stays public,
+marked withdrawn with that reason and the date, so nothing disappears silently. This is the only manual step.
+
+**What the public sees** (`view.published`): the home page's table of trials with a published result (when it
+was checked and published, by which model), searchable by identifier, title or sponsor and filtered by country,
+city, result, registry status and the day it was checked; when the last scheduled run was and the next is due;
+how much the model calls have cost so far. From the table, a trial with a published judgement: where it runs
+(each site with its city and postcode, by country, with the trial's status there; never the people at a site) and
+how its evidence was collected, as staff see it: the questions, the pages searched and read, the system prompt
+and the exact message sent, the model's raw answer, each quote checked against its page, and the rules that
+decided; with that run's page, the prompts, the requirement sets and the documents it quotes. Judgements of a run
+still going or one that failed, costs, staff names, sources and transfers stay with staff. Recruiting trials have
+public pages of their own ([search](search.md), ADR-008).
+
+## Due-date rules
+
+`src/trialwatch/checks/due_date.py`: Bruckner et al.'s rules for which trials are due and whether results came on
+time, in plain code, no model. `tests/test_due_date.py` checks that they reproduce all 277 of their verdicts from
+their files in `data/bruckner/`.
+
+## Running a check
+
+```bash
+uv run trialwatch check evidence --all --dry-run
+```
+
+`check evidence CT…` checks named trials, `--all` every trial whose evidence is ready; without `--dry-run` it calls
+the model (`ANTHROPIC_API_KEY` from `.env`). On the web interface, model checks start as dry runs: untick "dry
+run" to send. A trial can be checked again, also with another setup to compare runs. The weekly refresh checks,
+with the default setup, the trials never judged or whose judgement is outdated ([operations](operations.md#jobs-the-worker-and-the-weekly-refresh)).
+
+## Code
+
+| Where | What |
+|---|---|
+| `checks/evidence.py` | the evidence check: questions, calls, widening, judgement |
+| `checks/retrieval.py` | full-text search per question |
+| `checks/verify.py` | quote verification, readable pages |
+| `checks/requirements.py`, `requirement_sets/` | requirement sets and their rules |
+| `checks/settings.py`, `configs/` | setups |
+| `checks/model.py`, `prompts/` | the model call and the system prompt |
+| `checks/publishing.py` | publication and its gold agreement |
+| `checks/due_date.py` | due-date rules |
+| `db/checks.py` | their SQL |
+
+## Tables
+
+```mermaid
+erDiagram
+    direction LR
+    run["checks.run"]
+    question["checks.question"]
+    evidence["checks.evidence"]
+    judgement["checks.judgement"]
+    step["checks.step"]
+    publication["checks.publication"]
+    trial["core.trial"]
+    version["core.document_version"]
+    api_call["core.api_call"]
+    run ||--o{ question : "per trial and key"
+    question ||--o{ evidence : "quotes"
+    run ||--o{ judgement : "per trial"
+    run ||--o{ step : "trace"
+    judgement ||--o| publication : "one live"
+    trial ||--o{ judgement : "judged"
+    version ||--o{ evidence : "quoted from"
+    run ||--o{ api_call : "billed calls"
+```
+
+| Table | What it holds |
+|---|---|
+| `checks.run` | one check run: who ran it, model, effort, prompt and requirement set (name, sha256, text as sent), params (method, top_k, …), status (running, succeeded, failed, stopped) and why it ended early, counts, tokens, cost, job |
+| `checks.question` | what was asked per trial (`participants`, `cancelled`, `endpoint:<registered id>`, …), the registered item it is about, the pages shown, and whether it was asked again with every page |
+| `checks.evidence` | what the model quoted: found (true, false, NULL = don't know), kind (numeric_result, narrative_only, chart_only, redacted, not_analysed, other), the quote, document version, file sha256 and page, and whether it is verified |
+| `checks.judgement` | the rules' verdict per trial per run: label (full, not full, undecided; NULL only with an error), parts by name (NULL = undecided), the rule and evidence behind each, the inputs read (trial record, document versions), the models that served it, tokens, cost |
+| `checks.step` | the trace of one trial in one run: questions, pages, retrieval, call, widening, verification, rules, error, each with its data |
+| `checks.publication` | every judgement, published by its run (audited): published by and at, withdrawn by and at with the note shown to all, confidence (gold agreement of its kind, once measured) and basis. One live publication per judgement; only a finished judgement without an error (a trigger). |
+| `checks.judgement_current` (view) | the newest successful judgement per trial and requirement set from a run that has ended, and whether it is outdated |
+| `checks.judgement_published` (view) | what the public sees per trial: the newest published judgement, withdrawn or not |
+
+## Claude API
+
+`POST https://api.anthropic.com/v1/messages`, with the API key from `.env`: the page text or PDFs, the questions
+and the system prompt. Anthropic only, through its SDK. Every billed call is a priced `core.api_call` row
+([spend](operations.md#spend)).

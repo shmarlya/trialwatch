@@ -29,7 +29,125 @@ build-backend = "uv_build"
 dev = [
     "pre-commit>=4.7.0",
     "pytest>=9.2.0",
+    "ruff>=0.17.6",
 ]
 docs = [
     "mkdocs-material>=9.8.1",
+]
+
+[tool.ruff]
+# STYLE.md is the guide; ruff enforces what a tool can see. `uv run ruff check` and
+# `uv run ruff format --check` run in CI (.github/workflows/tests.yml) and in pre-commit.
+line-length = 120
+target-version = "py313"
+src = ["src"]
+
+[tool.ruff.lint]
+# Bugs and the parts of STYLE.md a linter can check. Left out on purpose: rules that would turn loops into
+# comprehensions or any()/all() (PERF401, SIM110), force ternaries (SIM108) or drop named intermediate
+# values (RET504); STYLE.md keeps the loop. To add as later refactor phases touch the files that break them
+# today: I (import order), UP, A, N.
+select = [
+    "E4", "E7", "E9", "F",  # pycodestyle errors and pyflakes; E731: no lambda assigned to a name, E741: no l/O/I
+    "W",                    # whitespace
+    "B",                    # bugbear: likely bugs
+    "C4",                   # comprehensions: no needless ones
+    "SIM210", "SIM211", "SIM212",  # ternaries that only hide a bool or swap their arms
+]
+ignore = [
+    "B007",  # an unused loop variable keeps its full name (for attempt in range(3)), not `_`
+]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI copies a parameter's default for every request, so a list default in a route is safe
+"src/trialwatch/web/*.py" = ["B006"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Called in parameter defaults by design: FastAPI and Typer read them as declarations, once
+extend-immutable-calls = [
+    "fastapi.Depends", "fastapi.Form", "fastapi.File", "fastapi.Query", "fastapi.Header", "fastapi.Cookie",
+    "fastapi.Body", "fastapi.Path", "typer.Option", "typer.Argument", "trialwatch.web.app.Requires",
+]
+
+[tool.ruff.format]
+# Files written before ruff, not reformatted yet. No mass reformat: each file is formatted (and leaves this
+# list) in the refactor phase that rewrites it, so code about to move or go isn't reformatted first.
+# Every other file, and every new one, must pass `ruff format --check`.
+exclude = [
+    "75 files would be reformatted, 35 files already formatted",
+    "src/trialwatch/auth/actions.py",
+    "src/trialwatch/checks/due_date.py",
+    "src/trialwatch/checks/evidence.py",
+    "src/trialwatch/checks/publishing.py",
+    "src/trialwatch/checks/requirements.py",
+    "src/trialwatch/checks/retrieval.py",
+    "src/trialwatch/checks/settings.py",
+    "src/trialwatch/cli.py",
+    "src/trialwatch/costs/__init__.py",
+    "src/trialwatch/db/auth.py",
+    "src/trialwatch/db/checks.py",
+    "src/trialwatch/db/core.py",
+    "src/trialwatch/db/costs.py",
+    "src/trialwatch/db/geo.py",
+    "src/trialwatch/db/jobs.py",
+    "src/trialwatch/db/overview.py",
+    "src/trialwatch/db/search.py",
+    "src/trialwatch/db/vocab.py",
+    "src/trialwatch/geo/geonames.py",
+    "src/trialwatch/geo/load.py",
+    "src/trialwatch/gold/bruckner.py",
+    "src/trialwatch/gold/compare.py",
+    "src/trialwatch/gold/datasets.py",
+    "src/trialwatch/gold/evaluate.py",
+    "src/trialwatch/jobs/refresh.py",
+    "src/trialwatch/jobs/retry.py",
+    "src/trialwatch/jobs/steps.py",
+    "src/trialwatch/jobs/worker.py",
+    "src/trialwatch/search/annotate.py",
+    "src/trialwatch/search/concepts.py",
+    "src/trialwatch/search/index.py",
+    "src/trialwatch/search/query.py",
+    "src/trialwatch/sources/ctis.py",
+    "src/trialwatch/sources/ctis_client.py",
+    "src/trialwatch/sources/manual.py",
+    "src/trialwatch/sources/pages.py",
+    "src/trialwatch/sources/profile.py",
+    "src/trialwatch/sources/registry.py",
+    "src/trialwatch/sources/snapshot.py",
+    "src/trialwatch/sources/stages.py",
+    "src/trialwatch/vocab/load.py",
+    "src/trialwatch/web/app.py",
+    "src/trialwatch/web/search.py",
+    "tests/places.py",
+    "tests/recruiting_trials.py",
+    "tests/test_annotate.py",
+    "tests/test_auth.py",
+    "tests/test_core.py",
+    "tests/test_costs.py",
+    "tests/test_ctis_client.py",
+    "tests/test_due_date.py",
+    "tests/test_env.py",
+    "tests/test_evidence.py",
+    "tests/test_geo.py",
+    "tests/test_gold_bruckner.py",
+    "tests/test_gold_compare.py",
+    "tests/test_gold_datasets.py",
+    "tests/test_gold_evaluate.py",
+    "tests/test_jobs.py",
+    "tests/test_locations.py",
+    "tests/test_profile.py",
+    "tests/test_publication.py",
+    "tests/test_publishing.py",
+    "tests/test_search_eval.py",
+    "tests/test_search_index.py",
+    "tests/test_search_query.py",
+    "tests/test_search_web.py",
+    "tests/test_settings.py",
+    "tests/test_snapshot.py",
+    "tests/test_sources_ctis.py",
+    "tests/test_sources_manual.py",
+    "tests/test_sources_stages.py",
+    "tests/test_sql_lives_in_db.py",
+    "tests/test_web.py",
+    "tests/vocabulary.py",
 ]

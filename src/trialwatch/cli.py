@@ -4,6 +4,9 @@ evidence), the evidence check (ADR-004), the gold datasets (ADR-003) and the web
 first, so outside compose it uses the same database and API key as the web interface."""
 
 import json
+import signal
+import subprocess
+import sys
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
@@ -56,16 +59,51 @@ def show_version() -> None:
     typer.echo(version("trialwatch"))
 
 
+# How long a worker started by `trialwatch web` gets to stop after Ctrl-C before it is killed
+WORKER_STOP_SECONDS = 10
+
+
+def start_worker() -> subprocess.Popen:
+    """`trialwatch worker` as a child process, writing to this terminal."""
+    return subprocess.Popen([sys.executable, "-m", "trialwatch", "worker"])
+
+
+def stop_worker(child: subprocess.Popen) -> None:
+    """Ask the worker to stop as Ctrl-C does (a job it was running is queued again once its heartbeat
+    lapses), and kill it if it doesn't."""
+    if child.poll() is not None:
+        return
+    child.send_signal(signal.SIGINT)
+    try:
+        child.wait(timeout=WORKER_STOP_SECONDS)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+
+
 @app.command("web")
 def web(
     host: Annotated[str, typer.Option(help="Address to listen on; the default is this machine only")] = "127.0.0.1",
     port: Annotated[int, typer.Option(help="Port to listen on")] = 8010,
     reload: Annotated[bool, typer.Option("--reload", help="Restart when the code changes (development)")] = False,
+    with_worker: Annotated[
+        bool, typer.Option("--worker/--no-worker", help="Also run a worker for the jobs it queues (stopped with it)")
+    ] = True,
 ) -> None:
-    """Web interface: browse trials, documents, judgements and gold datasets, and start the workflow steps."""
+    """Web interface: browse trials, documents, judgements and gold datasets, and start the workflow steps.
+    It also runs a worker, so the jobs it queues run; --no-worker when one runs elsewhere (compose's
+    `worker` service). Several workers are safe: each takes a different job."""
     import uvicorn
 
-    uvicorn.run("trialwatch.web.app:app", host=host, port=port, reload=reload)
+    child = None
+    if with_worker:
+        child = start_worker()
+        typer.echo(f"worker started (pid {child.pid}); it stops with the web server")
+    try:
+        uvicorn.run("trialwatch.web.app:app", host=host, port=port, reload=reload)
+    finally:
+        if child is not None:
+            stop_worker(child)
 
 
 @app.command("worker")
@@ -73,7 +111,8 @@ def worker(
     once: Annotated[bool, typer.Option("--once", help="Run the queued jobs that are due, then stop")] = False,
 ) -> None:
     """Run queued jobs one at a time (those people start on the web interface, and the weekly refresh),
-    trying failed ones again later. Leave it running next to `trialwatch web`."""
+    trying failed ones again later. `trialwatch web` starts one by itself; run this where the web
+    server runs with --no-worker (compose's `worker` service)."""
     import logging
 
     from trialwatch.jobs import worker as job_worker
@@ -307,6 +346,22 @@ def source_transfer(
     _echo_failures(result.failed)
     if result.failed:
         raise typer.Exit(1)
+
+
+@source_app.command("locations")
+def source_locations(code: Annotated[str, typer.Argument(help="The source, e.g. ctis")]) -> None:
+    """Read again where each trial runs (sites, cities, countries) from the records already stored from a
+    source, without fetching anything: for records transferred before locations were read, or after
+    the adapter reads them differently. A transfer reads them anyway."""
+    with db.connect_system() as conn:
+        source = _registered(conn, code)
+        adapter = registry.adapter_class(source.adapter)()
+        trials = 0
+        places = 0
+        for trial_id, payload in core_db.current_records(conn, code):
+            places += core_db.set_trial_locations(conn, trial_id, code, adapter.locations(payload))
+            trials += 1
+    typer.echo(f"{code}: read the locations of {trials:,} trial{"s" if trials != 1 else ""} ({places:,} sites and countries)")
 
 
 # --- the evidence check (ADR-004) ----------------------------------------------------------------

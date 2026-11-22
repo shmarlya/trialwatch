@@ -1082,6 +1082,46 @@ CREATE TABLE core.trial_identifier (
 
 
 --
+-- Name: trial_location; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.trial_location (
+    id bigint NOT NULL,
+    trial_id bigint NOT NULL,
+    source_id smallint NOT NULL,
+    country text NOT NULL,
+    city text,
+    postcode text,
+    site text,
+    status text,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL,
+    CONSTRAINT trial_location_country_check CHECK ((btrim(country) <> ''::text))
+);
+
+
+--
+-- Name: TABLE trial_location; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.trial_location IS 'where a trial runs, per source: its sites (city, postcode, country) and countries';
+
+
+--
+-- Name: trial_location_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.trial_location ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.trial_location_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: trial_record_id_seq; Type: SEQUENCE; Schema: core; Owner: -
 --
 
@@ -1518,6 +1558,14 @@ ALTER TABLE ONLY core.trial_identifier
 
 
 --
+-- Name: trial_location trial_location_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_location
+    ADD CONSTRAINT trial_location_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: trial trial_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -1737,6 +1785,27 @@ CREATE INDEX trial_identifier_trial_idx ON core.trial_identifier USING btree (tr
 
 
 --
+-- Name: trial_location_city_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX trial_location_city_idx ON core.trial_location USING btree (lower(city));
+
+
+--
+-- Name: trial_location_country_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX trial_location_country_idx ON core.trial_location USING btree (lower(country));
+
+
+--
+-- Name: trial_location_trial_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX trial_location_trial_idx ON core.trial_location USING btree (trial_id);
+
+
+--
 -- Name: trial_record_latest_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -1937,6 +2006,13 @@ CREATE TRIGGER trial_identifier_audit AFTER INSERT OR DELETE OR UPDATE ON core.t
 --
 
 CREATE TRIGGER trial_identifier_valid BEFORE INSERT OR UPDATE ON core.trial_identifier FOR EACH ROW EXECUTE FUNCTION core.check_identifier();
+
+
+--
+-- Name: trial_location trial_location_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER trial_location_audit AFTER INSERT OR DELETE OR UPDATE ON core.trial_location FOR EACH ROW EXECUTE FUNCTION core.audit('id');
 
 
 --
@@ -2463,6 +2539,30 @@ ALTER TABLE ONLY core.trial_identifier
 
 
 --
+-- Name: trial_location trial_location_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_location
+    ADD CONSTRAINT trial_location_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: trial_location trial_location_source_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_location
+    ADD CONSTRAINT trial_location_source_id_fkey FOREIGN KEY (source_id) REFERENCES core.source(id);
+
+
+--
+-- Name: trial_location trial_location_trial_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_location
+    ADD CONSTRAINT trial_location_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
 -- Name: trial trial_merged_into_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -2602,4 +2702,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261122110000'),
     ('20261122120000'),
     ('20261122130000'),
-    ('20261122140000');
+    ('20261122140000'),
+    ('20261122150000');

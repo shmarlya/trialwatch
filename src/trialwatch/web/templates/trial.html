@@ -50,6 +50,21 @@
   </div>
 </div>
 
+<h2 id="where">Where it runs</h2>
+{% if locations %}
+<p class="small muted">The sites and countries the registry lists, with the trial's status in each country. To take part, contact a site or ask your doctor.</p>
+<div class="table-wrap"><table class="locations">
+  <tr><th>Country</th><th>Status there</th><th>Sites</th></tr>
+  {% for group in locations %}
+  <tr>
+    <td>{{ group.country }}</td>
+    <td class="small">{{ group.status or "—" }}</td>
+    <td class="small">{% for place in group.sites %}{{ place.site or "a site" }}{% if place.city %} · <b>{{ place.city }}</b>{% endif %}{% if place.postcode %} {{ place.postcode }}{% endif %}{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">no site listed</span>{% endfor %}</td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="muted">No sites or countries known yet.</p>{% endif %}
+
 <h2 id="sponsors">Sponsors</h2>
 <div class="table-wrap"><table>
   <tr><th>Organisation</th><th>Role</th><th>Kind · country</th><th>Identifiers</th><th>From</th><th></th></tr>

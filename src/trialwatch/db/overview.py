@@ -572,6 +572,9 @@ class PublishedTrialRow:
     # staff withdrew it, and why: it stays listed, marked
     withdrawn_at: datetime | None
     withdrawn_note: str | None
+    # the countries it runs in (core.trial_location), sorted; and its sites in the city searched for
+    countries: list[str]
+    cities: list[str]
 
 
 _PUBLISHED_TRIALS = f"""
@@ -583,6 +586,11 @@ _PUBLISHED_TRIALS = f"""
               AND (%(status)s::text IS NULL OR reg.r->>'status' = %(status)s)
               AND (%(checked_from)s::date IS NULL OR jc.started_at >= %(checked_from)s::date)
               AND (%(checked_to)s::date IS NULL OR jc.started_at < %(checked_to)s::date + 1)
+              AND (%(country)s::text IS NULL OR EXISTS (SELECT FROM core.trial_location l WHERE l.trial_id = t.id
+                                                          AND lower(l.country) = lower(%(country)s)))
+              AND (%(city)s::text IS NULL OR EXISTS (SELECT FROM core.trial_location l WHERE l.trial_id = t.id
+                                                       AND l.city ILIKE '%%' || %(city)s || '%%'
+                                                       AND (%(country)s::text IS NULL OR lower(l.country) = lower(%(country)s))))
 """
 
 
@@ -590,17 +598,21 @@ _PUBLISHED_TRIALS = f"""
 class PublicFilter:
     """What the public's home page filters on: `search` matches an identifier, the title or a sponsor;
     `label` one result (PUBLIC_LABELS); `status` one registry status; the run started between
-    `checked_from` and `checked_to`, both days included."""
+    `checked_from` and `checked_to`, both days included; it runs in `country` (any case), at a site
+    in a city whose name contains `city` (in that country, when both are given)."""
 
     search: str | None = None
     label: str | None = None
     status: str | None = None
     checked_from: date | None = None
     checked_to: date | None = None
+    country: str | None = None
+    city: str | None = None
 
     def params(self, requirements: str) -> dict:
         return {"search": like_text(self.search), "evidence": None, "label": self.label, "status": self.status,
-                "checked_from": self.checked_from, "checked_to": self.checked_to, "requirements": requirements}
+                "checked_from": self.checked_from, "checked_to": self.checked_to, "country": self.country,
+                "city": like_text(self.city), "requirements": requirements}
 
 
 def published_trial_rows(conn: psycopg.Connection, requirements: str, found: PublicFilter = PublicFilter(),
@@ -616,7 +628,14 @@ def published_trial_rows(conn: psycopg.Connection, requirements: str, found: Pub
                           FROM core.trial_sponsor s JOIN core.organisation o ON o.id = s.organisation_id
                          WHERE s.trial_id = t.id AND s.removed_at IS NULL) AS sponsor,
                        reg.r->>'status' AS status, jc.label, jc.run_id, jc.model,
-                       jc.started_at AS checked_at, jc.published_at, jc.outdated, jc.withdrawn_at, jc.withdrawn_note"""
+                       jc.started_at AS checked_at, jc.published_at, jc.outdated, jc.withdrawn_at, jc.withdrawn_note,
+                       coalesce((SELECT array_agg(DISTINCT l.country ORDER BY l.country) FROM core.trial_location l
+                                  WHERE l.trial_id = t.id), '{{}}') AS countries,
+                       coalesce((SELECT array_agg(DISTINCT l.city ORDER BY l.city) FROM core.trial_location l
+                                  WHERE l.trial_id = t.id AND l.city IS NOT NULL AND %(city)s::text IS NOT NULL
+                                    AND l.city ILIKE '%%' || %(city)s || '%%'
+                                    AND (%(country)s::text IS NULL OR lower(l.country) = lower(%(country)s))),
+                                '{{}}') AS cities"""
             + _PUBLISHED_TRIALS + " ORDER BY jc.published_at DESC, t.id DESC OFFSET %(offset)s LIMIT %(limit)s",
             params,
         ).fetchall()
@@ -625,6 +644,69 @@ def published_trial_rows(conn: psycopg.Connection, requirements: str, found: Pub
 def published_trial_count(conn: psycopg.Connection, requirements: str, found: PublicFilter = PublicFilter()) -> int:
     row = conn.execute("SELECT count(*)::int" + _PUBLISHED_TRIALS, found.params(requirements)).fetchone()
     return row[0]
+
+
+def published_trial_countries(conn: psycopg.Connection, requirements: str) -> list[str]:
+    """The countries the trials with a published judgement run in, for the home page's filter."""
+    rows = conn.execute(
+        "SELECT DISTINCT l.country FROM core.trial_location l JOIN core.trial t ON t.id = l.trial_id"
+        " JOIN checks.judgement_published jc ON jc.trial_id = t.id AND jc.requirements = %(requirements)s"
+        " WHERE t.merged_into IS NULL ORDER BY 1",
+        {"requirements": requirements},
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+@dataclass(frozen=True)
+class LocationRow:
+    country: str
+    city: str | None
+    postcode: str | None
+    site: str | None
+    status: str | None
+    source: str
+
+
+@dataclass(frozen=True)
+class CountryLocations:
+    country: str
+    # the trial's status there, as the first row that gives one says
+    status: str | None
+    # its sites (rows with a site or city), by city
+    sites: list[LocationRow]
+
+
+def by_country(rows: list[LocationRow]) -> list[CountryLocations]:
+    """The rows grouped by country: countries with a site first, then the rest, each by name."""
+    grouped: dict[str, list[LocationRow]] = {}
+    for row in rows:
+        grouped.setdefault(row.country, []).append(row)
+    found = []
+    for country, places in grouped.items():
+        status = None
+        sites = []
+        for place in places:
+            if status is None:
+                status = place.status
+            if place.site or place.city:
+                sites.append(place)
+        found.append(CountryLocations(country, status, sites))
+    found.sort(key=lambda group: (not group.sites, group.country))
+    return found
+
+
+def trial_locations(conn: psycopg.Connection, trial_id: int) -> list[LocationRow]:
+    """Where the trial runs, by country: its sites first (by city), then countries with no site listed."""
+    with conn.cursor(row_factory=class_row(LocationRow)) as cur:
+        return cur.execute(
+            """
+            SELECT l.country, l.city, l.postcode, l.site, l.status, s.code AS source
+            FROM core.trial_location l JOIN core.source s ON s.id = l.source_id
+            WHERE l.trial_id = %s
+            ORDER BY l.country, l.site IS NULL, l.city, l.site
+            """,
+            (trial_id,),
+        ).fetchall()
 
 
 def published_trial_statuses(conn: psycopg.Connection, requirements: str) -> list[str]:

@@ -725,6 +725,52 @@ def remove_trial_sponsor(conn: psycopg.Connection, trial_id: int, organisation_i
     return cursor.rowcount == 1
 
 
+# --- where a trial runs ------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Location:
+    """Where a trial runs, as a source says: a site (its organisation, city, postcode) in a country, or
+    a country with no site listed; with the trial's status in that country. No people."""
+
+    country: str
+    city: str | None = None
+    postcode: str | None = None
+    site: str | None = None
+    status: str | None = None
+
+
+def set_trial_locations(conn: psycopg.Connection, trial_id: int, source: str, locations: Sequence[Location]) -> int:
+    """Make the trial's locations from this source what the source says now (rows from other sources
+    are not touched); a location given twice counts once. Returns how many it holds."""
+    source_number = source_id(conn, source)
+    unique = []
+    for location in locations:
+        if location.country.strip() and location not in unique:
+            unique.append(location)
+    with conn.transaction():
+        conn.execute("DELETE FROM core.trial_location WHERE trial_id = %s AND source_id = %s", (trial_id, source_number))
+        for location in unique:
+            conn.execute(
+                "INSERT INTO core.trial_location (trial_id, source_id, country, city, postcode, site, status, created_by) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, current_setting('trialwatch.actor')::bigint)",
+                (trial_id, source_number, location.country.strip(), location.city, location.postcode, location.site,
+                 location.status),
+            )
+    return len(unique)
+
+
+def current_records(conn: psycopg.Connection, source: str) -> list[tuple[int, dict]]:
+    """(trial id, payload) of the newest record of each trial from this source."""
+    rows = conn.execute(
+        "SELECT c.trial_id, c.payload FROM core.trial_record_current c WHERE c.source_id = %s ORDER BY c.trial_id",
+        (source_id(conn, source),),
+    ).fetchall()
+    found = []
+    for trial_id, payload in rows:
+        found.append((trial_id, payload))
+    return found
+
+
 # --- data sources: the registry, their lists, evidence transfers (ADR-005) ---------------------
 
 @dataclass(frozen=True)

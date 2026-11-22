@@ -222,6 +222,54 @@ def sponsors(payload: dict) -> list[core.Sponsor]:
     return found
 
 
+def _list(value: object) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    found = []
+    for item in value:
+        if isinstance(item, dict):
+            found.append(item)
+    return found
+
+
+def locations(payload: dict) -> list[core.Location]:
+    """Where the trial runs: every site of each member state concerned (its organisation, city,
+    postcode and country) with the trial's status in that country, then each member state with no
+    site listed, then the countries outside the EU/EEA CTIS names (no sites or status there). The
+    people at a site (investigator, email, phone) are left out."""
+    application = _get(payload, "authorizedApplication")
+    found = []
+    countries = []
+    for part in _list(_get(application, "authorizedPartsII")):
+        msc = _get(part, "mscInfo")
+        country = _text(_get(msc, "countryName")) or _text(_get(msc, "mscName"))
+        status = _text(_get(msc, "trialStatus"))
+        for site in _list(part.get("trialSites")):
+            address = _get(site, "organisationAddressInfo", "address")
+            site_country = _text(_get(address, "countryName")) or country
+            if site_country is None:
+                continue
+            found.append(core.Location(
+                country=site_country, city=_text(_get(address, "city")), postcode=_text(_get(address, "postcode")),
+                site=_text(_get(site, "organisationAddressInfo", "organisation", "name")), status=status,
+            ))
+            countries.append(site_country)
+        if country is not None and country not in countries:
+            found.append(core.Location(country=country, status=status))
+            countries.append(country)
+    for msc in _list(_get(application, "memberStatesConcerned")):
+        country = _text(msc.get("mscName"))
+        if country is not None and country not in countries:
+            found.append(core.Location(country=country))
+            countries.append(country)
+    for other in _list(_get(application, "authorizedPartI", "rowCountriesInfo")):
+        country = _text(other.get("name"))
+        if country is not None and country not in countries:
+            found.append(core.Location(country=country))
+            countries.append(country)
+    return found
+
+
 def registered(payload: dict) -> dict:
     """The registered information checks ask about, in the shape every adapter fills."""
     trial_details = _get(payload, "authorizedApplication", "authorizedPartI", "trialDetails")
@@ -438,6 +486,9 @@ class CtisAdapter(Adapter):
             if total is None or total <= len(seen):
                 return
 
+    def locations(self, payload: dict) -> list[core.Location]:
+        return locations(payload)
+
     def fetch(self, conn: psycopg.Connection, source: str, key: str, config: dict,
               files_dir: Path | None = None) -> Fetched:
         """The trial's record (a new version if it changed), its sponsors, and every listed document
@@ -459,6 +510,10 @@ class CtisAdapter(Adapter):
             core.set_trial_sponsors(conn, saved.trial_id, source, sponsors(payload))
         except Exception as exc:  # the sponsors are not evidence: reported, the transfer can still complete
             fetched.warnings["sponsors"] = f"{type(exc).__name__}: {exc}"
+        try:
+            core.set_trial_locations(conn, saved.trial_id, source, locations(payload))
+        except Exception as exc:  # where it runs is not evidence either
+            fetched.warnings["locations"] = f"{type(exc).__name__}: {exc}"
         entries = payload.get("documents")
         if not isinstance(entries, list):
             # a record without its list of documents says nothing about them: nothing is unlinked

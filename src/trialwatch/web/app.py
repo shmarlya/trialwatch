@@ -618,14 +618,18 @@ def call_view(data: dict) -> CallView:
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, error: str | None = None, q: str = "", result: str = "", status: str = "",
-              checked_from: str = "", checked_to: str = "", page: int = 1) -> HTMLResponse:
+              checked_from: str = "", checked_to: str = "", country: str = "", city: str = "",
+              page: int = 1) -> HTMLResponse:
     defaults = default_settings()
     if not staff_view(request):
         # the public's front page: the trials with a published result (ADR-007), nothing of the workflow
         page = max(page, 1)
         with db.connect_system() as conn:
             statuses = overview.published_trial_statuses(conn, defaults.requirements)
+            countries = overview.published_trial_countries(conn, defaults.requirements)
             found = overview.PublicFilter(
+                country=country if country in countries else None,
+                city=city.strip() or None,
                 search=q.strip() or None,
                 label=result if result in overview.PUBLIC_LABELS else None,
                 status=status if status in statuses else None,
@@ -637,8 +641,10 @@ def dashboard(request: Request, error: str | None = None, q: str = "", result: s
             spend = costs_db.spend_totals(conn)
         shown = {"q": q, "result": found.label or "", "status": found.status or "",
                  "checked_from": found.checked_from.isoformat() if found.checked_from else "",
-                 "checked_to": found.checked_to.isoformat() if found.checked_to else ""}
+                 "checked_to": found.checked_to.isoformat() if found.checked_to else "",
+                 "country": found.country or "", "city": found.city or ""}
         context = {"rows": rows, "shown": shown, "results": overview.PUBLIC_LABELS, "statuses": statuses,
+                   "countries": countries,
                    "filtered": found != overview.PublicFilter(),
                    "total": total, "page": page, "pages": max(1, -(-total // TRIALS_PER_PAGE)),
                    "defaults": defaults, "times": times, "spend": spend}
@@ -1162,6 +1168,7 @@ def trial_page(request: Request, trial_id: int, run: int | None = None, error: s
         documents = overview.trial_documents(conn, trial_id)
         history = overview.trial_history(conn, trial_id)
         sponsors = overview.trial_sponsors(conn, trial_id)
+        locations = overview.by_country(overview.trial_locations(conn, trial_id))
         sources = []
         transfers = []
         kinds = []
@@ -1207,7 +1214,7 @@ def trial_page(request: Request, trial_id: int, run: int | None = None, error: s
         "defaults": default_settings(), "running": _running(), "error": error, "transfers": transfers,
         "ready": trial_id not in blocked, "not_ready": blocked.get(trial_id), "transferable": _transferable(transfers),
         "kinds": kinds, "configs": check_settings.load_all(), "judgement_config": judgement_config,
-        "gold_items": gold_items, "sponsors": sponsors, "agreement": agreement,
+        "gold_items": gold_items, "sponsors": sponsors, "locations": locations, "agreement": agreement,
     }
     return TEMPLATES.TemplateResponse(request, "trial.html", context)
 

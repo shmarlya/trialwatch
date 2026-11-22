@@ -21,7 +21,7 @@ from pathlib import Path
 
 import psycopg
 
-from trialwatch.db.core import Listed
+from trialwatch.db.core import Listed, Location
 
 
 @dataclass
@@ -99,6 +99,11 @@ class Adapter:
     def key_problem(self, key: str) -> str | None:
         """Why `key` cannot be one of this source's keys, or None."""
         return None
+
+    def locations(self, payload: dict) -> list[Location]:
+        """Where the trial of a stored record runs (sites and countries), read from its payload; a
+        transfer stores them, and `trialwatch source locations` reads them again from stored records."""
+        return []
 
     def list_pages(self, config: dict) -> Iterator[ListingPage]:
         raise NotImplementedError(f"{self.name} has no list to sync")

@@ -42,6 +42,8 @@
 <form class="search public-filter" method="get" action="/">
   <input type="text" name="q" value="{{ shown.q }}" placeholder="Search by identifier, title or sponsor">
   <select name="result" aria-label="Result"><option value="">any result</option>{% for name in results %}<option {% if name == shown.result %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>
+  {% if countries %}<select name="country" aria-label="Country"><option value="">any country</option>{% for name in countries %}<option {% if name == shown.country %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>{% endif %}
+  <input type="text" name="city" value="{{ shown.city }}" placeholder="City" aria-label="City" class="city">
   {% if statuses %}<select name="status" aria-label="Registry status"><option value="">any status</option>{% for name in statuses %}<option {% if name == shown.status %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>{% endif %}
   <label class="small">checked from <input type="date" name="checked_from" value="{{ shown.checked_from }}"></label>
   <label class="small">to <input type="date" name="checked_to" value="{{ shown.checked_to }}"></label>
@@ -55,13 +57,14 @@
 </div>{% endmacro %}
 {{ public_pager() }}
 <div class="table-wrap"><table class="checked-trials">
-  <tr><th>Trial</th><th>Title</th><th>Status</th><th>Result</th><th>Checked</th><th>Published</th><th>Model</th><th></th></tr>
+  <tr><th>Trial</th><th>Title</th><th>Status</th><th>Where</th><th>Result</th><th>Checked</th><th>Published</th><th>Model</th><th></th></tr>
   {% for row in rows %}
   <tr>
     <td><a href="/trials/{{ row.id }}">{{ row.name }}</a></td>
     <td class="small">{{ (row.title or "")[:140] }}{% if row.title and row.title | length > 140 %}…{% endif %}
       {% if row.sponsor %}<br><span class="muted">{{ row.sponsor }}</span>{% endif %}</td>
     <td class="small">{{ row.status or "—" }}</td>
+    <td class="small">{% if row.cities %}<b>{{ row.cities | join(", ") }}</b><br>{% endif %}{% if row.countries %}{% set listed = ([shown.country] if shown.country in row.countries else []) + (row.countries | reject("equalto", shown.country) | list) %}<span class="muted" title="{{ row.countries | join(", ") }}">{{ listed[:4] | join(", ") }}{% if listed | length > 4 %} +{{ listed | length - 4 }} more{% endif %}</span>{% else %}—{% endif %}</td>
     <td>{{ label(row.label) }}{% if row.withdrawn_at %} <span class="badge error">withdrawn</span><br><span class="small muted">{{ row.withdrawn_note }}</span>{% endif %}{% if row.outdated %} <span class="flag" title="its documents or record changed since it was checked; a new check is pending">outdated</span>{% endif %}</td>
     <td class="small">{{ row.checked_at.strftime("%Y-%m-%d") }}</td>
     <td class="small">{{ row.published_at.strftime("%Y-%m-%d") }}</td>
@@ -69,7 +72,7 @@
     <td class="small"><a href="/trials/{{ row.id }}?run={{ row.run_id }}">evidence →</a></td>
   </tr>
   {% else %}
-  <tr><td colspan="8" class="muted">{% if filtered %}No trials match.{% else %}No published results yet.{% endif %}</td></tr>
+  <tr><td colspan="9" class="muted">{% if filtered %}No trials match.{% else %}No published results yet.{% endif %}</td></tr>
   {% endfor %}
 </table></div>
 {% if pages > 1 %}{{ public_pager() }}{% endif %}

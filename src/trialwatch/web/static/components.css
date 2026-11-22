@@ -120,6 +120,7 @@ form.search { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-2); max-w
 form.search.public-filter { flex-wrap: wrap; align-items: flex-end; max-width: none; }
 form.search.public-filter input[type=text] { flex: 1 1 240px; width: auto; }
 form.search.public-filter select { width: auto; }
+form.search.public-filter input.city { flex: 0 1 140px; }
 form.search.public-filter label { flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
 label { font-size: var(--fs-sm); color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
 label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--text); }

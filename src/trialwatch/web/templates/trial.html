@@ -55,7 +55,7 @@
   <tr><th>Organisation</th><th>Role</th><th>Kind · country</th><th>Identifiers</th><th>From</th><th></th></tr>
   {% for sponsor in sponsors %}
   <tr {% if sponsor.removed_at %}class="muted"{% endif %}>
-    <td><a href="/sponsors/{{ sponsor.organisation_id }}">{{ sponsor.name }}</a></td>
+    <td>{% if can("view") %}<a href="/sponsors/{{ sponsor.organisation_id }}">{{ sponsor.name }}</a>{% else %}{{ sponsor.name }}{% endif %}</td>
     <td class="small">{% if sponsor.removed_at %}<s>{% if sponsor.is_primary %}primary{% else %}co-sponsor{% endif %}</s>
       <br>removed {{ when(sponsor.removed_at) }} by {{ who(sponsor.removed_by) }}{% if sponsor.removal == "source" %} (no longer listed by {{ sponsor.source }}){% endif %}
       {% elif sponsor.is_primary %}<b>primary</b>{% else %}co-sponsor{% endif %}</td>
@@ -85,34 +85,29 @@
 {% endif %}
 
 <h2>{% if can("view.internal") %}Evidence check{% else %}Results reporting{% endif %}</h2>
-{% if not can("view.internal") %}<p class="small muted">What our check found in the trial's results documents. A result is published when a person on our team reviewed it, or when results of its kind agree with experts' hand-checked results at least {{ "%.0f" | format(auto_publish_at * 100) }}% of the time. Each answer links to the page it quotes.</p>{% endif %}
+{% if not can("view.internal") %}<p class="small muted">What our check found in the trial's results documents, and below it every step of how it was found. Every check is published as it finishes, whatever it decided, with how often checks of its kind agree with experts' hand-checked results. Each answer links to the page it quotes.</p>{% endif %}
 <div class="grid two">
   <div>
   {% if judgement %}
     {% if judgements | length > 1 %}
     <div class="tabs">
       {% for other in judgements %}
-      <a href="/trials/{{ row.id }}?run={{ other.run_id }}" class="{% if other.run_id == judgement.run_id %}on{% endif %}">run {{ other.run_id }} · {{ other.label or "error" }}{% if other.published and can("view.internal") %} · public{% endif %}</a>
+      <a href="/trials/{{ row.id }}?run={{ other.run_id }}" class="{% if other.run_id == judgement.run_id %}on{% endif %}">run {{ other.run_id }} · {{ other.label or "error" }}{% if other.withdrawn_at %} · withdrawn{% endif %}</a>
       {% endfor %}
     </div>
     {% endif %}
     <p class="small muted">Run <a href="/runs/{{ judgement.run_id }}">{{ judgement.run_id }}</a> · {{ judgement.model }}{% if judgement.served_by %}{% for served in judgement.served_by %}{% if served != judgement.model %} (answered by {{ served }}){% endif %}{% endfor %}{% endif %} · requirements <a href="/requirements?show={{ judgement.requirements }}#{{ judgement.requirements }}">{{ judgement.requirements }}</a> · prompt <a href="/prompts?show={{ judgement.prompt }}#{{ judgement.prompt }}">{{ judgement.prompt }}</a> · {{ when(judgement.started_at) }}
       {% if judgement.input_tokens %} · tokens in {{ "{:,}".format(judgement.input_tokens) }}, out {{ "{:,}".format(judgement.output_tokens) }}{% endif %}{% if judgement.cost_usd is not none and can("spend.view") %} · {{ dollars(judgement.cost_usd) }}{% endif %}
       {% if judgement.duration_ms %} · {{ "%.1f" | format(judgement.duration_ms / 1000) }} s{% endif %}</p>
-    {% if can("view.internal") %}
-    <div class="actions">
-      {% if judgement.published %}
-      <span class="badge full">public</span>
-      {% if can("judgement.publish") %}<form method="post" action="/trials/{{ row.id }}/judgements/{{ judgement.run_id }}/withdraw"><input type="text" name="note" placeholder="why withdraw (optional)"> <button class="secondary small">Withdraw from the public</button></form>{% endif %}
-      {% if judgement.published_basis %}<span class="small muted">published by its run: {{ judgement.published_basis }}</span>{% else %}<span class="small muted">reviewed by a person</span>{% endif %}
-      {% else %}
-      <span class="badge undecided">not public</span>
-      {% if can("judgement.publish") and not judgement.error and judgement.run_status != "running" %}<form method="post" action="/trials/{{ row.id }}/judgements/{{ judgement.run_id }}/publish"><button class="small">Publish</button></form><span class="small muted">after checking its quotes: the public then sees this label, answers and quotes</span>{% endif %}
-      {% endif %}
-    </div>
-    {% if decision and not judgement.published %}<p class="small">Confidence: {% if decision.confidence is not none %}<b>{{ "%.0f" | format(decision.confidence * 100) }}%</b>{% else %}<b>not measured</b>{% endif %} · {{ decision.reason }}. A run publishes by itself from {{ "%.0f" | format(auto_publish_at * 100) }}%; below that a person decides.</p>{% endif %}
+    {% if judgement.withdrawn_at %}<div class="alert">Withdrawn {{ when(judgement.withdrawn_at) }} by {{ who(judgement.withdrawn_by) }}: {{ judgement.withdrawn_note }}. It stays here as it was published, so nothing disappears without a trace.</div>{% endif %}
+    <p class="small muted">{% if judgement.published %}Published by its run as it finished, as every check is, whatever it found.{% elif judgement.error %}Not published: the check failed on this trial.{% else %}Not published yet: its run is still going.{% endif %}
+      {% if agreement %}Agreement with experts' hand-checked results for checks of this kind: {% if agreement.confidence is not none %}<b>{{ "%.0f" | format(agreement.confidence * 100) }}%</b>, {% endif %}{{ agreement.reason }}.{% endif %}
+      {% if judgement.published_basis %}<br>When published: {{ judgement.published_basis }}{% endif %}</p>
+    {% if can("judgement.withdraw") and judgement.published and not judgement.withdrawn_at %}
+    <form class="inline" method="post" action="/trials/{{ row.id }}/judgements/{{ judgement.run_id }}/withdraw">
+      <input type="text" name="note" placeholder="why withdraw: the public sees this" required> <button class="secondary small">Withdraw</button>
+    </form>
     {% endif %}
-    {% if not can("view.internal") %}<p class="small muted">{% if judgement.published_confidence is not none %}Published without a person's review: {{ "%.0f" | format(judgement.published_confidence * 100) }}% of the hand-checked trials judged this way agreed with the experts' results (at least {{ "%.0f" | format(auto_publish_at * 100) }}% is required).{% else %}Reviewed by a person on our team before it was published.{% endif %}</p>{% endif %}
     {% if judgement.run_id == row.label_run and row.label_outdated %}<div class="alert">The trial's documents or record changed after this was judged{% if not can("view.internal") %}; a new check is pending{% endif %}.</div>{% endif %}
     {% if judgement.error %}
       <div class="alert">{{ judgement.error }}</div>
@@ -140,8 +135,8 @@
     </table></div>
     {% endif %}
 
-    {% if can("view.internal") %}
-    <h3 class="section">Trace, start to finish</h3>
+    {% if can("view.internal") or steps %}
+    <h3 class="section">{% if can("view.internal") %}Trace, start to finish{% else %}How the evidence was collected, start to finish{% endif %}</h3>
     <ol class="trace">
     {% for step in steps %}
       <li class="trace-step {{ step.name }}">

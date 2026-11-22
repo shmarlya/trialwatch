@@ -1,6 +1,6 @@
-"""Publishing by measured confidence (checks/publishing.py, ADR-007): a judgement's confidence is how
-often judgements of its kind agreed with gold labels; at 90% or more, over enough gold items, a run
-publishes it by itself, any label; the rest wait for a person."""
+"""Publishing every judgement (checks/publishing.py, ADR-007): a run publishes every judgement it made
+without an error, any label, whatever its kind's agreement with gold labels; the publication records
+that agreement (the confidence once enough gold items were compared, the basis always)."""
 
 import pytest
 from conftest import signed_in_client
@@ -52,63 +52,52 @@ def a_new_run(conn, judged):
     return run_id
 
 
-def test_a_kind_is_published_by_a_run_from_90_percent_agreement(app_conn, gold):
+def publication(conn, run_id, trial_id):
+    return conn.execute("SELECT confidence, basis FROM checks.publication WHERE run_id = %s AND trial_id = %s",
+                        (run_id, trial_id)).fetchone()
+
+
+def test_a_run_publishes_every_judgement_with_its_kinds_gold_agreement(app_conn, gold):
     a_gold_run(app_conn, gold, agreeing=9, disagreeing=1)
     run_id = a_new_run(app_conn, [(50, "full", FULL), (51, "not full", NOT_FULL), (52, "undecided", UNDECIDED)])
     calibration = publishing.calibrate(app_conn, "eu-ctr-results")
     assert calibration.datasets == ["test/v1"]
-    published = publishing.auto_publish(app_conn, run_id)
-    # "full" of this check agreed 9 of 10 times; "not full" has no gold yet; "undecided" is a person's
     trials = core.trials_with_scheme(app_conn, "eu-ct", [ct(50), ct(51), ct(52)])
-    assert published == [trials[ct(50)]]
-    row = app_conn.execute("SELECT confidence, basis FROM checks.publication WHERE run_id = %s", (run_id,)).fetchone()
-    assert row[0] == pytest.approx(0.9) and "9 of 10 gold items agreed" in row[1] and "test/v1" in row[1]
+    assert sorted(publishing.publish_run(app_conn, run_id)) == sorted(trials.values())
+    # "full" of this check agreed 9 of 10 times: measured
+    confidence, basis = publication(app_conn, run_id, trials[ct(50)])
+    assert confidence == pytest.approx(0.9) and "9 of 10 gold items agreed" in basis and "test/v1" in basis
+    # "not full" and "undecided" have no gold yet: published all the same, unmeasured, and the basis says so
+    for number in (51, 52):
+        confidence, basis = publication(app_conn, run_id, trials[ct(number)])
+        assert confidence is None and "0 of 0 gold items agreed" in basis and "at least 5 are needed" in basis
 
 
-def test_below_90_percent_or_too_few_items_a_person_decides(app_conn, gold):
-    a_gold_run(app_conn, gold, agreeing=8, disagreeing=2)
+def test_low_agreement_is_published_too_and_says_so(app_conn, gold):
+    a_gold_run(app_conn, gold, agreeing=2, disagreeing=8)
     run_id = a_new_run(app_conn, [(50, "full", FULL)])
-    assert publishing.auto_publish(app_conn, run_id) == []
-    kind = checks_db.judgement_kinds_of_run(app_conn, run_id)[0]
-    decision = publishing.decide(kind, publishing.calibrate(app_conn, "eu-ctr-results"))
-    assert (decision.confidence, decision.automatic) == (0.8, False) and "below 90%" in decision.reason
+    trial_id = core.trials_with_scheme(app_conn, "eu-ct", [ct(50)])[ct(50)]
+    assert publishing.publish_run(app_conn, run_id) == [trial_id]
+    confidence, basis = publication(app_conn, run_id, trial_id)
+    assert confidence == pytest.approx(0.2) and "2 of 10 gold items agreed" in basis and "(20%)" in basis
+    # anyone sees it, with that agreement, on the trial page; there is nothing to review
+    page = TestClient(web.app).get(f"/trials/{trial_id}").text
+    assert "20%" in page and "2 of 10 gold items agreed" in page
+    assert signed_in_client(app_conn, "moderator").get("/review").status_code == 404
 
 
 def test_too_few_gold_items_measure_nothing(app_conn, gold):
     a_gold_run(app_conn, gold, agreeing=4, disagreeing=0)
     run_id = a_new_run(app_conn, [(50, "full", FULL)])
     kind = checks_db.judgement_kinds_of_run(app_conn, run_id)[0]
-    decision = publishing.decide(kind, publishing.calibrate(app_conn, "eu-ctr-results"))
-    assert decision.confidence is None and not decision.automatic and "at least 5 are needed" in decision.reason
-
-
-def test_a_high_confidence_accusation_is_published_too(app_conn, gold):
-    core.act_as(app_conn, "test-person")
-    run_id = start_a_run(app_conn)
-    items = []
-    for number in range(10):
-        items.append(an_item(ct(number), "not full", parts=NOT_FULL))
-        judge(app_conn, run_id, ct(number), "not full", NOT_FULL)
-    checks_db.finish_run(app_conn, run_id, status="succeeded", error=None, trials=10, errors=0, input_tokens=0,
-                         output_tokens=0)
-    datasets.write_version(gold, meta("v1"), items)
-    later = a_new_run(app_conn, [(50, "not full", NOT_FULL)])
-    assert len(publishing.auto_publish(app_conn, later)) == 1
+    agreement = publishing.measure(kind, publishing.calibrate(app_conn, "eu-ctr-results"))
+    assert agreement.confidence is None and "at least 5 are needed" in agreement.reason
 
 
 def test_another_prompt_is_another_kind(app_conn, gold):
     a_gold_run(app_conn, gold, agreeing=10, disagreeing=0)
     run_id = a_new_run(app_conn, [(50, "full", FULL)])
     app_conn.execute("UPDATE checks.run SET prompt_sha256 = %s WHERE id = %s", (b"\x01" * 32, run_id))
-    assert publishing.auto_publish(app_conn, run_id) == []
-
-
-def test_the_review_page_lists_what_waits_and_how_each_kind_did(app_conn, gold):
-    a_gold_run(app_conn, gold, agreeing=8, disagreeing=2)
-    a_new_run(app_conn, [(50, "full", FULL)])
-    assert TestClient(web.app).get("/review").status_code == 401
-    page = signed_in_client(app_conn, "moderator").get("/review").text
-    assert ct(50) in page and "80%" in page and "below 90%" in page
     trial_id = core.trials_with_scheme(app_conn, "eu-ct", [ct(50)])[ct(50)]
-    trial = signed_in_client(app_conn, "admin", "ada@test.example").get(f"/trials/{trial_id}").text
-    assert "Confidence:" in trial and "80%" in trial
+    assert publishing.publish_run(app_conn, run_id) == [trial_id]
+    assert publication(app_conn, run_id, trial_id)[0] is None

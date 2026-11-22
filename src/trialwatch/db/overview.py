@@ -70,7 +70,8 @@ _LISTED_TITLE = """(SELECT l.title FROM core.source_listing l JOIN core.trial_so
 
 def judgement_view(published_only: bool) -> str:
     """The view of one judgement per trial and requirement set: the newest one (staff), or the newest
-    one staff published (the public, ADR-007). Both have the same columns."""
+    one published (the public, ADR-007; a withdrawn one too, marked). Both have the columns the
+    trial rows read."""
     if published_only:
         return "checks.judgement_published"
     return "checks.judgement_current"
@@ -427,11 +428,15 @@ class JudgementRow:
     run_status: str
     # when the newest document version it read was published, as its source says
     latest_published_at: datetime | None
-    # staff published it and did not withdraw it: the public sees it (ADR-007)
+    # its run published it: the public sees it, withdrawn or not (ADR-007)
     published: bool
-    # set when a run published it by its measured confidence (checks/publishing.py), not a person
+    # how its kind compared with gold labels when it was published (checks/publishing.py)
     published_confidence: float | None
     published_basis: str | None
+    # staff withdrew it: when, who and why (it stays public, marked)
+    withdrawn_at: datetime | None
+    withdrawn_by: str | None
+    withdrawn_note: str | None
 
 
 _JUDGEMENT_ROWS = f"""
@@ -440,18 +445,19 @@ _JUDGEMENT_ROWS = f"""
            r.started_at, j.trial_record_id, j.document_versions, r.status AS run_status,
            (SELECT max(v.published_at) FROM core.document_version v WHERE v.id = ANY(j.document_versions))
                AS latest_published_at,
-           EXISTS (SELECT FROM checks.publication p WHERE p.run_id = j.run_id AND p.trial_id = j.trial_id
-                     AND p.withdrawn_at IS NULL) AS published,
-           pub.confidence AS published_confidence, pub.basis AS published_basis
+           pub.id IS NOT NULL AS published,
+           pub.confidence AS published_confidence, pub.basis AS published_basis,
+           pub.withdrawn_at, wa.name AS withdrawn_by, pub.note AS withdrawn_note
     FROM checks.judgement j
-    LEFT JOIN checks.publication pub ON pub.run_id = j.run_id AND pub.trial_id = j.trial_id AND pub.withdrawn_at IS NULL
+    -- its newest publication, withdrawn or not
+    LEFT JOIN LATERAL (SELECT p.* FROM checks.publication p WHERE p.run_id = j.run_id AND p.trial_id = j.trial_id
+                       ORDER BY p.id DESC LIMIT 1) pub ON true
+    LEFT JOIN core.actor wa ON wa.id = pub.withdrawn_by
     JOIN checks.run r ON r.id = j.run_id JOIN core.trial t ON t.id = j.trial_id
 """
-# Keeps only published judgements when %(published_only)s
+# Keeps only published judgements (withdrawn ones too: they stay public, marked) when %(published_only)s
 _PUBLISHED_FILTER = """
-      AND (NOT %(published_only)s OR EXISTS (SELECT FROM checks.publication p
-                                              WHERE p.run_id = j.run_id AND p.trial_id = j.trial_id
-                                                AND p.withdrawn_at IS NULL))
+      AND (NOT %(published_only)s OR pub.id IS NOT NULL)
 """
 
 
@@ -542,29 +548,95 @@ def coverage(conn: psycopg.Connection) -> list[tuple[str, int]]:
     ]
 
 
-def public_coverage(conn: psycopg.Connection, requirements: str) -> list[tuple[str, int]]:
-    """What the public's front page counts: trials, those with documents, and those with a published
-    judgement under this requirement set, by label (ADR-007)."""
-    row = conn.execute(
-        """
-        SELECT
-            (SELECT count(*) FROM core.trial WHERE merged_into IS NULL),
-            (SELECT count(DISTINCT l.trial_id) FROM core.trial_document l WHERE l.removed_at IS NULL),
-            (SELECT count(*) FROM checks.judgement_published WHERE requirements = %(set)s),
-            (SELECT count(*) FROM checks.judgement_published WHERE requirements = %(set)s AND label = 'full'),
-            (SELECT count(*) FROM checks.judgement_published WHERE requirements = %(set)s AND label = 'not full'),
-            (SELECT count(*) FROM checks.judgement_published WHERE requirements = %(set)s AND label = 'undecided')
-        """,
-        {"set": requirements},
-    ).fetchone()
-    return [
-        ("trials", row[0]),
-        ("with documents", row[1]),
-        ("with a published result", row[2]),
-        ("reported fully", row[3]),
-        ("not reported fully", row[4]),
-        ("undecided", row[5]),
-    ]
+# The results the public's home page filters on (ADR-007)
+PUBLIC_LABELS = ("full", "not full", "undecided")
+
+
+@dataclass(frozen=True)
+class PublishedTrialRow:
+    """A trial on the public's home page, with its newest published judgement (ADR-007)."""
+
+    id: int
+    name: str
+    title: str | None
+    sponsor: str | None
+    status: str | None
+    label: str
+    run_id: int
+    model: str
+    # when the run that judged it started, and when the judgement was published
+    checked_at: datetime
+    published_at: datetime
+    # its documents or record changed since it was judged
+    outdated: bool
+    # staff withdrew it, and why: it stays listed, marked
+    withdrawn_at: datetime | None
+    withdrawn_note: str | None
+
+
+_PUBLISHED_TRIALS = f"""
+    FROM core.trial t
+    JOIN checks.judgement_published jc ON jc.trial_id = t.id AND jc.requirements = %(requirements)s
+    LEFT JOIN LATERAL (SELECT {_LATEST_REGISTERED} AS r) reg ON true
+""" + _trial_filter() + """
+              AND (%(label)s::text IS NULL OR jc.label = %(label)s)
+              AND (%(status)s::text IS NULL OR reg.r->>'status' = %(status)s)
+              AND (%(checked_from)s::date IS NULL OR jc.started_at >= %(checked_from)s::date)
+              AND (%(checked_to)s::date IS NULL OR jc.started_at < %(checked_to)s::date + 1)
+"""
+
+
+@dataclass(frozen=True)
+class PublicFilter:
+    """What the public's home page filters on: `search` matches an identifier, the title or a sponsor;
+    `label` one result (PUBLIC_LABELS); `status` one registry status; the run started between
+    `checked_from` and `checked_to`, both days included."""
+
+    search: str | None = None
+    label: str | None = None
+    status: str | None = None
+    checked_from: date | None = None
+    checked_to: date | None = None
+
+    def params(self, requirements: str) -> dict:
+        return {"search": like_text(self.search), "evidence": None, "label": self.label, "status": self.status,
+                "checked_from": self.checked_from, "checked_to": self.checked_to, "requirements": requirements}
+
+
+def published_trial_rows(conn: psycopg.Connection, requirements: str, found: PublicFilter = PublicFilter(),
+                         offset: int = 0, limit: int | None = None) -> list[PublishedTrialRow]:
+    """Trials with a published judgement under this requirement set, the newest published first."""
+    params = found.params(requirements)
+    params.update({"offset": offset, "limit": limit})
+    with conn.cursor(row_factory=class_row(PublishedTrialRow)) as cur:
+        return cur.execute(
+            f"""SELECT t.id, {_NAME} AS name,
+                       coalesce(reg.r->>'public_title', reg.r->>'full_title', {_LISTED_TITLE}) AS title,
+                       (SELECT string_agg(o.name, ', ' ORDER BY s.is_primary DESC, o.name)
+                          FROM core.trial_sponsor s JOIN core.organisation o ON o.id = s.organisation_id
+                         WHERE s.trial_id = t.id AND s.removed_at IS NULL) AS sponsor,
+                       reg.r->>'status' AS status, jc.label, jc.run_id, jc.model,
+                       jc.started_at AS checked_at, jc.published_at, jc.outdated, jc.withdrawn_at, jc.withdrawn_note"""
+            + _PUBLISHED_TRIALS + " ORDER BY jc.published_at DESC, t.id DESC OFFSET %(offset)s LIMIT %(limit)s",
+            params,
+        ).fetchall()
+
+
+def published_trial_count(conn: psycopg.Connection, requirements: str, found: PublicFilter = PublicFilter()) -> int:
+    row = conn.execute("SELECT count(*)::int" + _PUBLISHED_TRIALS, found.params(requirements)).fetchone()
+    return row[0]
+
+
+def published_trial_statuses(conn: psycopg.Connection, requirements: str) -> list[str]:
+    """The registry statuses of the trials with a published judgement, for the home page's filter."""
+    rows = conn.execute(
+        "SELECT DISTINCT reg.r->>'status' AS status FROM core.trial t"
+        " JOIN checks.judgement_published jc ON jc.trial_id = t.id AND jc.requirements = %(requirements)s"
+        " LEFT JOIN LATERAL (SELECT " + _LATEST_REGISTERED + " AS r) reg ON true"
+        " WHERE t.merged_into IS NULL AND reg.r->>'status' IS NOT NULL ORDER BY 1",
+        {"requirements": requirements},
+    ).fetchall()
+    return [row[0] for row in rows]
 
 
 def process_actor_names(conn: psycopg.Connection) -> set[str]:
@@ -579,15 +651,15 @@ def process_actor_names(conn: psycopg.Connection) -> set[str]:
 
 def file_is_public(conn: psycopg.Connection, sha256: bytes) -> bool:
     """Whether the public may open this stored file (ADR-007): a version of a document a registry or
-    publications source gave, or a file a published judgement quotes. A file only a person uploaded
-    stays with staff until a published judgement cites it."""
+    publications source gave, or a file a published judgement quotes (withdrawn or not). A file only a
+    person uploaded stays with staff until a published judgement cites it."""
     row = conn.execute(
         """
         SELECT EXISTS (SELECT FROM core.document_version v JOIN core.document d ON d.id = v.document_id
                          JOIN core.source s ON s.id = d.source_id
                         WHERE v.file_sha256 = %(sha)s AND s.kind <> 'manual')
             OR EXISTS (SELECT FROM checks.evidence e JOIN checks.publication p
-                         ON p.run_id = e.run_id AND p.trial_id = e.trial_id AND p.withdrawn_at IS NULL
+                         ON p.run_id = e.run_id AND p.trial_id = e.trial_id
                         WHERE e.file_sha256 = %(sha)s)
         """,
         {"sha": sha256},
@@ -1028,31 +1100,4 @@ def trial_transfers(conn: psycopg.Connection, trial_id: int) -> list[TransferRow
             WHERE e.trial_id = %s ORDER BY s.id, e.source_key
             """,
             (trial_id,),
-        ).fetchall()
-
-
-@dataclass(frozen=True)
-class AwaitingRow:
-    run_id: int
-    trial_id: int
-    name: str
-    label: str
-    started_at: datetime
-    outdated: bool
-
-
-def awaiting_review(conn: psycopg.Connection, requirements: str, limit: int = 500) -> list[AwaitingRow]:
-    """Trials whose current judgement under the requirement set is not public: a person decides (ADR-007)."""
-    with conn.cursor(row_factory=class_row(AwaitingRow)) as cur:
-        return cur.execute(
-            f"""
-            SELECT jc.run_id, jc.trial_id, {_NAME} AS name, jc.label, jc.started_at, jc.outdated
-            FROM checks.judgement_current jc JOIN core.trial t ON t.id = jc.trial_id
-            WHERE jc.requirements = %s
-              AND NOT EXISTS (SELECT FROM checks.publication p WHERE p.run_id = jc.run_id
-                                AND p.trial_id = jc.trial_id AND p.withdrawn_at IS NULL)
-            ORDER BY jc.label = 'not full' DESC, jc.run_id DESC, name
-            LIMIT %s
-            """,
-            (requirements, limit),
         ).fetchall()

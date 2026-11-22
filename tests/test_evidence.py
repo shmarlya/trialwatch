@@ -217,8 +217,8 @@ def test_judgement_rests_on_verified_evidence(conn):
     status = conn.execute("SELECT status, prompt_text = %s, requirements, requirements_text = %s FROM checks.run "
                           "WHERE id = %s", (PROMPT.text, SET.text, summary.run_id)).fetchone()
     assert status == ("succeeded", True, "eu-ctr-results", True)
-    # no gold item measures this kind of judgement yet, so it waits for a person (checks/publishing.py)
-    assert summary.published == []
+    # published as the run finished, though no gold item measures this kind of judgement yet
+    assert len(summary.published) == 1
     kind = checks_db.judgement_kind(conn, summary.run_id, trial)
     assert (kind.label, kind.quotes_verified, kind.widened, kind.unanswered) == ("not full", True, False, False)
     # each question with the registered item it is about

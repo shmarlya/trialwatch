@@ -67,6 +67,9 @@ button.small, .button.small { padding: 3px var(--sp-2); font-size: var(--fs-sm);
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md);
          padding: var(--sp-4); box-shadow: var(--shadow-1); }
 .panel-title { margin: 0 0 var(--sp-2); font-size: var(--fs-base); }
+/* A big number or time at the top of a card, e.g. the home page's at-a-glance cards */
+.figure { margin: 0 0 var(--sp-1); font-size: var(--fs-lg); font-weight: 700; font-variant-numeric: tabular-nums; }
+.grid.glance { margin-bottom: var(--sp-4); grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
 .notice { margin-bottom: var(--sp-4); }
 
 /* --- Alert -------------------------------------------------------------------------------------- */
@@ -110,10 +113,17 @@ form.step { display: flex; flex-direction: column; gap: var(--sp-2); }
 form.step h3 { margin: 0; font-size: var(--fs-base); }
 form.step.wide { gap: 10px; }
 form.upload { margin-top: var(--sp-3); }
+form.inline { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 0; }
+form.inline select, form.inline input { width: auto; }
+.nowrap { white-space: nowrap; }
 form.search { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-2); max-width: 520px; }
+form.search.public-filter { flex-wrap: wrap; align-items: flex-end; max-width: none; }
+form.search.public-filter input[type=text] { flex: 1 1 240px; width: auto; }
+form.search.public-filter select { width: auto; }
+form.search.public-filter label { flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
 label { font-size: var(--fs-sm); color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
 label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--text); }
-input:not([type]), input[type=text], input[type=number], input[type=email], input[type=password], select, textarea {
+input:not([type]), input[type=text], input[type=number], input[type=date], input[type=email], input[type=password], select, textarea {
   font: inherit; font-size: 14px; padding: 6px var(--sp-2); border-radius: var(--radius-sm); border: 1px solid var(--line);
   background: var(--bg); color: var(--text); width: 100%; }
 input:focus-visible, select:focus-visible, textarea:focus-visible { border-color: var(--focus); }

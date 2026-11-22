@@ -1,15 +1,15 @@
-"""Which judgements a run publishes by itself, and which wait for a person (ADR-007).
+"""Publishing every judgement, with how far judgements of its kind agree with gold labels (ADR-007).
 
-A judgement's confidence is measured, not asked of the model: judgements of the same kind are compared
-with the gold datasets' labels, and the share that agreed is the confidence of every judgement of that
-kind. A kind is the exact check that made it (model, prompt text, requirement set) with its label and
-how its evidence came in: every quote verified or not, a question asked again with every page or not,
-a question left unanswered or not. A different prompt text or model starts a new kind with no
-measurement, so a changed check waits for people until gold shows it again.
+Everything is public: as a run finishes it publishes every judgement it made without an error, any
+label, however often its kind agreed with the gold datasets. Nothing waits for a person. What staff
+can still do is withdraw one with a reason, and a withdrawn judgement stays public, marked.
 
-At AUTO_PUBLISH_AT or above, with at least MIN_GOLD_ITEMS compared, a run publishes the judgement as it
-finishes, any label; the publication keeps the confidence and its basis. Below that, or for an
-"undecided" judgement, a moderator or admin decides on the trial page (/review lists them).
+What a publication records is a measurement, not a permission: a judgement's confidence is how often
+judgements of the same kind agreed with gold labels. A kind is the exact check that made it (model,
+prompt text, requirement set) with its label and how its evidence came in: every quote verified or
+not, a question asked again with every page or not, a question left unanswered or not. A different
+prompt text or model starts a new kind with no measurement. The confidence is recorded once at least
+MIN_GOLD_ITEMS were compared; the basis (how many agreed, of how many, from which datasets) always.
 
 Gold items are counted once per trial and check (the newest judgement of that trial by that model and
 prompt), and set aside when our judgement read a document posted on or after the day the dataset's
@@ -25,9 +25,7 @@ from trialwatch.db import core
 from trialwatch.db.checks import JudgementKind
 from trialwatch.gold import compare, datasets
 
-# A run publishes a judgement by itself from this share of agreeing gold items up
-AUTO_PUBLISH_AT = 0.90
-# ... and only once this many gold items of its kind were compared: fewer say too little
+# A confidence is recorded once this many gold items of a kind were compared: fewer say too little
 MIN_GOLD_ITEMS = 20
 
 
@@ -127,57 +125,48 @@ def calibrate(conn: psycopg.Connection, requirements: str) -> Calibration:
 
 
 @dataclass(frozen=True)
-class Decision:
+class Agreement:
+    """How a judgement's kind compared with gold labels."""
+
     kind: Kind
     agreed: int
     compared: int
     # the measured share, once at least MIN_GOLD_ITEMS were compared
     confidence: float | None
-    automatic: bool
     reason: str
 
 
-def decide(judgement: JudgementKind, calibration: Calibration) -> Decision:
-    """Whether a run may publish this judgement by itself, and why (or why a person must)."""
+def measure(judgement: JudgementKind, calibration: Calibration) -> Agreement:
+    """How often judgements of this one's kind agreed with gold labels, in words."""
     kind = kind_of(judgement)
     tally = calibration.tallies.get(kind, Tally())
-    confidence = None
-    if tally.compared >= MIN_GOLD_ITEMS:
-        confidence = tally.share
     measured = f"{tally.agreed} of {tally.compared} gold items agreed for judgements of this kind"
-    if kind.label not in ("full", "not full"):
-        return Decision(kind, tally.agreed, tally.compared, confidence, False,
-                        "undecided: the check left it to a person")
-    if confidence is None:
-        return Decision(kind, tally.agreed, tally.compared, None, False,
-                        f"{measured}; at least {MIN_GOLD_ITEMS} are needed to measure it")
-    if confidence < AUTO_PUBLISH_AT:
-        return Decision(kind, tally.agreed, tally.compared, confidence, False,
-                        f"{measured} ({confidence:.0%}), below {AUTO_PUBLISH_AT:.0%}")
-    return Decision(kind, tally.agreed, tally.compared, confidence, True,
-                    f"{measured} ({confidence:.0%}), at least {AUTO_PUBLISH_AT:.0%}")
+    if tally.compared < MIN_GOLD_ITEMS:
+        return Agreement(kind, tally.agreed, tally.compared, None,
+                         f"{measured}; at least {MIN_GOLD_ITEMS} are needed to measure it")
+    confidence = tally.share
+    return Agreement(kind, tally.agreed, tally.compared, confidence, f"{measured} ({confidence:.0%})")
 
 
-def basis_text(decision: Decision, calibration: Calibration) -> str:
-    """What a run's publication records as its reason."""
-    return f"{decision.reason}: {decision.kind.describe()}; gold {', '.join(calibration.datasets)}"
+def basis_text(agreement: Agreement, calibration: Calibration) -> str:
+    """What a run's publication records as how its kind compared with gold."""
+    datasets_used = ", ".join(calibration.datasets) or "none"
+    return f"{agreement.reason}: {agreement.kind.describe()}; gold {datasets_used}"
 
 
-def auto_publish(conn: psycopg.Connection, run_id: int) -> list[int]:
-    """Publish, as TrialWatch itself (not the person who started the run), the run's judgements whose kind agreed with gold labels at
-    least AUTO_PUBLISH_AT of the time; the others wait for a person. Returns the trials published."""
+def publish_run(conn: psycopg.Connection, run_id: int) -> list[int]:
+    """Publish, as TrialWatch itself (not the person who started the run), every judgement of the run
+    without an error, each with how its kind compared with gold labels. Returns the trials published."""
     judgements = checks_db.judgement_kinds_of_run(conn, run_id)
     if not judgements:
         return []
     calibration = calibrate(conn, judgements[0].requirements)
     published = []
     for judgement in judgements:
-        decision = decide(judgement, calibration)
-        if not decision.automatic:
-            continue
+        agreement = measure(judgement, calibration)
         with core.acting_as_system(conn):
-            done = checks_db.publish_judgement(conn, run_id, judgement.trial_id, confidence=decision.confidence,
-                                               basis=basis_text(decision, calibration))
+            done = checks_db.publish_judgement(conn, run_id, judgement.trial_id, confidence=agreement.confidence,
+                                               basis=basis_text(agreement, calibration))
         if done:
             published.append(judgement.trial_id)
     return published

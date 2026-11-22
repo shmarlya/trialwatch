@@ -968,11 +968,13 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
                              errors=len(summary.failed), input_tokens=summary.input_tokens,
                              output_tokens=summary.output_tokens, cache_write_tokens=summary.cache_write_tokens,
                              cache_read_tokens=summary.cache_read_tokens)
-    # judgements of a kind that agrees with gold labels often enough go public now; the rest wait for a person
-    summary.published = publishing.auto_publish(conn, run_id)
-    judged = 0
-    for count in summary.labels.values():
-        judged += count
-    report(progress, f"published {len(summary.published)} of {judged} judgements by their measured confidence "
-                     f"(at least {publishing.AUTO_PUBLISH_AT:.0%}); the rest wait for review at /review")
+        # every judgement it made goes public now, also when the run stopped part-way (ADR-007)
+        try:
+            summary.published = publishing.publish_run(conn, run_id)
+        except Exception:
+            if stop_error is None:
+                raise
+            # the run is already failing: its own error is the one to raise
+    report(progress, f"published {len(summary.published)} of {judged} judgements, each with how judgements "
+                     f"of its kind agreed with the gold datasets")
     return summary

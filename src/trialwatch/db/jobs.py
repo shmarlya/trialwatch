@@ -366,6 +366,8 @@ class Schedule:
     name: str
     kind: str
     params: dict
+    # daily | weekly | monthly (on the 1st); weekday counts only when weekly
+    frequency: str
     weekday: int
     hour_utc: int
     enabled: bool
@@ -376,7 +378,7 @@ class Schedule:
 
 
 _SCHEDULES = """
-    SELECT s.id, s.name, s.kind, s.params, s.weekday, s.hour_utc, s.enabled, s.next_run_at,
+    SELECT s.id, s.name, s.kind, s.params, s.frequency, s.weekday, s.hour_utc, s.enabled, s.next_run_at,
            last.id AS last_job_id, last.status AS last_job_status
       FROM jobs.schedule s
       LEFT JOIN LATERAL (SELECT id, status FROM jobs.job WHERE schedule_id = s.id ORDER BY id DESC LIMIT 1) last ON true
@@ -393,34 +395,76 @@ def schedule(conn: psycopg.Connection, schedule_id: int) -> Schedule | None:
         return cursor.execute(_SCHEDULES + " WHERE s.id = %s", (schedule_id,)).fetchone()
 
 
-# The next time a weekday (ISO, 1 Monday) and hour come round after now, UTC
+@dataclass(frozen=True)
+class ScheduleTimes:
+    """For the home page: the newest job a schedule started, and when the next one is due."""
+    last_name: str | None
+    last_started_at: datetime | None
+    last_finished_at: datetime | None
+    last_status: str | None
+    next_name: str | None
+    next_run_at: datetime | None
+
+
+def schedule_times(conn: psycopg.Connection) -> ScheduleTimes:
+    row = conn.execute(
+        """
+        SELECT last.name, last.started_at, last.finished_at, last.status, next.name, next.next_run_at
+          FROM (SELECT 1) one
+          LEFT JOIN LATERAL (SELECT s.name, j.started_at, j.finished_at, j.status
+                               FROM jobs.job j JOIN jobs.schedule s ON s.id = j.schedule_id
+                              ORDER BY j.id DESC LIMIT 1) last ON true
+          LEFT JOIN LATERAL (SELECT name, next_run_at FROM jobs.schedule
+                              WHERE enabled ORDER BY next_run_at LIMIT 1) next ON true
+        """
+    ).fetchone()
+    return ScheduleTimes(*row)
+
+
+FREQUENCIES = ("daily", "weekly", "monthly")
+
+# The next time the schedule's frequency, weekday (ISO, 1 Monday; weekly only) and hour come round after
+# now, UTC: today's, this week's or this month's time, or the one after it if that has passed
 _NEXT_TIME = """
-    (date_trunc('week', now() AT TIME ZONE 'UTC') + make_interval(days => %(weekday)s - 1, hours => %(hour)s)
-     + CASE WHEN date_trunc('week', now() AT TIME ZONE 'UTC') + make_interval(days => %(weekday)s - 1, hours => %(hour)s)
-                 <= now() AT TIME ZONE 'UTC'
-            THEN interval '7 days' ELSE interval '0' END) AT TIME ZONE 'UTC'
+    (SELECT (CASE WHEN base <= now() AT TIME ZONE 'UTC' THEN base + step ELSE base END) AT TIME ZONE 'UTC'
+       FROM (SELECT CASE %(frequency)s
+                      WHEN 'daily' THEN date_trunc('day', now() AT TIME ZONE 'UTC')
+                      WHEN 'monthly' THEN date_trunc('month', now() AT TIME ZONE 'UTC')
+                      ELSE date_trunc('week', now() AT TIME ZONE 'UTC') + make_interval(days => %(weekday)s - 1)
+                    END + make_interval(hours => %(hour)s) AS base,
+                    CASE %(frequency)s WHEN 'daily' THEN interval '1 day' WHEN 'monthly' THEN interval '1 month'
+                                       ELSE interval '7 days' END AS step) times)
 """
 
 
-def set_schedule(conn: psycopg.Connection, schedule_id: int, *, weekday: int, hour_utc: int, enabled: bool) -> None:
-    """Change when a schedule runs (its next time follows), or switch it on or off."""
+def set_schedule(conn: psycopg.Connection, schedule_id: int, *, frequency: str, weekday: int, hour_utc: int,
+                 enabled: bool) -> None:
+    """Change how often and when a schedule runs (its next time follows), or switch it on or off."""
     conn.execute(
-        f"UPDATE jobs.schedule SET weekday = %(weekday)s, hour_utc = %(hour)s, enabled = %(enabled)s, "
-        f"next_run_at = {_NEXT_TIME} WHERE id = %(id)s",
-        {"weekday": weekday, "hour": hour_utc, "enabled": enabled, "id": schedule_id},
+        f"UPDATE jobs.schedule SET frequency = %(frequency)s, weekday = %(weekday)s, hour_utc = %(hour)s, "
+        f"enabled = %(enabled)s, next_run_at = {_NEXT_TIME} WHERE id = %(id)s",
+        {"frequency": frequency, "weekday": weekday, "hour": hour_utc, "enabled": enabled, "id": schedule_id},
     )
 
 
+def switch_schedule(conn: psycopg.Connection, schedule_id: int, enabled: bool) -> None:
+    """Switch a schedule on (its next time counted from now) or off, keeping when it runs."""
+    row = conn.execute("SELECT frequency, weekday, hour_utc FROM jobs.schedule WHERE id = %s", (schedule_id,)).fetchone()
+    if row is None:
+        return
+    set_schedule(conn, schedule_id, frequency=row[0], weekday=row[1], hour_utc=row[2], enabled=enabled)
+
+
 def take_due_schedule(conn: psycopg.Connection) -> Schedule | None:
-    """A switched-on schedule whose time has come, its next time moved on a week, or None. Call it in a
-    transaction that also adds its job: the row stays locked until then, so two workers never both
-    start it."""
+    """A switched-on schedule whose time has come, its next time moved on by its frequency, or None. Call
+    it in a transaction that also adds its job: the row stays locked until then, so two workers never
+    both start it."""
     row = conn.execute(
-        "SELECT id, weekday, hour_utc FROM jobs.schedule WHERE enabled AND next_run_at <= now() "
+        "SELECT id, frequency, weekday, hour_utc FROM jobs.schedule WHERE enabled AND next_run_at <= now() "
         "ORDER BY next_run_at LIMIT 1 FOR UPDATE SKIP LOCKED"
     ).fetchone()
     if row is None:
         return None
     conn.execute(f"UPDATE jobs.schedule SET next_run_at = {_NEXT_TIME} WHERE id = %(id)s",
-                 {"weekday": row[1], "hour": row[2], "id": row[0]})
+                 {"frequency": row[1], "weekday": row[2], "hour": row[3], "id": row[0]})
     return schedule(conn, row[0])

@@ -9,10 +9,12 @@ the job page's polling of its own progress and small conveniences (scroll to a q
 trialwatch.db (db/overview.py for these pages).
 
 Who may do what is the action → role chart in trialwatch.auth.actions (ADR-006). Anyone not signed in
-sees only the home page (what TrialWatch is, and counts of what is published) and the sign-in page;
-every other page and every action needs a signed-in admin or moderator whose role the chart allows.
-Pages that once also served the public (ADR-007) still decide once with staff_view() what to load, so
-opening them to the public again is a change to the chart, not to the pages. Each route that
+sees the home page (what TrialWatch is, the trials with a published result with filters, the last and
+next scheduled run, and the money spent on model calls), the sign-in page, and what "view.published"
+opens: a trial with a published judgement and its whole trace, that run, the prompts, the requirement
+sets and the files a registry gave or a published judgement quotes (ADR-007). Every other page and
+every action needs a signed-in admin or moderator whose role the chart allows. Those pages decide once
+with staff_view() what to load (only published data for the public). Each route that
 changes something names its action (`Depends(Requires(...))`), and its writes are recorded as the
 signed-in person. It also answers only requests addressed to this machine's names (a web page can't
 reach it through a domain name pointing here) and takes form posts only from its own pages (a web
@@ -235,7 +237,8 @@ def signed_in(request: Request) -> auth_db.User | None:
 class Requires:
     """A route's guard: `Depends(Requires("trial.create"))`. The user must be signed in and their role
     must allow one of the actions (a route whose action depends on its form, such as POST /jobs, names
-    them all and checks the exact one itself). Gives the signed-in user."""
+    them all and checks the exact one itself). Gives the signed-in user, or None for someone not signed
+    in when the chart gives one of the actions to the public."""
 
     def __init__(self, *names: str) -> None:
         for name in names:
@@ -243,9 +246,13 @@ class Requires:
             actions.action_named(name)
         self.names = names
 
-    def __call__(self, request: Request) -> auth_db.User:
+    def __call__(self, request: Request) -> auth_db.User | None:
         user = signed_in(request)
         if user is None:
+            # an action the chart gives the public needs no sign-in; the user is then None
+            for name in self.names:
+                if actions.allowed(None, name):
+                    return None
             raise SignInNeeded()
         for name in self.names:
             if actions.allowed(user.role, name):
@@ -610,13 +617,32 @@ def call_view(data: dict) -> CallView:
 # --- workflow and jobs ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, error: str | None = None) -> HTMLResponse:
+def dashboard(request: Request, error: str | None = None, q: str = "", result: str = "", status: str = "",
+              checked_from: str = "", checked_to: str = "", page: int = 1) -> HTMLResponse:
     defaults = default_settings()
     if not staff_view(request):
-        # the public's front page: counts of what is published, nothing of the workflow
+        # the public's front page: the trials with a published result (ADR-007), nothing of the workflow
+        page = max(page, 1)
         with db.connect_system() as conn:
-            coverage = overview.public_coverage(conn, defaults.requirements)
-        return TEMPLATES.TemplateResponse(request, "dashboard.html", {"coverage": coverage, "defaults": defaults})
+            statuses = overview.published_trial_statuses(conn, defaults.requirements)
+            found = overview.PublicFilter(
+                search=q.strip() or None,
+                label=result if result in overview.PUBLIC_LABELS else None,
+                status=status if status in statuses else None,
+                checked_from=_day(checked_from), checked_to=_day(checked_to))
+            total = overview.published_trial_count(conn, defaults.requirements, found)
+            rows = overview.published_trial_rows(conn, defaults.requirements, found,
+                                                 offset=(page - 1) * TRIALS_PER_PAGE, limit=TRIALS_PER_PAGE)
+            times = jobs_db.schedule_times(conn)
+            spend = costs_db.spend_totals(conn)
+        shown = {"q": q, "result": found.label or "", "status": found.status or "",
+                 "checked_from": found.checked_from.isoformat() if found.checked_from else "",
+                 "checked_to": found.checked_to.isoformat() if found.checked_to else ""}
+        context = {"rows": rows, "shown": shown, "results": overview.PUBLIC_LABELS, "statuses": statuses,
+                   "filtered": found != overview.PublicFilter(),
+                   "total": total, "page": page, "pages": max(1, -(-total // TRIALS_PER_PAGE)),
+                   "defaults": defaults, "times": times, "spend": spend}
+        return TEMPLATES.TemplateResponse(request, "dashboard.html", context)
     with db.connect_system() as conn:
         coverage = overview.coverage(conn)
         runs = overview.runs(conn)
@@ -626,11 +652,21 @@ def dashboard(request: Request, error: str | None = None) -> HTMLResponse:
         sources = overview.source_rows(conn)
         recent = jobs_db.recent_jobs(conn, 15)
         job_costs = jobs_db.job_costs(conn, _ids_of(recent))
-    context = {"sources": sources, "coverage": coverage, "runs": runs[:10], "jobs": recent, "job_costs": job_costs,
+        times = jobs_db.schedule_times(conn)
+        spend = costs_db.spend_totals(conn)
+    context = {"times": times, "spend": spend, "sources": sources, "coverage": coverage, "runs": runs[:10], "jobs": recent, "job_costs": job_costs,
                "running": _running(),
                "steps": STEPS, "error": error, "defaults": defaults,
                "choices": choices, "configs": check_settings.load_all()}
     return TEMPLATES.TemplateResponse(request, "dashboard.html", context)
+
+
+def _day(text: str) -> date | None:
+    """A YYYY-MM-DD day from a form, or None (empty or not a day: the filter is then not applied)."""
+    try:
+        return date.fromisoformat(text.strip())
+    except ValueError:
+        return None
 
 
 def _redirect_back(back: str, message: str) -> RedirectResponse:
@@ -834,7 +870,7 @@ def jobs_page(request: Request, tab: str = "attention", error: str | None = None
         tab_counts[name] = total
     context = {"tab": tab, "tabs": JOB_TABS, "tab_counts": tab_counts, "jobs": found, "costs": costs,
                "schedules": schedules, "steps": STEPS, "error": error, "dollars": dollars,
-               "weekdays": WEEKDAYS}
+               "weekdays": WEEKDAYS, "frequencies": jobs_db.FREQUENCIES}
     return TEMPLATES.TemplateResponse(request, "admin_jobs.html", context)
 
 
@@ -843,15 +879,29 @@ WEEKDAYS = ("", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturda
 
 @app.post("/admin/schedules/{schedule_id}")
 def edit_schedule(schedule_id: int, weekday: Annotated[int, Form()], hour_utc: Annotated[int, Form()],
-                  enabled: Annotated[bool, Form()] = False,
+                  frequency: Annotated[str, Form()] = "weekly", enabled: Annotated[bool, Form()] = False,
                   user: auth_db.User = Depends(Requires("schedule.edit"))) -> Response:
-    if weekday < 1 or weekday > 7 or hour_utc < 0 or hour_utc > 23:
-        return RedirectResponse(f"/admin/jobs?error={url_quote('a day from Monday to Sunday and an hour 0-23')}",
-                                status_code=303)
+    """Change how often (daily, weekly, monthly) and when a schedule runs, and whether it is on."""
+    if frequency not in jobs_db.FREQUENCIES or weekday < 1 or weekday > 7 or hour_utc < 0 or hour_utc > 23:
+        message = "daily, weekly or monthly, a day from Monday to Sunday and an hour 0-23"
+        return RedirectResponse(f"/admin/jobs?error={url_quote(message)}", status_code=303)
     with db.connect(actor=user.email) as conn:
         if jobs_db.schedule(conn, schedule_id) is None:
             raise HTTPException(404, "no such schedule")
-        jobs_db.set_schedule(conn, schedule_id, weekday=weekday, hour_utc=hour_utc, enabled=enabled)
+        jobs_db.set_schedule(conn, schedule_id, frequency=frequency, weekday=weekday, hour_utc=hour_utc,
+                             enabled=enabled)
+    return RedirectResponse("/admin/jobs#schedules", status_code=303)
+
+
+@app.post("/admin/schedules/{schedule_id}/switch")
+def switch_schedule(schedule_id: int, enabled: Annotated[bool, Form()] = False,
+                    user: auth_db.User = Depends(Requires("schedule.edit"))) -> Response:
+    """Start or stop a schedule, keeping how often and when it runs. Stopping it does not stop a job it
+    already started: that job has its own Stop on its page."""
+    with db.connect(actor=user.email) as conn:
+        if jobs_db.schedule(conn, schedule_id) is None:
+            raise HTTPException(404, "no such schedule")
+        jobs_db.switch_schedule(conn, schedule_id, enabled)
     return RedirectResponse("/admin/jobs#schedules", status_code=303)
 
 
@@ -1058,48 +1108,18 @@ def remove_sponsor(trial_id: int, organisation_id: int,
     return RedirectResponse(f"/trials/{trial_id}#sponsors", status_code=303)
 
 
-@app.post("/trials/{trial_id}/judgements/{run_id}/publish")
-def publish_judgement(trial_id: int, run_id: int,
-                      user: auth_db.User = Depends(Requires("judgement.publish"))) -> Response:
-    """Make this judgement public (ADR-007): the public then sees its label, answers and quotes."""
-    try:
-        with db.connect(actor=user.email) as conn:
-            checks_db.publish_judgement(conn, run_id, trial_id)
-    except psycopg.Error as exc:  # no such judgement, an error, a run still running
-        return RedirectResponse(f"/trials/{trial_id}?run={run_id}&error={url_quote(_short_error(exc))}", status_code=303)
-    return RedirectResponse(f"/trials/{trial_id}?run={run_id}", status_code=303)
-
-
 @app.post("/trials/{trial_id}/judgements/{run_id}/withdraw")
 def withdraw_judgement(trial_id: int, run_id: int, note: Annotated[str, Form()] = "",
-                       user: auth_db.User = Depends(Requires("judgement.publish"))) -> Response:
-    """Take a published judgement back from the public; its publication is kept, marked withdrawn."""
+                       user: auth_db.User = Depends(Requires("judgement.withdraw"))) -> Response:
+    """Withdraw a published judgement, with a reason (ADR-007): it stays public, marked withdrawn with
+    the reason, and the publication is kept."""
+    reason = _or_none(note)
+    if reason is None:
+        message = "say why it is withdrawn: the public sees the reason"
+        return RedirectResponse(f"/trials/{trial_id}?run={run_id}&error={url_quote(message)}", status_code=303)
     with db.connect(actor=user.email) as conn:
-        checks_db.withdraw_publication(conn, run_id, trial_id, _or_none(note))
+        checks_db.withdraw_publication(conn, run_id, trial_id, reason)
     return RedirectResponse(f"/trials/{trial_id}?run={run_id}", status_code=303)
-
-
-@app.get("/review", response_class=HTMLResponse)
-def review_page(request: Request, user: auth_db.User = Depends(Requires("view.internal"))) -> HTMLResponse:
-    """What waits for a person (ADR-007): current judgements no run published, each with its measured
-    confidence and why it was not published by itself; and how each kind of judgement did on gold."""
-    requirements = default_settings().requirements
-    rows = []
-    with db.connect_system() as conn:
-        calibration = publishing.calibrate(conn, requirements)
-        for row in overview.awaiting_review(conn, requirements):
-            kind = checks_db.judgement_kind(conn, row.run_id, row.trial_id)
-            decision = None
-            if kind is not None:
-                decision = publishing.decide(kind, calibration)
-            rows.append((row, decision))
-    kinds = []
-    for kind, tally in calibration.tallies.items():
-        kinds.append((kind, tally))
-    kinds.sort(key=lambda pair: -pair[1].compared)
-    context = {"rows": rows, "kinds": kinds, "calibration": calibration, "requirements": requirements,
-               "auto_publish_at": publishing.AUTO_PUBLISH_AT, "min_gold_items": publishing.MIN_GOLD_ITEMS}
-    return TEMPLATES.TemplateResponse(request, "review.html", context)
 
 
 @app.get("/sponsors", response_class=HTMLResponse)
@@ -1127,17 +1147,19 @@ def sponsor_page(request: Request, organisation_id: int,
 
 @app.get("/trials/{trial_id}", response_class=HTMLResponse)
 def trial_page(request: Request, trial_id: int, run: int | None = None, error: str | None = None,
-               user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
+               user: auth_db.User | None = Depends(Requires("view.published"))) -> HTMLResponse:
     staff = staff_view(request)
     with db.connect_system() as conn:
         row = overview.trial_row(conn, trial_id, default_settings().requirements, published_only=not staff)
         if row is None:
             raise HTTPException(404, f"no trial {trial_id}")
+        # the public sees only published judgements, each with its whole trace, and only trials that have one
+        judgements = overview.trial_judgements(conn, trial_id, published_only=not staff)
+        if not staff and not judgements:
+            raise HTTPException(404, f"no published result for trial {trial_id}")
         registered = overview.trial_registered(conn, trial_id)
         identifiers = overview.trial_identifiers(conn, trial_id)
         documents = overview.trial_documents(conn, trial_id)
-        # the public sees only published judgements, with their answers and quotes but no trace
-        judgements = overview.trial_judgements(conn, trial_id, published_only=not staff)
         history = overview.trial_history(conn, trial_id)
         sponsors = overview.trial_sponsors(conn, trial_id)
         sources = []
@@ -1161,15 +1183,15 @@ def trial_page(request: Request, trial_id: int, run: int | None = None, error: s
         steps = []
         prompt_text = None
         prompt_params = {}
-        decision = None
+        agreement = None
         if chosen is not None:
             questions = overview.run_questions(conn, chosen.run_id, trial_id)
-            if staff:
-                steps = overview.run_steps(conn, chosen.run_id, trial_id)
-                prompt_text, prompt_params = overview.run_prompt(conn, chosen.run_id)
-                kind = checks_db.judgement_kind(conn, chosen.run_id, trial_id)
-                if kind is not None:
-                    decision = publishing.decide(kind, publishing.calibrate(conn, kind.requirements))
+            steps = overview.run_steps(conn, chosen.run_id, trial_id)
+            prompt_text, prompt_params = overview.run_prompt(conn, chosen.run_id)
+            # how judgements of its kind agree with gold labels now: shown to everyone
+            kind = checks_db.judgement_kind(conn, chosen.run_id, trial_id)
+            if kind is not None:
+                agreement = publishing.measure(kind, publishing.calibrate(conn, kind.requirements))
     calls = {}
     for step in steps:
         if step.name == "call":
@@ -1185,8 +1207,7 @@ def trial_page(request: Request, trial_id: int, run: int | None = None, error: s
         "defaults": default_settings(), "running": _running(), "error": error, "transfers": transfers,
         "ready": trial_id not in blocked, "not_ready": blocked.get(trial_id), "transferable": _transferable(transfers),
         "kinds": kinds, "configs": check_settings.load_all(), "judgement_config": judgement_config,
-        "gold_items": gold_items, "sponsors": sponsors, "decision": decision,
-        "auto_publish_at": publishing.AUTO_PUBLISH_AT,
+        "gold_items": gold_items, "sponsors": sponsors, "agreement": agreement,
     }
     return TEMPLATES.TemplateResponse(request, "trial.html", context)
 
@@ -1309,7 +1330,7 @@ def save_source_config(code: str, config: Annotated[str, Form()], enabled: Annot
 
 @app.get("/files/{sha_hex}", response_class=HTMLResponse)
 def file_page(request: Request, sha_hex: str, page: int | None = None, quote: str | None = None,
-              user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
+              user: auth_db.User | None = Depends(Requires("view.published"))) -> HTMLResponse:
     """The page text of one stored file, as retrieval and quote checks see it, with a quote marked."""
     sha = _file_hash(sha_hex)
     with db.connect_system() as conn:
@@ -1330,7 +1351,7 @@ def file_page(request: Request, sha_hex: str, page: int | None = None, quote: st
 
 @app.get("/files/{sha_hex}/raw")
 def file_raw(request: Request, sha_hex: str,
-             user: auth_db.User = Depends(Requires("view"))) -> Response:
+             user: auth_db.User | None = Depends(Requires("view.published"))) -> Response:
     """The stored bytes, to open the document itself in the browser."""
     sha = _file_hash(sha_hex)
     with db.connect_system() as conn:
@@ -1354,7 +1375,7 @@ def file_raw(request: Request, sha_hex: str,
 
 @app.get("/prompts", response_class=HTMLResponse)
 def prompts_page(request: Request, show: str | None = None,
-                 user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
+                 user: auth_db.User | None = Depends(Requires("view.published"))) -> HTMLResponse:
     """Every prompt file as it is now, and every prompt text check runs used (an edited file is a
     different text: the runs keep the one they sent)."""
     with db.connect_system() as conn:
@@ -1376,7 +1397,7 @@ def prompts_page(request: Request, show: str | None = None,
 
 @app.get("/requirements", response_class=HTMLResponse)
 def requirements_page(request: Request, show: str | None = None,
-                      user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
+                      user: auth_db.User | None = Depends(Requires("view.published"))) -> HTMLResponse:
     """Every requirement set as it is now: what a trial must report and how "enough" is decided."""
     sets = []
     for name in requirement_sets.set_names():
@@ -1390,14 +1411,17 @@ def requirements_page(request: Request, show: str | None = None,
 
 @app.get("/runs/{run_id}", response_class=HTMLResponse)
 def run_page(request: Request, run_id: int,
-             user: auth_db.User = Depends(Requires("view"))) -> HTMLResponse:
+             user: auth_db.User | None = Depends(Requires("view.published"))) -> HTMLResponse:
     with db.connect_system() as conn:
         run = overview.run_row(conn, run_id)
         if run is None:
             raise HTTPException(404, f"no run {run_id}")
         prompt_text, params = overview.run_prompt(conn, run_id)
-        # the run's setup is public; its judgements only once published, and its tallies only for staff
+        # the run's setup is public; its judgements only once published, and its tallies only for staff;
+        # the public opens only a run with a published judgement
         judgements = overview.run_judgements(conn, run_id, published_only=not staff_view(request))
+        if not judgements and not staff_view(request):
+            raise HTTPException(404, f"no run {run_id}")
     context = {"run": run, "prompt_text": prompt_text, "params": params, "judgements": judgements}
     return TEMPLATES.TemplateResponse(request, "run.html", context)
 

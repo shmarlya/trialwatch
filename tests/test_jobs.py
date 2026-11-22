@@ -351,12 +351,7 @@ def test_a_run_publishes_by_itself_as_trialwatch(conn, monkeypatch):
                  (run_id, trial))
     conn.execute("UPDATE checks.run SET status = 'succeeded', finished_at = now() WHERE id = %s", (run_id,))
     person = core.current_actor(conn)
-
-    def always_publish(judgement, calibration):
-        return publishing.Decision(publishing.kind_of(judgement), 20, 20, 1.0, True, "test")
-
-    monkeypatch.setattr(publishing, "decide", always_publish)
-    assert publishing.auto_publish(conn, run_id) == [trial]
+    assert publishing.publish_run(conn, run_id) == [trial]
     published_by = conn.execute("SELECT published_by FROM checks.publication WHERE run_id = %s", (run_id,)).fetchone()
     assert published_by == (db.SYSTEM_ACTOR_ID,)
     # the session writes as before afterwards
@@ -393,11 +388,11 @@ def test_staff_see_jobs_spend_and_costs_and_the_public_does_not(app_conn, fake_w
     bad = admin_client.post("/admin/spend/cap", data={"cap": "lots"}, follow_redirects=False)
     assert "not%20an%20amount" in bad.headers["location"]
     schedule_id = jobs_db.schedules(app_conn)[0].id
-    moved = admin_client.post(f"/admin/schedules/{schedule_id}", data={"weekday": "3", "hour_utc": "5", "enabled": "true"},
-                              follow_redirects=False)
+    moved = admin_client.post(f"/admin/schedules/{schedule_id}", follow_redirects=False,
+                              data={"frequency": "weekly", "weekday": "3", "hour_utc": "5", "enabled": "true"})
     assert moved.status_code == 303
     schedule = jobs_db.schedule(app_conn, schedule_id)
-    assert (schedule.weekday, schedule.hour_utc, schedule.enabled) == (3, 5, True)
+    assert (schedule.frequency, schedule.weekday, schedule.hour_utc, schedule.enabled) == ("weekly", 3, 5, True)
     assert schedule.next_run_at.isoweekday() == 3 and schedule.next_run_at.hour == 5
     assert admin_client.get("/").status_code == 200
     assert "$0.0001" in admin_client.get(f"/runs/{run_id}").text
@@ -405,3 +400,64 @@ def test_staff_see_jobs_spend_and_costs_and_the_public_does_not(app_conn, fake_w
     public = TestClient(web.app)
     assert "$0.0001" not in public.get(f"/runs/{run_id}").text
     assert public.get("/admin/spend").status_code == 401 and public.get("/admin/jobs").status_code == 401
+
+
+# --- schedules -----------------------------------------------------------------------------------
+
+def test_schedules_start_switched_off(app_conn):
+    """A fresh database never starts paid work by itself: an admin switches a schedule on."""
+    assert [s.enabled for s in jobs_db.schedules(app_conn)] == [False]
+    assert jobs_db.take_due_schedule(app_conn) is None
+
+
+def test_a_schedule_runs_daily_weekly_or_monthly(app_conn):
+    core.act_as(app_conn, "test-person")
+    schedule_id = jobs_db.schedules(app_conn)[0].id
+    now = app_conn.execute("SELECT now()").fetchone()[0]
+    jobs_db.set_schedule(app_conn, schedule_id, frequency="daily", weekday=1, hour_utc=4, enabled=True)
+    daily = jobs_db.schedule(app_conn, schedule_id).next_run_at
+    assert daily.hour == 4 and timedelta(0) < daily - now <= timedelta(days=1)
+    jobs_db.set_schedule(app_conn, schedule_id, frequency="weekly", weekday=5, hour_utc=4, enabled=True)
+    weekly = jobs_db.schedule(app_conn, schedule_id).next_run_at
+    assert weekly.isoweekday() == 5 and timedelta(0) < weekly - now <= timedelta(days=7)
+    jobs_db.set_schedule(app_conn, schedule_id, frequency="monthly", weekday=5, hour_utc=4, enabled=True)
+    monthly = jobs_db.schedule(app_conn, schedule_id).next_run_at
+    assert (monthly.day, monthly.hour) == (1, 4) and timedelta(0) < monthly - now <= timedelta(days=31)
+    # when it comes due, the next time moves on by its frequency
+    app_conn.execute("UPDATE jobs.schedule SET frequency = 'daily', next_run_at = now() - interval '1 minute'")
+    due = jobs_db.take_due_schedule(app_conn)
+    assert due is not None and timedelta(0) < due.next_run_at - now <= timedelta(days=1)
+
+
+def test_an_admin_starts_stops_and_reschedules_a_schedule(app_conn, admin_client):
+    schedule_id = jobs_db.schedules(app_conn)[0].id
+    page = admin_client.get("/admin/jobs").text
+    assert "Start</button>" in page and 'name="frequency"' in page
+    assert admin_client.post(f"/admin/schedules/{schedule_id}/switch", data={"enabled": "true"},
+                             follow_redirects=False).status_code == 303
+    assert jobs_db.schedule(app_conn, schedule_id).enabled
+    assert "Stop</button>" in admin_client.get("/admin/jobs").text
+    admin_client.post(f"/admin/schedules/{schedule_id}", data={"frequency": "daily", "weekday": "1", "hour_utc": "6",
+                                                               "enabled": "true"})
+    schedule = jobs_db.schedule(app_conn, schedule_id)
+    assert (schedule.frequency, schedule.hour_utc, schedule.enabled) == ("daily", 6, True)
+    assert "every day at 06:00" in admin_client.get("/admin/jobs").text
+    bad = admin_client.post(f"/admin/schedules/{schedule_id}", follow_redirects=False,
+                            data={"frequency": "hourly", "weekday": "1", "hour_utc": "6"})
+    assert "error=" in bad.headers["location"]
+    admin_client.post(f"/admin/schedules/{schedule_id}/switch")
+    schedule = jobs_db.schedule(app_conn, schedule_id)
+    assert not schedule.enabled and schedule.frequency == "daily"
+
+
+def test_only_admins_change_schedules(app_conn):
+    from conftest import signed_in_client
+    from fastapi.testclient import TestClient
+
+    from trialwatch.web import app as web
+
+    schedule_id = jobs_db.schedules(app_conn)[0].id
+    moderator = signed_in_client(app_conn, "moderator")
+    assert moderator.post(f"/admin/schedules/{schedule_id}/switch", data={"enabled": "true"}).status_code == 403
+    assert TestClient(web.app).post(f"/admin/schedules/{schedule_id}/switch").status_code == 401
+    assert not jobs_db.schedule(app_conn, schedule_id).enabled

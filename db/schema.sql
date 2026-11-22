@@ -482,7 +482,6 @@ CREATE TABLE checks.publication (
     note text,
     confidence real,
     basis text,
-    CONSTRAINT publication_check CHECK (((confidence IS NULL) = (basis IS NULL))),
     CONSTRAINT publication_check1 CHECK (((withdrawn_at IS NULL) = (withdrawn_by IS NULL))),
     CONSTRAINT publication_confidence_check CHECK (((confidence >= (0)::double precision) AND (confidence <= (1)::double precision)))
 );
@@ -492,7 +491,28 @@ CREATE TABLE checks.publication (
 -- Name: TABLE publication; Type: COMMENT; Schema: checks; Owner: -
 --
 
-COMMENT ON TABLE checks.publication IS 'judgements staff made public (ADR-007); withdrawn ones are kept';
+COMMENT ON TABLE checks.publication IS 'every finished judgement without an error, published by its run (ADR-007); withdrawn ones stay, marked';
+
+
+--
+-- Name: COLUMN publication.note; Type: COMMENT; Schema: checks; Owner: -
+--
+
+COMMENT ON COLUMN checks.publication.note IS 'why staff withdrew it: shown to the public';
+
+
+--
+-- Name: COLUMN publication.confidence; Type: COMMENT; Schema: checks; Owner: -
+--
+
+COMMENT ON COLUMN checks.publication.confidence IS 'share of gold items judgements of its kind agreed with, once enough were compared (checks/publishing.py); NULL: not measured';
+
+
+--
+-- Name: COLUMN publication.basis; Type: COMMENT; Schema: checks; Owner: -
+--
+
+COMMENT ON COLUMN checks.publication.basis IS 'how its kind compared with gold labels when it was published';
 
 
 --
@@ -522,12 +542,13 @@ CREATE VIEW checks.judgement_published AS
              JOIN core.document_current d ON ((d.id = l.document_id)))
           WHERE ((l.trial_id = j.trial_id) AND (l.removed_at IS NULL) AND (NOT (d.version_id = ANY (j.document_versions))) AND (d.kind IN ( SELECT jsonb_array_elements_text(((r.requirements_text)::jsonb -> 'document_kinds'::text)) AS jsonb_array_elements_text))))) OR (EXISTS ( SELECT
            FROM core.trial_record_current c
-          WHERE ((c.trial_id = j.trial_id) AND (c.id IS DISTINCT FROM j.trial_record_id) AND (c.fetched_at > r.started_at))))) AS outdated
+          WHERE ((c.trial_id = j.trial_id) AND (c.id IS DISTINCT FROM j.trial_record_id) AND (c.fetched_at > r.started_at))))) AS outdated,
+    p.withdrawn_at,
+    p.note AS withdrawn_note
    FROM ((checks.publication p
      JOIN checks.judgement j ON (((j.run_id = p.run_id) AND (j.trial_id = p.trial_id))))
      JOIN checks.run r ON ((r.id = j.run_id)))
-  WHERE (p.withdrawn_at IS NULL)
-  ORDER BY j.trial_id, r.requirements, j.run_id DESC;
+  ORDER BY j.trial_id, r.requirements, j.run_id DESC, p.id DESC;
 
 
 --
@@ -1177,12 +1198,28 @@ CREATE TABLE jobs.schedule (
     params jsonb DEFAULT '{}'::jsonb NOT NULL,
     weekday smallint NOT NULL,
     hour_utc smallint NOT NULL,
-    enabled boolean DEFAULT true NOT NULL,
+    enabled boolean DEFAULT false NOT NULL,
     next_run_at timestamp with time zone NOT NULL,
+    frequency text DEFAULT 'weekly'::text NOT NULL,
+    CONSTRAINT schedule_frequency_check CHECK ((frequency = ANY (ARRAY['daily'::text, 'weekly'::text, 'monthly'::text]))),
     CONSTRAINT schedule_hour_utc_check CHECK (((hour_utc >= 0) AND (hour_utc <= 23))),
     CONSTRAINT schedule_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text]))),
     CONSTRAINT schedule_weekday_check CHECK (((weekday >= 1) AND (weekday <= 7)))
 );
+
+
+--
+-- Name: COLUMN schedule.weekday; Type: COMMENT; Schema: jobs; Owner: -
+--
+
+COMMENT ON COLUMN jobs.schedule.weekday IS 'ISO day of the week (1 Monday .. 7 Sunday); used when weekly';
+
+
+--
+-- Name: COLUMN schedule.frequency; Type: COMMENT; Schema: jobs; Owner: -
+--
+
+COMMENT ON COLUMN jobs.schedule.frequency IS 'daily | weekly | monthly (on the 1st)';
 
 
 --
@@ -2563,4 +2600,6 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261121220000'),
     ('20261122100000'),
     ('20261122110000'),
-    ('20261122120000');
+    ('20261122120000'),
+    ('20261122130000'),
+    ('20261122140000');

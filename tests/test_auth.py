@@ -22,10 +22,11 @@ OPEN_POSTS = ("/login", "/logout")
 
 # --- the chart -----------------------------------------------------------------------------------
 
-def test_the_chart_gives_the_public_nothing():
-    """Anyone not signed in sees only the home page and the sign-in page, which need no action."""
+def test_the_chart_gives_the_public_only_published_results():
+    """Anyone not signed in sees the home page, the sign-in page and what view.published opens: a trial
+    with a published judgement and how its evidence was collected. Nothing else."""
     for action in actions.ACTIONS:
-        assert not actions.allowed(None, action.name), action.name
+        assert actions.allowed(None, action.name) == (action.name == "view.published"), action.name
 
 
 def test_an_admin_may_do_everything_and_a_moderator_curates():
@@ -147,14 +148,17 @@ def post_as(client, path, data=None):
     return client.post(path, data=data, follow_redirects=False)
 
 
-def test_the_public_sees_only_the_home_page_and_may_not_act(app_conn):
+def test_the_public_sees_only_published_results_and_may_not_act(app_conn):
     trial_id = listed_only(app_conn)
     client = TestClient(web.app)
     for path in ("/", "/login"):
         assert client.get(path).status_code == 200, path
-    for path in ("/trials", f"/trials/{trial_id}", "/sponsors", "/prompts", "/requirements", "/sources",
-                 "/sources/ctis", "/gold"):
+    for path in ("/trials", "/sponsors", "/sources", "/sources/ctis", "/gold"):
         assert client.get(path).status_code == 401, path
+    # a trial without a published result is not there for the public
+    assert client.get(f"/trials/{trial_id}").status_code == 404
+    for path in ("/prompts", "/requirements"):
+        assert client.get(path).status_code == 200, path
     # a browser is sent to sign in, and back to the page afterwards
     page = client.get("/trials/new", headers={"accept": "text/html"}, follow_redirects=False)
     assert (page.status_code, page.headers["location"]) == (303, "/login?next=/trials/new")
@@ -163,7 +167,7 @@ def test_the_public_sees_only_the_home_page_and_may_not_act(app_conn):
                        (f"/trials/{trial_id}/sponsors", {"name": "x"}), ("/sources", {"adapter": "manual"}),
                        ("/sources/ctis/config", {"config": "{}"}), ("/jobs/1/stop", None),
                        ("/admin/users", {"email": "x", "password": "y", "role": "admin"}),
-                       (f"/trials/{trial_id}/judgements/1/publish", None)):
+                       (f"/trials/{trial_id}/judgements/1/withdraw", {"note": "x"})):
         assert post_as(client, path, data).status_code == 401, path
     assert client.get("/jobs/1/progress").status_code == 401
     assert client.get("/admin/roles").status_code == 401

@@ -57,7 +57,7 @@
     {{ nav("/prompts", "Prompts") }}
     {{ nav("/requirements", "Requirements") }}
     {% endif %}
-    {% if can("view.internal") %}{{ nav("/review", "Review") }}{{ nav("/gold", "Gold") }}{% endif %}
+    {% if can("view.internal") %}{{ nav("/gold", "Gold") }}{% endif %}
     {% if can("job.view") %}{{ nav("/admin/jobs", "Jobs") }}{% endif %}
     {% if can("spend.view") %}{{ nav("/admin/spend", "Spend") }}{% endif %}
     {% if can("user.manage") %}{{ nav("/admin/users", "Users") }}{% endif %}

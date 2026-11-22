@@ -27,6 +27,7 @@ from trialwatch.sources.ctis_client import CT_NUMBER, SEARCH_LIMIT, CtisClient, 
 from trialwatch.hashing import json_hash, storable
 from trialwatch.db import core
 from trialwatch.db.core import Identifier, Listed
+from trialwatch.sources import profile
 from trialwatch.sources.registry import Adapter, Fetched, ListingPage
 
 SOURCE = "ctis"
@@ -270,6 +271,425 @@ def locations(payload: dict) -> list[core.Location]:
     return found
 
 
+# --- a trial's profile, for patient search (ADR-008) --------------------------------------------
+
+# CTIS's phase codes (its public search's option list, the same codes its records hold) and labels,
+# kept as CTIS spells them, with the plain phase each one is (profile.PHASES)
+PHASE_CODES = {
+    1: ("1", "Human Pharmacology (Phase I)- First administration to humans"),
+    2: ("1", "Human Pharmacology (Phase I)- Bioequivalence Study"),
+    3: ("1", "Human Pharmacology (Phase I)- Other"),
+    4: ("2", "Therapeutic exploratory (Phase II)"),
+    5: ("3", "Therapeutic confirmatory (Phase III)"),
+    6: ("4", "Therapeutic use (Phase IV)"),
+    7: ("1-2", "Phase I and Phase II (Integrated)- First administration to humans"),
+    8: ("1-2", "Phase I and Phase II (Integrated)- Bioequivalence Study"),
+    9: ("1-2", "Phase I and Phase II (Integrated)- Other"),
+    10: ("2-3", "Phase II and Phase III (Integrated)"),
+    11: ("3-4", "Phase III and phase IV (Integrated)"),
+}
+# CTIS's age range categories (populationOfTrialSubjects.ageRanges[].ageRangeCategoryCode)
+AGE_RANGE_CODES = {1: "in-utero", 2: "0-17", 3: "18-64", 4: "65+"}
+# The status texts of a member state's part of a trial (mscInfo.trialStatus) that mean it recruits now
+RECRUITING_TEXTS = ("authorised, recruiting", "ongoing, recruiting")
+# CTIS names a translation's language in English, sometimes with its country ("French (France)")
+LANGUAGES = {
+    "bulgarian": "bg", "croatian": "hr", "czech": "cs", "danish": "da", "dutch": "nl", "english": "en",
+    "estonian": "et", "finnish": "fi", "french": "fr", "german": "de", "greek": "el", "hungarian": "hu",
+    "icelandic": "is", "irish": "ga", "italian": "it", "latvian": "lv", "lithuanian": "lt", "maltese": "mt",
+    "norwegian": "no", "polish": "pl", "portuguese": "pt", "romanian": "ro", "slovak": "sk", "slovenian": "sl",
+    "slovene": "sl", "spanish": "es", "swedish": "sv",
+}
+# A MeSH tree branch in a CTIS therapeutic area's name, e.g. "Diseases [C] - Neoplasms [C04]"
+MESH_BRANCH = re.compile(r"\[([A-Z]\d{2})\]\s*$")
+MEDDRA_CODE = re.compile(r"\d{8}")
+
+
+def _same_words(text: str | None) -> str | None:
+    """The text lower-cased with its spaces collapsed, for comparing labels CTIS spells with stray spaces."""
+    if text is None:
+        return None
+    return " ".join(text.lower().split())
+
+
+def _language(description: object) -> str | None:
+    """ISO 639-1 code of a language CTIS names, e.g. "French (France)" or "'Danish"."""
+    text = _text(description)
+    if text is None:
+        return None
+    first_word = re.sub(r"[^a-z]", "", text.lower().split("(")[0])
+    if first_word in LANGUAGES:
+        return LANGUAGES[first_word]
+    return None
+
+
+def _translations(node: dict, field: str) -> tuple[profile.Text, ...]:
+    """The translations CTIS gives of a text field (its `<field>Translations` list), in languages we know."""
+    found = []
+    for item in _list(node.get(f"{field}Translations")):
+        text = _text(item.get("attributeTranslation"))
+        language = _language(item.get("languageDescription"))
+        if text is None or language is None:
+            continue
+        translation = profile.Text(" ".join(text.split()), language)
+        if translation not in found:
+            found.append(translation)
+    return tuple(found)
+
+
+def _flag(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _profile_conditions(trial_information: object, part_one: object) -> tuple[profile.Condition, ...]:
+    listed = _list(_get(trial_information, "medicalCondition", "partIMedicalConditions"))
+    if not listed:
+        listed = _list(_get(part_one, "medicalConditions"))
+    found = []
+    for item in listed:
+        name = _text(item.get("medicalCondition"))
+        if name is None:
+            continue
+        condition = profile.Condition(" ".join(name.split()), _translations(item, "medicalCondition"),
+                                      _flag(item.get("isConditionRareDisease")))
+        if condition not in found:
+            found.append(condition)
+    return tuple(found)
+
+
+def _coded_terms(trial_information: object) -> tuple[profile.CodedTerm, ...]:
+    """The MedDRA terms CTIS publishes for the trial's conditions."""
+    found = []
+    for item in _list(_get(trial_information, "medicalCondition", "meddraConditionTerms")):
+        code = _text(item.get("classificationCode"))
+        name = _text(item.get("termName"))
+        if code is None or name is None:
+            continue
+        group = _text(item.get("organClass"))
+        # only a real MedDRA code is a group; CTIS sometimes puts an internal id there
+        if group is not None and not MEDDRA_CODE.fullmatch(group):
+            group = None
+        term = profile.CodedTerm("meddra", code, name, _text(item.get("level")), group)
+        if term not in found:
+            found.append(term)
+    return tuple(found)
+
+
+def _area(label: str) -> profile.Area:
+    match = MESH_BRANCH.search(label)
+    if match is None:
+        return profile.Area(None, label)
+    return profile.Area(match.group(1), label)
+
+
+def _areas(part_one: object, listing: dict) -> tuple[profile.Area, ...]:
+    labels = []
+    for item in _list(_get(part_one, "therapeuticAreas")):
+        labels.append(_text(item.get("name")))
+    if not labels:
+        for item in _list(_get(part_one, "partOneTherapeuticAreas")):
+            labels.append(_text(_get(item, "therapeuticArea", "name")))
+    if not labels and isinstance(listing.get("therapeuticAreas"), list):
+        for item in listing["therapeuticAreas"]:
+            labels.append(_text(item))
+    found = []
+    for label in labels:
+        if label is None:
+            continue
+        area = _area(" ".join(label.split()))
+        if area not in found:
+            found.append(area)
+    return tuple(found)
+
+
+def _phase(trial_information: object, listing: dict) -> tuple[str | None, str | None]:
+    """(plain phase, CTIS's label): from the list's label when it gives one, else from the record's code."""
+    by_label = {}
+    for phase, label in PHASE_CODES.values():
+        by_label[_same_words(label)] = (phase, label)
+    listed_label = _same_words(_text(listing.get("trialPhase")))
+    if listed_label in by_label:
+        return by_label[listed_label]
+    code = _status_code(_get(trial_information, "trialCategory", "trialPhase"))
+    if code in PHASE_CODES:
+        return PHASE_CODES[code]
+    return None, _text(listing.get("trialPhase"))
+
+
+def _criteria(trial_information: object, kind: str) -> tuple[profile.Criterion, ...]:
+    """The principal inclusion or exclusion criteria ("Inclusion", "Exclusion") as registered, in their order."""
+    field = f"principal{kind}Criteria"
+    items = _list(_get(trial_information, "eligibilityCriteria", field))
+    numbered = []
+    for position, item in enumerate(items):
+        number = item.get("number")
+        if not isinstance(number, int) or isinstance(number, bool):
+            number = position + 1
+        numbered.append((number, position, item))
+    numbered.sort()
+    found = []
+    for _number, _position, item in numbered:
+        text = _text(item.get(field))
+        if text is None:
+            continue
+        found.append(profile.Criterion(text, _translations(item, field)))
+    return tuple(found)
+
+
+def _age_groups(population: object, listing: dict) -> tuple[str, ...]:
+    found = []
+    for item in _list(_get(population, "ageRanges")):
+        code = _status_code(item.get("ageRangeCategoryCode"))
+        if code in AGE_RANGE_CODES and AGE_RANGE_CODES[code] not in found:
+            found.append(AGE_RANGE_CODES[code])
+    if not found:
+        listed = _same_words(_text(listing.get("ageGroup")))
+        if listed is not None:
+            for group in profile.AGE_GROUPS:
+                words = group
+                if group == "in-utero":
+                    words = "in utero"
+                if words in listed:
+                    found.append(group)
+    ordered = []
+    for group in profile.AGE_GROUPS:
+        if group in found:
+            ordered.append(group)
+    return tuple(ordered)
+
+
+def _sexes(population: object, listing: dict) -> tuple[bool | None, bool | None]:
+    female = _flag(_get(population, "isFemaleSubjects"))
+    male = _flag(_get(population, "isMaleSubjects"))
+    if female is None and male is None:
+        listed = _same_words(_text(listing.get("gender")))
+        if listed is not None:
+            words = listed.replace(",", " ").split()
+            female = "female" in words
+            male = "male" in words
+    return female, male
+
+
+def _groups(population: object) -> tuple[bool | None, bool | None]:
+    """(healthy volunteers, patients): whether the trial takes them, None when the record doesn't say."""
+    names = []
+    for item in _list(_get(population, "clinicalTrialGroups")):
+        name = _same_words(_text(item.get("name")))
+        if name is not None:
+            names.append(name)
+    if not names:
+        return None, None
+    healthy = False
+    patients = False
+    for name in names:
+        if "healthy" in name:
+            healthy = True
+        if "patient" in name:
+            patients = True
+    return healthy, patients
+
+
+def _substances(product: dict) -> tuple[str, ...]:
+    found = []
+    dictionary = _get(product, "productDictionaryInfo")
+    names = []
+    for substance in _list(_get(dictionary, "productSubstances")):
+        names.append(_text(substance.get("actSubstName")))
+    names.append(_text(_get(dictionary, "activeSubstanceName")))
+    listed = product.get("jsonActiveSubstanceNames")
+    if isinstance(listed, list):
+        for name in listed:
+            names.append(_text(name))
+    else:
+        names.append(_text(listed))
+    for name in names:
+        if name is None or name == "-":
+            continue
+        if name.lower() not in found:
+            found.append(name.lower())
+    return tuple(found)
+
+
+def _product(item: dict, role: str | None) -> profile.Product:
+    dictionary = _get(item, "productDictionaryInfo")
+    atc_code = _text(_get(dictionary, "atcCode"))
+    if atc_code == "-":
+        atc_code = None
+    atc_name = _text(_get(dictionary, "atcName"))
+    if atc_name == "-":
+        atc_name = None
+    routes = []
+    for route in _list_of_text(item.get("routes")):
+        if route not in routes:
+            routes.append(route)
+    origins = []
+    for substance in _list(_get(dictionary, "productSubstances")):
+        origin = _text(substance.get("actSubstOrigin"))
+        if origin is not None and origin != "-" and origin not in origins:
+            origins.append(origin)
+    name = _text(item.get("productName"))
+    if name is None:
+        name = _text(_get(dictionary, "prodName"))
+    return profile.Product(
+        name=name, role=role, substances=_substances(item), atc_code=atc_code, atc_name=atc_name,
+        form=_text(_get(dictionary, "pharmForm")), routes=tuple(routes), origins=tuple(origins),
+        orphan=_flag(item.get("orphanDrugEdit")),
+    )
+
+
+def _list_of_text(value: object) -> list[str]:
+    found = []
+    if not isinstance(value, list):
+        return found
+    for item in value:
+        text = _text(item)
+        if text is not None:
+            found.append(text)
+    return found
+
+
+def _products(part_one: object) -> tuple[profile.Product, ...]:
+    """What the trial tests and gives: each product with its role (test, comparator, placebo, auxiliary)."""
+    found = []
+    for group in _list(_get(part_one, "productRoleGroupInfos")):
+        role = _text(group.get("productRoleName"))
+        if role is not None:
+            role = role.lower()
+        for item in _list(group.get("products")):
+            product = _product(item, role)
+            if product not in found:
+                found.append(product)
+    if found:
+        return tuple(found)
+    for item in _list(_get(part_one, "products")):
+        product = _product(item, None)
+        if product not in found:
+            found.append(product)
+    return tuple(found)
+
+
+def _listed_country_codes(listing: dict) -> dict[str, int]:
+    """Country -> status code from the list's trialCountries ("France:4")."""
+    found = {}
+    listed = listing.get("trialCountries")
+    if not isinstance(listed, list):
+        return found
+    for item in listed:
+        text = _text(item)
+        if text is None or ":" not in text:
+            continue
+        country, code_text = text.rsplit(":", 1)
+        code = _status_code(code_text)
+        if code is not None and country.strip():
+            found[country.strip()] = code
+    return found
+
+
+def _recruiting_text(status: str | None) -> bool | None:
+    if status is None:
+        return None
+    return _same_words(status) in RECRUITING_TEXTS
+
+
+def _countries(application: object, listing: dict) -> tuple[profile.CountryStatus, ...]:
+    """Each member state with the trial's status there, recruitment dates, and whether it recruits now:
+    the list's code first (it is re-read every sync), else the record's."""
+    listed_codes = _listed_country_codes(listing)
+    record_codes = {}
+    for msc in _list(_get(application, "memberStatesConcerned")):
+        name = _text(msc.get("mscName"))
+        code = _status_code(msc.get("mscPublicStatusCode"))
+        if name is not None and code is not None:
+            record_codes[name] = code
+    found = []
+    seen = []
+    for part in _list(_get(application, "authorizedPartsII")):
+        msc = _get(part, "mscInfo")
+        country = _text(_get(msc, "countryName"))
+        if country is None:
+            country = _text(_get(msc, "mscName"))
+        if country is None or country in seen:
+            continue
+        seen.append(country)
+        status = _text(_get(msc, "trialStatus"))
+        period = _get(msc, "activeTrialRecruitmentPeriod")
+        found.append(profile.CountryStatus(
+            country=country, status=status, recruiting=_country_recruiting(country, status, listed_codes, record_codes),
+            recruitment_start=_text(_get(period, "recruitmentStartDate")),
+            recruitment_end=_text(_get(period, "recruitmentEndDate")),
+        ))
+    others = []
+    for name in record_codes:
+        others.append(name)
+    for name in listed_codes:
+        others.append(name)
+    for country in others:
+        if country in seen:
+            continue
+        seen.append(country)
+        found.append(profile.CountryStatus(country=country,
+                                           recruiting=_country_recruiting(country, None, listed_codes, record_codes)))
+    return tuple(found)
+
+
+def _country_recruiting(country: str, status: str | None, listed_codes: dict[str, int],
+                        record_codes: dict[str, int]) -> bool | None:
+    if country in listed_codes:
+        return listed_codes[country] in RECRUITING_CODES
+    if country in record_codes:
+        return record_codes[country] in RECRUITING_CODES
+    return _recruiting_text(status)
+
+
+def _overall_recruiting(payload: dict, listing: dict, countries: tuple[profile.CountryStatus, ...]) -> bool:
+    listed = listing_recruiting(listing)
+    if listed is not None:
+        return listed
+    code = _status_code(payload.get("ctPublicStatusCode"))
+    if code is not None:
+        return code in RECRUITING_CODES
+    for country in countries:
+        if country.recruiting is True:
+            return True
+    return False
+
+
+def trial_profile(payload: dict, listing: dict | None = None) -> profile.TrialProfile:
+    """The trial's profile from its CTIS record, with its row of CTIS's list where we have it (fresher
+    status, and labels the record holds only as codes). No people."""
+    if listing is None:
+        listing = {}
+    application = _get(payload, "authorizedApplication")
+    part_one = _get(application, "authorizedPartI")
+    details = _get(part_one, "trialDetails")
+    information = _get(details, "trialInformation")
+    population = _get(information, "populationOfTrialSubjects")
+    identifiers_node = _get(details, "clinicalTrialIdentifiers")
+    if not isinstance(identifiers_node, dict):
+        identifiers_node = {}
+    phase, phase_label = _phase(information, listing)
+    female, male = _sexes(population, listing)
+    healthy, patients = _groups(population)
+    countries = _countries(application, listing)
+    low_intervention = _flag(_get(information, "trialCategory", "isLowIntervention"))
+    if low_intervention is None:
+        low_intervention = _flag(_get(part_one, "isLowIntervention"))
+    status = _text(payload.get("ctStatus"))
+    return profile.TrialProfile(
+        public_title=_text(identifiers_node.get("publicTitle")), full_title=_text(identifiers_node.get("fullTitle")),
+        title_translations=_translations(identifiers_node, "publicTitle"), status=status,
+        recruiting=_overall_recruiting(payload, listing, countries),
+        conditions=_profile_conditions(information, part_one), coded_terms=_coded_terms(information),
+        areas=_areas(part_one, listing), phase=phase, phase_label=phase_label, low_intervention=low_intervention,
+        main_objective=_text(_get(information, "trialObjective", "mainObjective")),
+        inclusion=_criteria(information, "Inclusion"), exclusion=_criteria(information, "Exclusion"),
+        age_groups=_age_groups(population, listing), female=female, male=male, healthy_volunteers=healthy,
+        patients=patients, products=_products(part_one), countries=countries,
+    )
+
+
 def registered(payload: dict) -> dict:
     """The registered information checks ask about, in the shape every adapter fills."""
     trial_details = _get(payload, "authorizedApplication", "authorizedPartI", "trialDetails")
@@ -340,6 +760,34 @@ def document_kind(entry: dict) -> str:
 
 # --- the adapter (ADR-005) --------------------------------------------------------------------
 
+# CTIS's overall trial status codes (its public search's option list, not documented by EMA; checked
+# against the labels of its CSV export): 1 Under evaluation, 2 Authorised, recruitment pending,
+# 3 Authorised, recruiting, 4 Ongoing, recruiting, 5 Ongoing, recruitment ended, 6 Temporarily halted,
+# 7 Suspended, 8 Ended, 9 Expired, 10 Revoked, 11 Not authorised, 12 Cancelled
+RECRUITING_CODES = (3, 4)
+
+
+def _status_code(value: object) -> int | None:
+    """A status code as CTIS gives it (a number, or a number in text), or None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = _text(value)
+    if text is None or not text.isdigit():
+        return None
+    return int(text)
+
+
+def listing_recruiting(row: dict) -> bool | None:
+    """Whether CTIS's list calls the trial recruiting now (overall status 3 or 4); None when the row has
+    no status we can read."""
+    code = _status_code(row.get("ctStatus"))
+    if code is None:
+        return None
+    return code in RECRUITING_CODES
+
+
 def listed(row: dict) -> Listed:
     """One row of CTIS's public list as a listed trial."""
     ct_number = str(row.get("ctNumber", "")).strip()
@@ -349,7 +797,8 @@ def listed(row: dict) -> Listed:
     if title is not None:
         title = " ".join(title.split())
     return Listed(key=ct_number, title=title, identifiers=[Identifier("eu-ct", ct_number)],
-                  updated_on=_day(row.get("lastUpdated")), summary=storable(row))
+                  updated_on=_day(row.get("lastUpdated")), summary=storable(row),
+                  recruiting=listing_recruiting(row))
 
 
 def _day(value: object) -> date | None:
@@ -489,6 +938,12 @@ class CtisAdapter(Adapter):
     def locations(self, payload: dict) -> list[core.Location]:
         return locations(payload)
 
+    def profile(self, payload: dict, listing: dict | None) -> profile.TrialProfile | None:
+        return trial_profile(payload, listing)
+
+    def public_url(self, key: str) -> str | None:
+        return f"https://euclinicaltrials.eu/search-for-clinical-trials/?lang=en&EUCT={key}"
+
     def fetch(self, conn: psycopg.Connection, source: str, key: str, config: dict,
               files_dir: Path | None = None) -> Fetched:
         """The trial's record (a new version if it changed), its sponsors, and every listed document
@@ -514,6 +969,11 @@ class CtisAdapter(Adapter):
             core.set_trial_locations(conn, saved.trial_id, source, locations(payload))
         except Exception as exc:  # where it runs is not evidence either
             fetched.warnings["locations"] = f"{type(exc).__name__}: {exc}"
+        try:
+            listing = core.listing_summary(conn, source, key)
+            profile.store(conn, saved.trial_id, source, key, trial_profile(payload, listing))
+        except Exception as exc:  # nor is what patient search reads
+            fetched.warnings["profile"] = f"{type(exc).__name__}: {exc}"
         entries = payload.get("documents")
         if not isinstance(entries, list):
             # a record without its list of documents says nothing about them: nothing is unlinked

@@ -34,7 +34,9 @@ SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache"}
 # A file name with one of these extensions, optionally with directories: sources/ctis.py, db/migrations/*.sql
 FILE_REF = re.compile(r"(?<![\w.~/*-])((?:[\w.-]+/)*[\w*-][\w.*-]*\.(?:md|py|sql|ya?ml|toml|sh|excalidraw|json))(?![\w/])")
 # Not inside a file path: db/core.py is a file, core.trial a table
-TABLE_REF = re.compile(r"(?<![/\w.])((?:core|ctis|ref|gold|checks|public)\.\w+)")
+# (jobs.py and patient-search.svg are files, jobs.job a table)
+TABLE_REF = re.compile(r"(?<![/\w.-])((?:core|ctis|ref|gold|checks|public|jobs|geo|vocab|search)"
+                       r"\.(?!(?:py|md|sql|json|toml|ya?ml|sh|excalidraw|svg)\b)\w+)")
 NOTATION = {"ref.x"}  # external-apis: "ref.x = code decoded by that table"
 PLACEHOLDER = ("…", "<", "{", "NNN", "00n")
 # First line of every image render.mjs writes: the sha256 of the .excalidraw it was rendered from

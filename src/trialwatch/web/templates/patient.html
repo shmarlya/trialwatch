@@ -1,0 +1,141 @@
+{#- Patient search (ADR-008): what someone looking for a trial to join sees. Styles in static/components.css. -#}
+
+{# "women and men", "women only", "men only" #}
+{% macro sexes(female, male) -%}
+  {%- if female and male -%}women and men
+  {%- elif female -%}women only
+  {%- elif male -%}men only
+  {%- else -%}not said
+  {%- endif -%}
+{%- endmacro %}
+
+{# who a trial takes: patients, healthy volunteers, or both #}
+{% macro groups(patients, healthy) -%}
+  {%- if patients and healthy -%}patients and healthy volunteers
+  {%- elif healthy -%}healthy volunteers
+  {%- elif patients -%}patients
+  {%- else -%}not said
+  {%- endif -%}
+{%- endmacro %}
+
+{# Always on search and recruiting trial pages #}
+{% macro disclaimer() -%}
+  <p class="disclaimer small muted">This is not medical advice. Whether you can take part is decided by the trial's team, from
+  its full eligibility criteria: talk to your doctor and contact a trial site. A trial's status here is what the EU register
+  (CTIS) says, by country, and can be out of date: the date it was last updated is shown with each trial.</p>
+{%- endmacro %}
+
+{# The one search box (home page and /find) #}
+{% macro search_box(q="", autofocus=false) -%}
+  <form class="hero-search" method="get" action="/find" role="search">
+    <p id="find-hint" class="small muted">A condition and a place, e.g. <i>diabetes Paris</i>, <i>cancer du sein Lyon</i>, <i>healthy volunteers Berlin</i></p>
+    <div class="row">
+      <input id="find-q" type="search" name="q" value="{{ q }}" placeholder="Condition, place (any EU language)" maxlength="200"
+        aria-label="Condition and place" aria-describedby="find-hint"{% if autofocus %} autofocus{% endif %}>
+      <button>Find trials</button>
+    </div>
+  </form>
+{%- endmacro %}
+
+{# One search result #}
+{% macro trial_card(hit, url, km, phase_words, age_words) -%}
+  <article class="result-card">
+    <h3><a href="/trials/{{ hit.trial_id }}">{{ hit.title or "A clinical trial" }}</a></h3>
+    {% if hit.conditions %}<p class="conditions">{{ hit.conditions | join(" · ") }}</p>{% endif %}
+    <dl class="facts small">
+      <dt>Where</dt>
+      <dd>{% if hit.distance_km is not none %}{% if hit.precision != "postcode" and hit.distance_km < 3 %}<b>in {{ hit.site_city }}</b>{% else %}<b>{{ "%.0f" | format(hit.distance_km) }} km</b>{% if hit.precision != "postcode" %} <span class="muted">(about: placed by its city)</span>{% endif %}{% endif %}:
+        {{ hit.site or "a site" }}{% if hit.site_city %}, {{ hit.site_city }}{% endif %}{% if hit.sites_near and hit.sites_near > 1 %} · {{ hit.sites_near }} sites{% if km %} within {{ km }} km{% endif %}{% endif %}<br>{% endif %}
+        recruiting in {{ hit.recruiting_countries | join(", ") or "—" }}</dd>
+      <dt>Who can join</dt>
+      <dd>{% for group in hit.age_groups %}{{ age_words[group] }}{% if not loop.last %}, {% endif %}{% else %}ages not said{% endfor %}
+        · {{ sexes(hit.female, hit.male) }} · {{ groups(hit.patients, hit.healthy_volunteers) }}{% if hit.rare %} · <span class="badge info">rare disease</span>{% endif %}</dd>
+      {% if hit.phase %}<dt>Phase</dt><dd>{{ phase_words[hit.phase] or hit.phase }}</dd>{% endif %}
+      <dt>Updated</dt><dd>{% if hit.source_updated_on %}the register last changed it {{ hit.source_updated_on }}{% else %}—{% endif %}</dd>
+    </dl>
+    <p class="small card-links"><a href="/trials/{{ hit.trial_id }}">Who can join, and every site →</a>
+      {% if url %} · <a href="{{ url }}" rel="noreferrer noopener" target="_blank">{{ hit.source_key }} on the EU register ↗</a>{% endif %}</p>
+  </article>
+{%- endmacro %}
+
+{# The patient's view of one trial: who can join, what is tested, the criteria as registered, the
+   concepts search found in its conditions (with the words they were found in) #}
+{% macro patient_sections(patient) -%}
+  {% set read = patient.profile %}
+  <div class="grid patient">
+    <section class="panel">
+      <h3 class="panel-title">Who can join</h3>
+      <dl class="kv">
+        <dt>Condition</dt><dd>{% for condition in read.conditions %}{{ condition.name }}{% if condition.rare %} <span class="badge info">rare disease</span>{% endif %}{% if not loop.last %}<br>{% endif %}{% else %}—{% endfor %}</dd>
+        <dt>Ages</dt><dd>{{ patient.age_words | join(", ") or "not said" }}</dd>
+        <dt>Sex</dt><dd>{{ sexes(read.female, read.male) }}</dd>
+        <dt>Takes</dt><dd>{{ groups(read.patients, read.healthy_volunteers) }}</dd>
+      </dl>
+    </section>
+    <section class="panel">
+      <h3 class="panel-title">What is tested</h3>
+      <dl class="kv">
+        {% for product in read.products %}{% if product.role != "auxiliary" %}
+        <dt>{{ product.role or "product" }}</dt><dd>{{ product.name or "—" }}{% if product.substances %} <span class="small muted">({{ product.substances | join(", ") }})</span>{% endif %}{% if product.form or product.routes %}<br><span class="small muted">{{ product.form or "" }}{% if product.form and product.routes %} · {% endif %}{{ product.routes | join(", ") | lower }}</span>{% endif %}</dd>
+        {% endif %}{% else %}<dt>Products</dt><dd>—</dd>{% endfor %}
+        <dt>Phase</dt><dd>{{ patient.phase_words or read.phase_label or "—" }}</dd>
+        {% if read.low_intervention %}<dt>Kind</dt><dd>a low-intervention trial (medicines used as in usual care)</dd>{% endif %}
+      </dl>
+    </section>
+    <section class="panel">
+      <h3 class="panel-title">Status</h3>
+      <p>{% if patient.recruiting %}<span class="badge full">recruiting</span>{% else %}<span class="badge none">not recruiting now</span>{% endif %}
+        <span class="small muted">{{ read.status or "" }}</span></p>
+      <p class="small muted">{% if patient.updated_on %}The register last changed this trial {{ patient.updated_on }}.{% endif %}
+        {% if patient.source_url %}Site contacts are on <a href="{{ patient.source_url }}" rel="noreferrer noopener" target="_blank">its page in {{ patient.source_name }} ↗</a>.{% endif %}</p>
+    </section>
+  </div>
+  {% if read.main_objective %}<p class="small"><b>What it wants to find out:</b> {{ read.main_objective }}</p>{% endif %}
+  <details class="criteria">
+    <summary>Eligibility criteria as registered ({{ read.inclusion | length }} to take part, {{ read.exclusion | length }} that rule people out)</summary>
+    <div class="grid">
+      <div><h4>To take part</h4><ol class="small">{% for criterion in read.inclusion %}<li>{{ criterion.text }}</li>{% else %}<li class="muted">none registered</li>{% endfor %}</ol></div>
+      <div><h4>Not if</h4><ol class="small">{% for criterion in read.exclusion %}<li>{{ criterion.text }}</li>{% else %}<li class="muted">none registered</li>{% endfor %}</ol></div>
+    </div>
+  </details>
+  {% if patient.annotation %}{{ ai_tags(patient.annotation) }}{% endif %}
+  {% if patient.concepts %}
+  <details class="criteria">
+    <summary>How search finds it: the medical concepts in its conditions</summary>
+    <p class="small muted">Concepts of MeSH (U.S. National Library of Medicine) its conditions name, found without AI: each with the words of the registry it was found in.</p>
+    <ul class="small">{% for concept in patient.concepts %}<li><b>{{ concept.name }}</b> <span class="muted">({{ concept.ui }})</span>: “{{ concept.quote }}” <span class="muted">· {{ concept.field }} · {{ concept.method }}</span></li>{% endfor %}</ul>
+  </details>
+  {% endif %}
+{%- endmacro %}
+
+
+{# "AI · model · day": every tag a model made is marked so #}
+{% macro ai_badge(annotation) -%}
+  <span class="badge info" title="tagged by a model; its quote was checked against the registry">AI · {{ annotation.served_by or annotation.model }} · {{ annotation.created_at.strftime("%Y-%m-%d") }}</span>
+{%- endmacro %}
+
+{# One tag with the words of the registry it was found in #}
+{% macro quoted(text, tag) -%}
+  <li>{{ text }} <span class="muted">· “{{ tag.quote }}” ({{ tag.field }})</span></li>
+{%- endmacro %}
+
+{# The AI tags a trial's search uses, each with its checked quote #}
+{% macro ai_tags(annotation) -%}
+  {% set facts = annotation.facts %}
+  <details class="criteria">
+    <summary>What AI read in the registry {{ ai_badge(annotation) }}</summary>
+    <p class="small muted">A model tagged this trial from its registry fields so the search finds it by more names. Each tag
+      quotes the field it came from, and was kept only because that quote is in the field, word for word
+      (dropped for not being there: {{ annotation.dropped | length }}).
+      <a href="/prompts?show=annotate#annotate">The prompt it was given</a>.</p>
+    <ul class="small">
+      {% if facts.age_min %}{{ quoted("youngest: " ~ facts.age_min.value ~ " " ~ facts.age_min.unit, facts.age_min) }}{% endif %}
+      {% if facts.age_max %}{{ quoted("oldest: " ~ facts.age_max.value ~ " " ~ facts.age_max.unit, facts.age_max) }}{% endif %}
+      {% for tag in facts.interventions %}{{ quoted("tests: " ~ tag.kind | replace("-", " "), tag) }}{% endfor %}
+      {% for tag in facts.purposes %}{{ quoted("for: " ~ tag.purpose | replace("-", " "), tag) }}{% endfor %}
+      {% for tag in facts.categories %}{{ quoted("area: " ~ tag.category, tag) }}{% endfor %}
+      {% for tag in facts.concepts %}{{ quoted("MeSH: " ~ tag.name, tag) }}{% endfor %}
+    </ul>
+    {% if facts.synonyms %}<p class="small"><b>Also found as:</b> {% for tag in facts.synonyms %}{{ tag.term }} <span class="muted">({{ tag.language }})</span>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+  </details>
+{%- endmacro %}

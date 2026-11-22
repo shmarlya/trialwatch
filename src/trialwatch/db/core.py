@@ -760,7 +760,8 @@ def set_trial_locations(conn: psycopg.Connection, trial_id: int, source: str, lo
 
 
 def current_records(conn: psycopg.Connection, source: str) -> list[tuple[int, dict]]:
-    """(trial id, payload) of the newest record of each trial from this source."""
+    """(trial id, payload) of the newest record of each trial from this source. Every payload at once:
+    for a few trials; read many with current_records_page."""
     rows = conn.execute(
         "SELECT c.trial_id, c.payload FROM core.trial_record_current c WHERE c.source_id = %s ORDER BY c.trial_id",
         (source_id(conn, source),),
@@ -769,6 +770,95 @@ def current_records(conn: psycopg.Connection, source: str) -> list[tuple[int, di
     for trial_id, payload in rows:
         found.append((trial_id, payload))
     return found
+
+
+@dataclass(frozen=True)
+class StoredRecord:
+    """The newest record of a trial from a source, with the source's list row for it (when listed)."""
+
+    trial_id: int
+    source_key: str
+    payload: dict
+    listing: dict | None
+
+
+def current_records_page(conn: psycopg.Connection, source: str, after_trial_id: int, limit: int) -> list[StoredRecord]:
+    """The next `limit` trials' newest records from this source after `after_trial_id`, in trial order:
+    reading every stored record a page at a time (a payload can be a hundred kilobytes)."""
+    with conn.cursor(row_factory=class_row(StoredRecord)) as cur:
+        return cur.execute(
+            """
+            SELECT c.trial_id, c.source_key, c.payload, l.summary AS listing
+            FROM core.trial_record_current c
+            LEFT JOIN core.source_listing l ON l.source_id = c.source_id AND l.source_key = c.source_key
+            WHERE c.source_id = %s AND c.trial_id > %s
+            ORDER BY c.trial_id
+            LIMIT %s
+            """,
+            (source_id(conn, source), after_trial_id, limit),
+        ).fetchall()
+
+
+def listing_summary(conn: psycopg.Connection, source: str, source_key: str) -> dict | None:
+    """The source's list row for the trial (core.source_listing.summary), or None when it isn't listed."""
+    row = conn.execute(
+        "SELECT summary FROM core.source_listing WHERE source_id = %s AND source_key = %s",
+        (source_id(conn, source), source_key),
+    ).fetchone()
+    if row is None:
+        return None
+    return row[0]
+
+
+def set_trial_profile(conn: psycopg.Connection, *, trial_id: int, source: str, source_key: str, profile: dict,
+                      profile_hash: bytes, recruiting: bool) -> bool:
+    """Store the trial's profile from this source (ADR-008), read from its newest record from that
+    source key. Returns True when it is new or changed; the same profile again changes nothing."""
+    source_number = source_id(conn, source)
+    row = conn.execute(
+        """
+        INSERT INTO core.trial_profile (trial_id, source_id, trial_record_id, profile, profile_hash, recruiting,
+                                        created_by)
+        VALUES (%(trial)s, %(source)s,
+                (SELECT r.id FROM core.trial_record r WHERE r.source_id = %(source)s AND r.source_key = %(key)s
+                 ORDER BY r.fetched_at DESC, r.id DESC LIMIT 1),
+                %(profile)s, %(hash)s, %(recruiting)s, current_setting('trialwatch.actor')::bigint)
+        ON CONFLICT (trial_id, source_id) DO UPDATE SET
+            trial_record_id = EXCLUDED.trial_record_id, profile = EXCLUDED.profile,
+            profile_hash = EXCLUDED.profile_hash, recruiting = EXCLUDED.recruiting, read_at = clock_timestamp(),
+            created_by = EXCLUDED.created_by
+        WHERE core.trial_profile.profile_hash <> EXCLUDED.profile_hash
+        RETURNING trial_id
+        """,
+        {"trial": trial_id, "source": source_number, "key": source_key, "profile": Jsonb(profile),
+         "hash": profile_hash, "recruiting": recruiting},
+    ).fetchone()
+    return row is not None
+
+
+@dataclass(frozen=True)
+class StoredProfile:
+    trial_id: int
+    source: str
+    profile: dict
+    profile_hash: bytes
+    recruiting: bool
+    read_at: datetime
+
+
+def trial_profile(conn: psycopg.Connection, trial_id: int) -> StoredProfile | None:
+    """The trial's newest profile from any source (a trial most sources list once)."""
+    with conn.cursor(row_factory=class_row(StoredProfile)) as cur:
+        return cur.execute(
+            """
+            SELECT p.trial_id, s.code AS source, p.profile, p.profile_hash, p.recruiting, p.read_at
+            FROM core.trial_profile p JOIN core.source s ON s.id = p.source_id
+            WHERE p.trial_id = %s
+            ORDER BY p.read_at DESC
+            LIMIT 1
+            """,
+            (trial_id,),
+        ).fetchone()
 
 
 # --- data sources: the registry, their lists, evidence transfers (ADR-005) ---------------------
@@ -823,6 +913,8 @@ class Listed:
     identifiers: list[Identifier]
     updated_on: date | None  # the day the source last changed the trial
     summary: dict  # the list's row as given
+    # the list says the trial recruits now (None: it doesn't say); patient search keeps only these
+    recruiting: bool | None = None
 
 
 @dataclass
@@ -844,13 +936,16 @@ def save_listed(conn: psycopg.Connection, source: str, run_id: int, listed: List
         trial_id, new_trial, duplicates = _attach_trial(conn, source, source_number, listed.key, wanted)
         conn.execute(
             """
-            INSERT INTO core.source_listing (source_id, source_key, title, source_updated_on, summary, last_run)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO core.source_listing (source_id, source_key, title, source_updated_on, summary, last_run,
+                                             recruiting)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (source_id, source_key) DO UPDATE SET
                 title = EXCLUDED.title, source_updated_on = EXCLUDED.source_updated_on, summary = EXCLUDED.summary,
-                last_listed_at = clock_timestamp(), last_run = EXCLUDED.last_run, delisted_at = NULL
+                last_listed_at = clock_timestamp(), last_run = EXCLUDED.last_run, delisted_at = NULL,
+                recruiting = EXCLUDED.recruiting
             """,
-            (source_number, listed.key, listed.title, listed.updated_on, Jsonb(listed.summary), run_id),
+            (source_number, listed.key, listed.title, listed.updated_on, Jsonb(listed.summary), run_id,
+             listed.recruiting),
         )
     return SavedListing(trial_id, new_trial, duplicates)
 
@@ -930,23 +1025,38 @@ TRANSFER_CHOICES = {
     "pending": "listed, evidence not transferred yet",
     "failed": "the last transfer failed",
     "stale": "transferred, but the source changed the trial since",
+    "recruiting": "listed as recruiting now, and not transferred since it last changed",
     "listed": "every trial the source lists",
+}
+_TRANSFER_CONDITIONS = {
+    "pending": "e.listed AND e.delisted_at IS NULL AND e.status = 'not transferred'",
+    "failed": "e.status = 'failed'",
+    "stale": "e.status = 'stale'",
+    "recruiting": "e.listed AND e.delisted_at IS NULL AND e.recruiting AND e.status <> 'complete'",
+    "listed": "e.listed AND e.delisted_at IS NULL",
 }
 
 
 def keys_to_transfer(conn: psycopg.Connection, source: str, which: str) -> list[str]:
-    """The source keys of `which` trials (see TRANSFER_CHOICES), in key order."""
-    if which not in TRANSFER_CHOICES:
-        raise ValueError(f"choose one of {', '.join(TRANSFER_CHOICES)}")
-    conditions = {
-        "pending": "e.listed AND e.delisted_at IS NULL AND e.status = 'not transferred'",
-        "failed": "e.status = 'failed'",
-        "stale": "e.status = 'stale'",
-        "listed": "e.listed AND e.delisted_at IS NULL",
-    }
+    """The source keys of `which` trials (see TRANSFER_CHOICES): the ones the list calls recruiting
+    first (patient search, ADR-008), then the others, each in key order."""
+    return keys_to_transfer_any(conn, source, [which])
+
+
+def keys_to_transfer_any(conn: psycopg.Connection, source: str, choices: Sequence[str]) -> list[str]:
+    """The source keys of trials in any of these choices (see TRANSFER_CHOICES), each once: recruiting
+    ones first, then the others, each in key order."""
+    conditions = []
+    for which in choices:
+        if which not in TRANSFER_CHOICES:
+            raise ValueError(f"choose one of {', '.join(TRANSFER_CHOICES)}")
+        conditions.append(f"({_TRANSFER_CONDITIONS[which]})")
+    if not conditions:
+        return []
     rows = conn.execute(
         "SELECT e.source_key FROM core.evidence_status e JOIN core.source s ON s.id = e.source_id "
-        f"WHERE s.code = %s AND {conditions[which]} ORDER BY e.source_key",
+        f"WHERE s.code = %s AND ({' OR '.join(conditions)}) "
+        "ORDER BY e.recruiting IS TRUE DESC, e.source_key",
         (source,),
     ).fetchall()
     keys = []

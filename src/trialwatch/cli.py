@@ -11,9 +11,11 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 import psycopg
 import typer
 
+from trialwatch import costs as pricing
 from trialwatch import db
 from trialwatch.auth import accounts, actions, passwords
 from trialwatch.checks import evidence
@@ -22,11 +24,19 @@ from trialwatch.checks import settings as check_settings
 from trialwatch.checks.model import load_prompt
 from trialwatch.db import auth as auth_db
 from trialwatch.db import core as core_db
+from trialwatch.db import geo as geo_db
+from trialwatch.db import search as search_db
 from trialwatch.env import load_env_file
+from trialwatch.geo import geonames
+from trialwatch.geo import load as geo_loading
 from trialwatch.gold import bruckner, datasets
+from trialwatch.search import annotate as search_annotating
+from trialwatch.search import evaluate as search_evaluating
+from trialwatch.search import index as search_index
+from trialwatch.vocab import load as vocab_loading
 from trialwatch.gold import compare as gold_compare
 from trialwatch.gold import evaluate as gold_evaluate
-from trialwatch.sources import ctis, registry, snapshot, stages
+from trialwatch.sources import ctis, profile, registry, snapshot, stages
 from trialwatch.sources.ctis_client import CtisClient
 from trialwatch.sources.ctis_client import CT_NUMBER
 
@@ -41,6 +51,12 @@ user_app = typer.Typer(no_args_is_help=True, help="People who can sign in to the
 app.add_typer(user_app, name="user")
 jobs_app = typer.Typer(no_args_is_help=True, help="Queued jobs that `trialwatch worker` runs, and their retries.")
 app.add_typer(jobs_app, name="jobs")
+geo_app = typer.Typer(no_args_is_help=True, help="Places for patient search (ADR-008): GeoNames data, where each trial site is.")
+app.add_typer(geo_app, name="geo")
+vocab_app = typer.Typer(no_args_is_help=True, help="Medical vocabularies for patient search (ADR-008): MeSH.")
+app.add_typer(vocab_app, name="vocab")
+search_app = typer.Typer(no_args_is_help=True, help="Patient search (ADR-008): the index of recruiting trials, and searching it.")
+app.add_typer(search_app, name="search")
 
 # Calls go to Anthropic's API itself, whatever ANTHROPIC_BASE_URL a shell may set (e.g. a proxy)
 ANTHROPIC_API = "https://api.anthropic.com"
@@ -95,12 +111,15 @@ def web(
     `worker` service). Several workers are safe: each takes a different job."""
     import uvicorn
 
+    from trialwatch.web import privacy
+
     child = None
     if with_worker:
         child = start_worker()
         typer.echo(f"worker started (pid {child.pid}); it stops with the web server")
     try:
-        uvicorn.run("trialwatch.web.app:app", host=host, port=port, reload=reload)
+        # searches are private (ADR-008): access log lines leave out query strings
+        uvicorn.run("trialwatch.web.app:app", host=host, port=port, reload=reload, log_config=privacy.log_config())
     finally:
         if child is not None:
             stop_worker(child)
@@ -305,7 +324,7 @@ def source_transfer(
     from_file: Annotated[
         Path | None, typer.Option("--file", exists=True, dir_okay=False, help="A file with one key per line")
     ] = None,
-    which: Annotated[str | None, typer.Option(help="Instead of keys: pending | failed | stale | listed")] = None,
+    which: Annotated[str | None, typer.Option(help="Instead of keys: pending | failed | stale | recruiting | listed")] = None,
     limit: Annotated[int | None, typer.Option(min=1, help="Transfer at most this many trials")] = None,
     files_dir: Annotated[
         Path | None, typer.Option(help="Also write each file here, to read by hand (never overwritten or removed)")
@@ -358,10 +377,260 @@ def source_locations(code: Annotated[str, typer.Argument(help="The source, e.g. 
         adapter = registry.adapter_class(source.adapter)()
         trials = 0
         places = 0
-        for trial_id, payload in core_db.current_records(conn, code):
-            places += core_db.set_trial_locations(conn, trial_id, code, adapter.locations(payload))
-            trials += 1
+        after = 0
+        while True:
+            page = core_db.current_records_page(conn, code, after, RECORDS_PER_PAGE)
+            if not page:
+                break
+            for stored in page:
+                places += core_db.set_trial_locations(conn, stored.trial_id, code, adapter.locations(stored.payload))
+                trials += 1
+                after = stored.trial_id
     typer.echo(f"{code}: read the locations of {trials:,} trial{"s" if trials != 1 else ""} ({places:,} sites and countries)")
+
+
+# stored records read at a time when every one is read again (a payload can be a hundred kilobytes)
+RECORDS_PER_PAGE = 200
+
+
+@source_app.command("profiles")
+def source_profiles(code: Annotated[str, typer.Argument(help="The source, e.g. ctis")]) -> None:
+    """Read again each trial's profile (ADR-008: conditions, who can join, what is tested, where it
+    recruits) from the records already stored from a source, without fetching anything, and rebuild
+    its search document. A transfer reads them anyway."""
+    with db.connect_system() as conn:
+        source = _registered(conn, code)
+        adapter = registry.adapter_class(source.adapter)()
+        trials = 0
+        changed = 0
+        after = 0
+        while True:
+            page = core_db.current_records_page(conn, code, after, RECORDS_PER_PAGE)
+            if not page:
+                break
+            for stored in page:
+                after = stored.trial_id
+                read = adapter.profile(stored.payload, stored.listing)
+                if read is None:
+                    continue
+                trials += 1
+                if profile.store(conn, stored.trial_id, code, stored.source_key, read):
+                    changed += 1
+    typer.echo(f"{code}: read the profiles of {_count(trials, 'trial')} ({changed:,} new or changed)")
+
+
+def _count(number: int, thing: str, things: str | None = None) -> str:
+    """"1 trial", "2 trials": the number and the thing, in the plural (`things`, else with an s) unless
+    there is one."""
+    if number == 1:
+        return f"{number:,} {thing}"
+    if things is None:
+        things = f"{thing}s"
+    return f"{number:,} {things}"
+
+
+# --- places (ADR-008) ----------------------------------------------------------------------------
+
+@geo_app.command("load")
+def geo_load(
+    countries: Annotated[
+        list[str] | None, typer.Option("--country", help="Only these EU/EEA countries (ISO codes); default all 30")
+    ] = None,
+    from_dir: Annotated[
+        Path | None,
+        typer.Option("--from", exists=True, file_okay=False,
+                     help="Read GeoNames' files from this folder instead of downloading them"),
+    ] = None,
+) -> None:
+    """Load GeoNames (CC BY 4.0): countries, the EU/EEA's places with 1000+ people and their names in
+    many languages, and their postal codes; then find where every trial site is again."""
+    chosen = []
+    known = geonames.eea_countries()
+    if countries:
+        for country in countries:
+            code = country.upper()
+            if code not in known:
+                raise typer.BadParameter(f"not an EU/EEA country code: {country}", param_hint="--country")
+            chosen.append(code)
+    else:
+        chosen = known
+    with db.connect_system() as conn:
+        summary = geo_loading.load(conn, chosen, from_dir, progress=typer.echo)
+        typer.echo(f"geo load run {summary.run_id}: {summary.countries} countries, {summary.places:,} places, "
+                   f"{summary.postcodes:,} postal codes")
+        if summary.missing:
+            typer.echo(f"no postal code file for: {', '.join(summary.missing)}")
+        _geocode(conn)
+
+
+def _geocode(conn: psycopg.Connection) -> None:
+    summary = geo_loading.geocode_missing(conn, progress=typer.echo)
+    typer.echo(f"geocoded {_count(summary.addresses, 'site address', 'site addresses')}")
+    for precision, count in sorted(geo_db.precision_counts(conn).items()):
+        typer.echo(f"  {precision}: {count:,}")
+    unmatched = geo_db.unmatched_cities(conn, 15)
+    if unmatched:
+        typer.echo("not found (most sites first):")
+        for country, city, sites in unmatched:
+            typer.echo(f"  {city}, {country}: {_count(sites, 'site')}")
+
+
+@geo_app.command("geocode")
+def geo_geocode(
+    again: Annotated[bool, typer.Option("--again", help="Forget every site's point and find them all again")] = False,
+) -> None:
+    """Find where each trial site is (a point from its postal code or city); a transfer does this for
+    the sites it stores, once GeoNames is loaded."""
+    with db.connect_system() as conn:
+        if not geo_db.loaded(conn):
+            raise typer.BadParameter("load GeoNames first: trialwatch geo load")
+        if again:
+            geo_db.forget_points(conn)
+        _geocode(conn)
+
+
+@geo_app.command("find")
+def geo_find(name: Annotated[str, typer.Argument(help="A place, country or postal code, e.g. München or 75013")]) -> None:
+    """Show what a place name, country name or postal code means to the search: every match, largest first."""
+    with db.connect_system() as conn:
+        for country in geo_db.countries_named(conn, [name]):
+            typer.echo(f"country {country.iso2} {country.name}")
+        for place in geo_db.places_named(conn, [name]):
+            typer.echo(f"place {place.name}, {place.country_name} (population {place.population:,}; "
+                       f"{place.latitude:.4f}, {place.longitude:.4f})")
+        for postcode in geo_db.postcode_places(conn, name):
+            typer.echo(f"postcode {postcode.postcode} {postcode.place_name}, {postcode.country_name} "
+                       f"({postcode.latitude:.4f}, {postcode.longitude:.4f})")
+
+
+# --- vocabularies and the search index (ADR-008) ------------------------------------------------
+
+@vocab_app.command("load")
+def vocab_load(
+    year: Annotated[int | None, typer.Option(help="MeSH's year (default: this year's, else last year's)")] = None,
+    from_file: Annotated[
+        Path | None, typer.Option("--from", exists=True, dir_okay=False, help="A desc<year>.gz or .xml already downloaded")
+    ] = None,
+) -> None:
+    """Load MeSH's diseases and mental disorders (NLM, free to use): each descriptor's synonyms and place
+    in the hierarchy, so a search for "diabetes" finds trials filed as type 2 diabetes; then rebuild
+    every search document with the concepts its conditions name."""
+    with db.connect_system() as conn:
+        try:
+            summary = vocab_loading.load_mesh(conn, year, from_file, progress=typer.echo)
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        typer.echo(f"vocab load run {summary.run_id}: MeSH {summary.version}, {summary.descriptors:,} descriptors, "
+                   f"{summary.terms:,} entry terms")
+        rebuilt = search_index.rebuild_all(conn, force=True)
+        typer.echo(f"rebuilt {_count(rebuilt.built, 'search document')}")
+
+
+@search_app.command("reindex")
+def search_reindex(
+    every: Annotated[bool, typer.Option("--all", help="Rebuild every document, also those whose profile did not change")] = False,
+) -> None:
+    """Build each trial's search document from its stored profile (a transfer does it for the trials it
+    brings in): after the indexing rules, the categories or a vocabulary changed. Fetches nothing."""
+    with db.connect_system() as conn:
+        summary = search_index.rebuild_all(conn, force=every, progress=typer.echo)
+        counts = search_db.index_counts(conn)
+    typer.echo(f"{_count(summary.trials, 'trial')} with a profile, {summary.built:,} documents built")
+    typer.echo(f"index: {counts.documents:,} documents, {counts.recruiting:,} recruiting, {counts.concepts:,} with "
+               f"MeSH concepts, {counts.terms:,} words for 'did you mean'")
+
+
+@search_app.command("annotate")
+def search_annotate(
+    ct_numbers: Annotated[list[str] | None, typer.Argument(help="EU CT numbers of recruiting trials to tag")] = None,
+    every: Annotated[bool, typer.Option("--all", help="Every recruiting trial without AI tags for its current profile")] = False,
+    outdated_prompt: Annotated[
+        bool, typer.Option("--outdated-prompt", help="Together with --all: also those tagged by an earlier prompt text")
+    ] = False,
+    limit: Annotated[int | None, typer.Option(min=1, help="Tag at most this many trials")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be sent for the first trial; call nothing")] = False,
+) -> None:
+    """Tag recruiting trials with AI for patient search (ADR-008): categories, the kind of medicine, the
+    purpose, synonyms of their conditions in their countries' languages, MeSH concepts and the age
+    limits of their inclusion criteria, each tag with a quote checked against its field. Calls the
+    model (search/configs/annotate.json) and records what it costs; the refresh does it by itself."""
+    settings = search_annotating.load_settings()
+    with db.connect() as conn:
+        if ct_numbers:
+            found = core_db.trials_with_scheme(conn, "eu-ct", ct_numbers)
+            trial_ids = []
+            for ct_number in ct_numbers:
+                if ct_number not in found:
+                    raise typer.BadParameter(f"no trial {ct_number}")
+                trial_ids.append(found[ct_number])
+        elif every:
+            prompt_sha = None
+            if outdated_prompt:
+                prompt_sha = load_prompt(settings.prompt).sha256
+            trial_ids = search_db.trials_to_annotate(conn, prompt_sha)
+        else:
+            raise typer.BadParameter("give EU CT numbers or --all")
+        if limit is not None:
+            trial_ids = trial_ids[:limit]
+        typer.echo(f"{_count(len(trial_ids), 'trial')} to tag with {settings.model} (effort {settings.effort})")
+        if not trial_ids:
+            return
+        if dry_run:
+            stored = core_db.trial_profile(conn, trial_ids[0])
+            if stored is None:
+                raise typer.BadParameter(f"trial {trial_ids[0]} has no profile")
+            read = profile.profile_from_data(stored.profile)
+            request = search_annotating.build_request(
+                settings, load_prompt(settings.prompt), search_annotating.fields_for(read),
+                search_annotating.languages_for(conn, read, settings.max_languages),
+                search_annotating.candidates_for(conn, read, settings.max_candidates))
+            typer.echo(request["messages"][0]["content"])
+            typer.echo("dry run: nothing was sent")
+            return
+        import anthropic
+
+        client = anthropic.Anthropic(base_url=ANTHROPIC_API, max_retries=4)
+        summary = search_annotating.run(conn, client, trial_ids, settings, progress=typer.echo)
+    typer.echo(f"annotation run {summary.run_id}: {summary.tagged} of {summary.trials} tagged, {summary.kept} tags kept, "
+               f"{summary.dropped} dropped, {pricing.dollars(summary.cost_usd)}")
+    if summary.failed:
+        raise typer.Exit(1)
+
+
+@search_app.command("eval")
+def search_eval(
+    queries: Annotated[Path, typer.Option(exists=True, dir_okay=False, help="A query set with how each should be read")]
+    = Path("evals/search-queries.json"),
+) -> None:
+    """Measure patient search without calling a model: how each query is read compared with how it
+    should be, how many recruiting trials it finds (near the place, in its country, anywhere) and how
+    many plain text matching on CTIS's list finds (the baseline). Which trials are relevant needs a
+    judged set, not this."""
+    cases = search_evaluating.load_queries(queries)
+    with db.connect_system() as conn:
+        report = search_evaluating.evaluate(conn, cases)
+    for result in report.results:
+        flag = "ok "
+        if result.wrong:
+            flag = "XX "
+        found = f"near {_or_dash(result.near)}"
+        typer.echo(f"{flag}{result.case.text!r:42} {result.case.language} {result.case.kind:15} {found:9} "
+                   f"country {_or_dash(result.in_country):>5} anywhere {result.anywhere:>5} baseline {result.baseline:>5}")
+        typer.echo(f"     read: {' · '.join(result.reading)}")
+        for word, known in result.corrected.items():
+            typer.echo(f"     corrected: {word} -> {known}")
+        for problem in result.wrong:
+            typer.echo(f"     wrong: {problem}")
+    total = len(report.results)
+    typer.echo(f"read right: {report.read_right()} of {total}")
+    typer.echo(f"no trial found where asked: {report.zero_results()} of {total} (plain text matching on CTIS's list: "
+               f"{report.baseline_zero()} of {total} found none in the country, or anywhere)")
+
+
+def _or_dash(number: int | None) -> str:
+    if number is None:
+        return "-"
+    return f"{number}"
 
 
 # --- the evidence check (ADR-004) ----------------------------------------------------------------

@@ -22,11 +22,13 @@ OPEN_POSTS = ("/login", "/logout")
 
 # --- the chart -----------------------------------------------------------------------------------
 
-def test_the_chart_gives_the_public_only_published_results():
-    """Anyone not signed in sees the home page, the sign-in page and what view.published opens: a trial
-    with a published judgement and how its evidence was collected. Nothing else."""
+def test_the_chart_gives_the_public_only_published_results_and_recruiting_trials():
+    """Anyone not signed in sees the home page, the sign-in page, what view.published opens (a trial
+    with a published judgement and how its evidence was collected) and what view.recruiting opens (the
+    patient search and the pages of trials that recruit now, ADR-008). Nothing else."""
+    public = ("view.published", "view.recruiting")
     for action in actions.ACTIONS:
-        assert actions.allowed(None, action.name) == (action.name == "view.published"), action.name
+        assert actions.allowed(None, action.name) == (action.name in public), action.name
 
 
 def test_an_admin_may_do_everything_and_a_moderator_curates():

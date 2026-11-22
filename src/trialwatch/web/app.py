@@ -12,7 +12,8 @@ Who may do what is the action → role chart in trialwatch.auth.actions (ADR-006
 sees the home page (what TrialWatch is, the trials with a published result with filters, the last and
 next scheduled run, and the money spent on model calls), the sign-in page, and what "view.published"
 opens: a trial with a published judgement and its whole trace, that run, the prompts, the requirement
-sets and the files a registry gave or a published judgement quotes (ADR-007). Every other page and
+sets and the files a registry gave or a published judgement quotes (ADR-007); and the patient search
+(/find, ADR-008) with the page of each trial that recruits now, judged or not. Every other page and
 every action needs a signed-in admin or moderator whose role the chart allows. Those pages decide once
 with staff_view() what to load (only published data for the public). Each route that
 changes something names its action (`Depends(Requires(...))`), and its writes are recorded as the
@@ -52,12 +53,16 @@ from trialwatch.db import checks as checks_db
 from trialwatch.db import core, overview
 from trialwatch.db.core import Identifier, normalised
 from trialwatch.gold import datasets as gold_datasets
-from trialwatch.sources import manual, registry, stages
+from trialwatch.db import search as search_db
+from trialwatch.sources import manual, profile, registry, stages
 from trialwatch.costs import dollars
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
 from trialwatch.jobs import MAX_ATTEMPTS, PRIORITY_AUTOMATIC
 from trialwatch.web import jobs as web_jobs
+from trialwatch.web import search as web_search
+from trialwatch.search import categories as search_categories
+from trialwatch.search import query as search_query
 from trialwatch.web.jobs import STEPS, JobRequest
 
 
@@ -161,7 +166,11 @@ async def only_this_machine_and_own_pages(request: Request, call_next):
     reason = refusal(request)
     if reason is not None:
         return PlainTextResponse(f"refused: {reason}", status_code=403)
-    return await call_next(request)
+    response = await call_next(request)
+    # a link out (e.g. to CTIS) never tells the other site the page it came from: a search's address
+    # holds what someone looked for, which can be about their health (ADR-008)
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 # --- who is signed in, and what they may do (ADR-006) ---------------------------------------------
@@ -1153,16 +1162,25 @@ def sponsor_page(request: Request, organisation_id: int,
 
 @app.get("/trials/{trial_id}", response_class=HTMLResponse)
 def trial_page(request: Request, trial_id: int, run: int | None = None, error: str | None = None,
-               user: auth_db.User | None = Depends(Requires("view.published"))) -> HTMLResponse:
+               user: auth_db.User | None = Depends(Requires("view.published", "view.recruiting"))) -> HTMLResponse:
     staff = staff_view(request)
     with db.connect_system() as conn:
         row = overview.trial_row(conn, trial_id, default_settings().requirements, published_only=not staff)
         if row is None:
             raise HTTPException(404, f"no trial {trial_id}")
-        # the public sees only published judgements, each with its whole trace, and only trials that have one
+        # the public sees only published judgements, each with its whole trace, and only trials that have
+        # one, or that recruit now (ADR-008: what someone looking for a trial to join needs)
         judgements = overview.trial_judgements(conn, trial_id, published_only=not staff)
-        if not staff and not judgements:
+        recruiting = search_db.public_recruiting(conn, trial_id)
+        if not staff and not judgements and not recruiting:
             raise HTTPException(404, f"no published result for trial {trial_id}")
+        patient = _patient_view(conn, trial_id)
+        if not staff and not judgements:
+            context = {"row": row, "identifiers": overview.trial_identifiers(conn, trial_id),
+                       "sponsors": overview.trial_sponsors(conn, trial_id),
+                       "locations": overview.by_country(overview.trial_locations(conn, trial_id)),
+                       "patient": patient}
+            return TEMPLATES.TemplateResponse(request, "recruiting.html", context)
         registered = overview.trial_registered(conn, trial_id)
         identifiers = overview.trial_identifiers(conn, trial_id)
         documents = overview.trial_documents(conn, trial_id)
@@ -1215,8 +1233,98 @@ def trial_page(request: Request, trial_id: int, run: int | None = None, error: s
         "ready": trial_id not in blocked, "not_ready": blocked.get(trial_id), "transferable": _transferable(transfers),
         "kinds": kinds, "configs": check_settings.load_all(), "judgement_config": judgement_config,
         "gold_items": gold_items, "sponsors": sponsors, "locations": locations, "agreement": agreement,
+        "patient": patient,
     }
     return TEMPLATES.TemplateResponse(request, "trial.html", context)
+
+
+@dataclass
+class PatientView:
+    """What a person looking for a trial to join sees about it (ADR-008): its profile, the MeSH concepts
+    its conditions name with the words they were found in, and its page at the source."""
+
+    profile: profile.TrialProfile
+    recruiting: bool
+    concepts: list
+    source_url: str | None
+    source_name: str
+    updated_on: date | None
+    phase_words: str | None
+    age_words: list[str]
+    # the AI tags its search document was built with (search/annotate.py), or None
+    annotation: search_db.Annotation | None = None
+
+
+def _patient_view(conn: psycopg.Connection, trial_id: int) -> PatientView | None:
+    stored = core.trial_profile(conn, trial_id)
+    if stored is None:
+        return None
+    read = profile.profile_from_data(stored.profile)
+    source = core.registered_source(conn, stored.source)
+    url = None
+    source_name = stored.source
+    if source is not None:
+        source_name = source.name
+        keys = core.source_keys_of_trial(conn, stored.source, trial_id)
+        if keys and source.adapter:
+            url = registry.adapter_class(source.adapter)().public_url(keys[0])
+    phase_words = None
+    if read.phase in web_search.PHASE_WORDS:
+        phase_words = web_search.PHASE_WORDS[read.phase]
+    age_words = []
+    for group in read.age_groups:
+        age_words.append(web_search.AGE_GROUP_WORDS[group])
+    return PatientView(read, search_db.public_recruiting(conn, trial_id), search_db.trial_concepts(conn, trial_id),
+                       url, source_name, overview.listing_updated_on(conn, trial_id), phase_words, age_words,
+                       search_db.document_annotation(conn, trial_id))
+
+
+# --- patient search (ADR-008) --------------------------------------------------------------------
+
+# what the search page offers to try before anything is searched
+FIND_EXAMPLES = ("diabetes Paris", "cancer du sein Lyon", "Alzheimer München", "healthy volunteers Berlin",
+                 "mucoviscidose enfant", "asthma 28046")
+
+@app.get("/find", response_class=HTMLResponse)
+def find(request: Request, q: str = "", what: str = "", where: str = "", km: str = "", age: str = "", sex: str = "",
+         hv: str = "", phase: str = "", cat: str = "", page: int = 1,
+         user: auth_db.User | None = Depends(Requires("view.recruiting"))) -> HTMLResponse:
+    """Search the trials that recruit now: a condition, a place, who can join. Nothing about a search is
+    stored; the address it is at is never sent on to another site (Referrer-Policy), kept by the
+    browser's cache, or indexed by search engines."""
+    params = web_search.params_from(q, what, where, km, age, sex, hv, phase, cat, page)
+    result = None
+    links = None
+    urls = {}
+    with db.connect_system() as conn:
+        if params.given():
+            reading = web_search.interpret(conn, params)
+            result = web_search.run(conn, reading, params.page)
+            links = web_search.links(params, result)
+            for hit in result.hits:
+                urls[hit.trial_id] = _source_url(conn, hit.source, hit.source_key)
+        counts = search_db.index_counts(conn)
+    examples = []
+    for example in FIND_EXAMPLES:
+        examples.append((example, web_search.example_href(example)))
+    context = {"params": params, "result": result, "links": links, "examples": examples, "urls": urls,
+               "distances": web_search.DISTANCES,
+               "phase_words": web_search.PHASE_WORDS, "age_words": web_search.AGE_GROUP_WORDS,
+               "categories": search_categories.all_categories(), "describe": search_query.describe,
+               "indexed": counts.recruiting}
+    response = TEMPLATES.TemplateResponse(request, "find.html", context)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Robots-Tag"] = "noindex"
+    return response
+
+
+def _source_url(conn: psycopg.Connection, source_code: str, key: str | None) -> str | None:
+    if key is None:
+        return None
+    source = core.registered_source(conn, source_code)
+    if source is None or not source.adapter:
+        return None
+    return registry.adapter_class(source.adapter)().public_url(key)
 
 
 def _transferable(transfers: list[overview.TransferRow]) -> list[overview.TransferRow]:

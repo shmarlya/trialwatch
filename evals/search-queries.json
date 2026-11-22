@@ -1,0 +1,540 @@
+{
+  "about": "Realistic patient search queries (ADR-008) with how they should be read, for `trialwatch search eval`: condition words (lower case, stop words out), a place (within 30 km of `near`), a country, an age or age group, healthy volunteers, sex, phase. Only the fields given are compared. Kinds: condition-place, lay (everyday words), drug, misspelling, abbreviation, healthy, child, age, rare, postcode, country, ambiguous. Relevance judgements (which trials each should find) are not here yet: they need a judged pool (see README).",
+  "queries": [
+    {
+      "text": "diabetes Paris",
+      "language": "en",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "diabetes",
+        "near": [
+          48.86,
+          2.35
+        ]
+      }
+    },
+    {
+      "text": "breast cancer near Lyon",
+      "language": "en",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "breast cancer",
+        "near": [
+          45.76,
+          4.84
+        ]
+      }
+    },
+    {
+      "text": "lung cancer Berlin",
+      "language": "en",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "lung cancer",
+        "near": [
+          52.52,
+          13.4
+        ]
+      }
+    },
+    {
+      "text": "heart attack Madrid",
+      "language": "en",
+      "kind": "lay",
+      "expected": {
+        "condition": "heart attack",
+        "near": [
+          40.42,
+          -3.7
+        ]
+      }
+    },
+    {
+      "text": "high blood pressure Rome",
+      "language": "en",
+      "kind": "lay",
+      "expected": {
+        "condition": "high blood pressure",
+        "near": [
+          41.9,
+          12.5
+        ]
+      }
+    },
+    {
+      "text": "multiple sclerosis Warsaw",
+      "language": "en",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "multiple sclerosis",
+        "near": [
+          52.23,
+          21.01
+        ]
+      }
+    },
+    {
+      "text": "COPD Amsterdam",
+      "language": "en",
+      "kind": "abbreviation",
+      "expected": {
+        "condition": "copd",
+        "near": [
+          52.37,
+          4.9
+        ]
+      }
+    },
+    {
+      "text": "type 1 diabetes child Dublin",
+      "language": "en",
+      "kind": "child",
+      "expected": {
+        "condition": "type 1 diabetes",
+        "near": [
+          53.35,
+          -6.26
+        ],
+        "age_group": "0-17"
+      }
+    },
+    {
+      "text": "healthy volunteers Berlin",
+      "language": "en",
+      "kind": "healthy",
+      "expected": {
+        "condition": "",
+        "near": [
+          52.52,
+          13.4
+        ],
+        "healthy_volunteers": true
+      }
+    },
+    {
+      "text": "psoriasis 75013",
+      "language": "en",
+      "kind": "postcode",
+      "expected": {
+        "condition": "psoriasis",
+        "near": [
+          48.83,
+          2.36
+        ]
+      }
+    },
+    {
+      "text": "asthma Germany",
+      "language": "en",
+      "kind": "country",
+      "expected": {
+        "condition": "asthma",
+        "country": "DE"
+      }
+    },
+    {
+      "text": "leukaemia children Vienna",
+      "language": "en",
+      "kind": "child",
+      "expected": {
+        "condition": "leukaemia",
+        "near": [
+          48.21,
+          16.37
+        ],
+        "age_group": "0-17"
+      }
+    },
+    {
+      "text": "migraine women Barcelona",
+      "language": "en",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "migraine",
+        "near": [
+          41.39,
+          2.17
+        ],
+        "sex": "female"
+      }
+    },
+    {
+      "text": "obesity",
+      "language": "en",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "obesity"
+      }
+    },
+    {
+      "text": "parkinson near Copenhagen",
+      "language": "en",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "parkinson",
+        "near": [
+          55.68,
+          12.57
+        ]
+      }
+    },
+    {
+      "text": "rheumatoid arthritis 70 years Milan",
+      "language": "en",
+      "kind": "age",
+      "expected": {
+        "condition": "rheumatoid arthritis",
+        "near": [
+          45.46,
+          9.19
+        ],
+        "age": 70
+      }
+    },
+    {
+      "text": "sickle cell disease Paris",
+      "language": "en",
+      "kind": "rare",
+      "expected": {
+        "condition": "sickle cell disease",
+        "near": [
+          48.86,
+          2.35
+        ]
+      }
+    },
+    {
+      "text": "cystic fibrosis Gent",
+      "language": "en",
+      "kind": "rare",
+      "expected": {
+        "condition": "cystic fibrosis",
+        "near": [
+          51.05,
+          3.72
+        ]
+      }
+    },
+    {
+      "text": "melanoma phase 3 Stockholm",
+      "language": "en",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "melanoma",
+        "near": [
+          59.33,
+          18.07
+        ],
+        "phase": "3"
+      }
+    },
+    {
+      "text": "semaglutide",
+      "language": "en",
+      "kind": "drug",
+      "expected": {
+        "condition": "semaglutide"
+      }
+    },
+    {
+      "text": "pembrolizumab Brussels",
+      "language": "en",
+      "kind": "drug",
+      "expected": {
+        "condition": "pembrolizumab",
+        "near": [
+          50.85,
+          4.35
+        ]
+      }
+    },
+    {
+      "text": "diabtes Paris",
+      "language": "en",
+      "kind": "misspelling",
+      "expected": {
+        "condition": "diabtes",
+        "near": [
+          48.86,
+          2.35
+        ]
+      }
+    },
+    {
+      "text": "alzeimer Madrid",
+      "language": "en",
+      "kind": "misspelling",
+      "expected": {
+        "condition": "alzeimer",
+        "near": [
+          40.42,
+          -3.7
+        ]
+      }
+    },
+    {
+      "text": "Marburg",
+      "language": "en",
+      "kind": "ambiguous",
+      "expected": {
+        "condition": "",
+        "near": [
+          50.81,
+          8.77
+        ]
+      }
+    },
+    {
+      "text": "asthma Nice",
+      "language": "en",
+      "kind": "ambiguous",
+      "expected": {
+        "condition": "asthma",
+        "near": [
+          43.7,
+          7.27
+        ]
+      }
+    },
+    {
+      "text": "diabète Paris",
+      "language": "fr",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "diabète",
+        "near": [
+          48.86,
+          2.35
+        ]
+      }
+    },
+    {
+      "text": "cancer du sein Lyon",
+      "language": "fr",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "cancer sein",
+        "near": [
+          45.76,
+          4.84
+        ]
+      }
+    },
+    {
+      "text": "mucoviscidose enfant",
+      "language": "fr",
+      "kind": "child",
+      "expected": {
+        "condition": "mucoviscidose",
+        "age_group": "0-17"
+      }
+    },
+    {
+      "text": "maladie de Parkinson Marseille",
+      "language": "fr",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "maladie parkinson",
+        "near": [
+          43.3,
+          5.37
+        ]
+      }
+    },
+    {
+      "text": "sclérose en plaques Toulouse",
+      "language": "fr",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "sclérose plaques",
+        "near": [
+          43.6,
+          1.44
+        ]
+      }
+    },
+    {
+      "text": "volontaires sains Paris",
+      "language": "fr",
+      "kind": "healthy",
+      "expected": {
+        "condition": "",
+        "near": [
+          48.86,
+          2.35
+        ],
+        "healthy_volunteers": true
+      }
+    },
+    {
+      "text": "Brustkrebs Hamburg",
+      "language": "de",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "brustkrebs",
+        "near": [
+          53.55,
+          10.0
+        ]
+      }
+    },
+    {
+      "text": "Diabetes Typ 2 Köln",
+      "language": "de",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "diabetes typ 2",
+        "near": [
+          50.94,
+          6.96
+        ]
+      }
+    },
+    {
+      "text": "Alzheimer München",
+      "language": "de",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "alzheimer",
+        "near": [
+          48.14,
+          11.58
+        ]
+      }
+    },
+    {
+      "text": "gesunde Probanden Berlin",
+      "language": "de",
+      "kind": "healthy",
+      "expected": {
+        "condition": "",
+        "near": [
+          52.52,
+          13.4
+        ],
+        "healthy_volunteers": true
+      }
+    },
+    {
+      "text": "Schuppenflechte Frankfurt",
+      "language": "de",
+      "kind": "lay",
+      "expected": {
+        "condition": "schuppenflechte",
+        "near": [
+          50.11,
+          8.68
+        ]
+      }
+    },
+    {
+      "text": "cáncer de pulmón Madrid",
+      "language": "es",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "cáncer pulmón",
+        "near": [
+          40.42,
+          -3.7
+        ]
+      }
+    },
+    {
+      "text": "diabetes niños Barcelona",
+      "language": "es",
+      "kind": "child",
+      "expected": {
+        "condition": "diabetes",
+        "near": [
+          41.39,
+          2.17
+        ],
+        "age_group": "0-17"
+      }
+    },
+    {
+      "text": "esclerosis múltiple Sevilla",
+      "language": "es",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "esclerosis múltiple",
+        "near": [
+          37.39,
+          -5.98
+        ]
+      }
+    },
+    {
+      "text": "tumore al seno Milano",
+      "language": "it",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "tumore al seno",
+        "near": [
+          45.46,
+          9.19
+        ]
+      }
+    },
+    {
+      "text": "diabete Roma",
+      "language": "it",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "diabete",
+        "near": [
+          41.9,
+          12.5
+        ]
+      }
+    },
+    {
+      "text": "cukrzyca Warszawa",
+      "language": "pl",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "cukrzyca",
+        "near": [
+          52.23,
+          21.01
+        ]
+      }
+    },
+    {
+      "text": "rak piersi Kraków",
+      "language": "pl",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "rak piersi",
+        "near": [
+          50.06,
+          19.94
+        ]
+      }
+    },
+    {
+      "text": "borstkanker Amsterdam",
+      "language": "nl",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "borstkanker",
+        "near": [
+          52.37,
+          4.9
+        ]
+      }
+    },
+    {
+      "text": "cancro da mama Lisboa",
+      "language": "pt",
+      "kind": "condition-place",
+      "expected": {
+        "condition": "cancro mama",
+        "near": [
+          38.72,
+          -9.14
+        ]
+      }
+    }
+  ]
+}

@@ -103,6 +103,20 @@ def verify(quote: str, page: Page | None) -> bool:
     return False
 
 
+def verify_in_text(quote: str, text: str) -> bool:
+    """The quote occurs in a short text (a registry field, not a page) as whole words: at least
+    MIN_QUOTE_CHARS long, or the whole field (a condition can be one short word, "Asthma")."""
+    quote = normalise(quote)
+    if not quote:
+        return False
+    whole = normalise(text)
+    if quote == whole:
+        return True
+    if len(quote) < MIN_QUOTE_CHARS:
+        return False
+    return occurs_as_words(quote, whole)
+
+
 def letters(text: str) -> int:
     count = 0
     for character in text:

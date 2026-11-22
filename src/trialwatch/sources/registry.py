@@ -22,6 +22,7 @@ from pathlib import Path
 import psycopg
 
 from trialwatch.db.core import Listed, Location
+from trialwatch.sources.profile import TrialProfile
 
 
 @dataclass
@@ -104,6 +105,16 @@ class Adapter:
         """Where the trial of a stored record runs (sites and countries), read from its payload; a
         transfer stores them, and `trialwatch source locations` reads them again from stored records."""
         return []
+
+    def profile(self, payload: dict, listing: dict | None) -> TrialProfile | None:
+        """What a person looking for a trial needs (ADR-008), read from a stored record and the source's
+        list row for it (None: not listed); None when the source has no such reading. A transfer stores
+        it, and `trialwatch source profiles` reads it again from stored records."""
+        return None
+
+    def public_url(self, key: str) -> str | None:
+        """The trial's page at the source, for people to read it there (e.g. its contacts)."""
+        return None
 
     def list_pages(self, config: dict) -> Iterator[ListingPage]:
         raise NotImplementedError(f"{self.name} has no list to sync")

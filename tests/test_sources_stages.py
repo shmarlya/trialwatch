@@ -434,3 +434,36 @@ def test_the_source_pages_render(admin_client):
     assert client.get("/sources/nope").status_code == 404
     trials = client.get("/trials", params={"evidence_state": "complete"})
     assert trials.status_code == 200
+
+
+def test_the_list_says_which_trials_recruit_and_transfers_take_those_first(conn):
+    """Patient search (ADR-008): CTIS's overall status 3 or 4 is recruiting; those trials are
+    transferred first, so the search fills up before the long first pass through every trial ends."""
+    core.act_as(conn, "ctis-adapter", "process")
+    rows = listing_rows([CT, OTHERS[0], OTHERS[1]])
+    rows[0]["ctStatus"] = 8
+    rows[1]["ctStatus"] = "4"
+    rows[2]["ctStatus"] = 3
+    sync_list(conn, FakeCtis(RECORD, rows))
+    flags = conn.execute("SELECT source_key, recruiting FROM core.source_listing ORDER BY source_key").fetchall()
+    assert flags == [(CT, False), (OTHERS[0], True), (OTHERS[1], True)]
+    assert core.keys_to_transfer(conn, "ctis", "pending") == [OTHERS[0], OTHERS[1], CT]
+    assert core.keys_to_transfer(conn, "ctis", "recruiting") == [OTHERS[0], OTHERS[1]]
+    assert core.keys_to_transfer_any(conn, "ctis", ["pending", "stale"]) == [OTHERS[0], OTHERS[1], CT]
+    # a status the list no longer gives: unknown, not "not recruiting"
+    rows[1].pop("ctStatus")
+    sync_list(conn, FakeCtis(RECORD, rows))
+    assert conn.execute("SELECT recruiting FROM core.source_listing WHERE source_key = %s",
+                        (OTHERS[0],)).fetchone() == (None,)
+    with pytest.raises(ValueError, match="choose one of"):
+        core.keys_to_transfer_any(conn, "ctis", ["everything"])
+
+
+def test_listing_recruiting_reads_ctis_status_codes():
+    assert ctis.listing_recruiting({"ctStatus": 3}) is True
+    assert ctis.listing_recruiting({"ctStatus": "4"}) is True
+    assert ctis.listing_recruiting({"ctStatus": 2}) is False
+    assert ctis.listing_recruiting({"ctStatus": 8}) is False
+    assert ctis.listing_recruiting({"ctStatus": True}) is None
+    assert ctis.listing_recruiting({"ctStatus": "Ended"}) is None
+    assert ctis.listing_recruiting({}) is None

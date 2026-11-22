@@ -20,8 +20,11 @@ from trialwatch.checks.verify import has_readable_text
 from trialwatch.db import core
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
+from trialwatch.db import search as search_db
 from trialwatch.db.jobs import Job
+from trialwatch.jobs import CAPPED_KINDS
 from trialwatch.jobs.retry import PermanentError, is_transient
+from trialwatch.search import annotate
 from trialwatch.sources import registry, stages
 
 # Calls go to Anthropic's API itself, as from the CLI
@@ -32,6 +35,7 @@ STEPS = {
     "sync": "Sync a source's list (source sync)",
     "transfer": "Transfer evidence (source transfer)",
     "check": "Evidence check (check evidence)",
+    "annotate": "AI tags for patient search (search annotate)",
     "refresh": "Weekly refresh: sync, transfer what changed, check what changed",
 }
 
@@ -46,8 +50,8 @@ class Context:
         self.job = job
         self.cancelled = False
         self.hold_reason: str | None = None
-        # only automatic checks are held by the cap; a person's check always runs
-        self.watch_cap = job.automatic and job.kind == "check"
+        # only automatic model calls (checks, AI tags) are held by the cap; a person's always run
+        self.watch_cap = job.automatic and job.kind in CAPPED_KINDS
 
     def add(self, line: str) -> None:
         jobs_db.add_line(self.queue, self.job.id, self.job.attempts, line)
@@ -99,6 +103,8 @@ def params_problem(kind: str, params: dict) -> str | None:
             return "choose trials, or which of the source's trials to transfer"
         if which and which not in core.TRANSFER_CHOICES:
             return f"choose one of {', '.join(core.TRANSFER_CHOICES)}"
+    if kind == "annotate" and not params.get("trial_ids") and not params.get("every"):
+        return "choose trials, or every recruiting trial not tagged yet"
     if kind == "check":
         if not params.get("trial_ids") and not params.get("every"):
             return "choose trials, or tick 'every trial ready for a check'"
@@ -276,3 +282,43 @@ def run_check(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
               "labels": summary.labels, "left_to_people": left_to_people, "published": len(summary.published),
               "cost_usd": str(summary.cost_usd), "cost": pricing.dollars(summary.cost_usd)}
     return Outcome(result, passing)
+
+
+# --- annotate (patient search, ADR-008) ----------------------------------------------------------
+
+def run_annotate(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
+    """Tag the trials given (or every recruiting trial not tagged for its current profile) with AI;
+    on a retry, only those still untagged."""
+    if job.params.get("every") or job.attempts > 1:
+        waiting = search_db.trials_to_annotate(conn)
+    else:
+        waiting = None
+    chosen = []
+    if job.params.get("every"):
+        chosen = waiting
+    else:
+        for trial_id in job.params["trial_ids"]:
+            if trial_id in chosen:
+                continue
+            if waiting is not None and trial_id not in waiting:
+                continue
+            chosen.append(trial_id)
+    if job.params.get("limit") is not None:
+        chosen = chosen[:job.params["limit"]]
+    ctx.add(f"{len(chosen)} trials to tag")
+    if not chosen:
+        return Outcome({"trials": 0})
+    # an automatic run never starts over the cap; it is held before anything is sent
+    if ctx.should_stop():
+        return Outcome({"trials": 0})
+    try:
+        summary = annotate.run(conn, anthropic_client(), chosen, progress=ctx.add, should_stop=ctx.should_stop)
+    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
+        raise PermanentError(f"{type(exc).__name__}: {exc}") from exc
+    passing = {}
+    for trial_id, error in summary.failed.items():
+        passing[f"trial {trial_id}"] = error
+    ctx.add(f"annotation run {summary.run_id}: {summary.tagged} of {summary.trials} tagged, {summary.kept} tags kept, "
+            f"{summary.dropped} dropped, {pricing.dollars(summary.cost_usd)}")
+    return Outcome({"annotation_run": summary.run_id, "trials": summary.trials, "tagged": summary.tagged,
+                    "kept": summary.kept, "dropped": summary.dropped, "cost_usd": str(summary.cost_usd)}, passing)

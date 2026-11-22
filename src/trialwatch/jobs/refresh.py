@@ -6,11 +6,14 @@ queues it again for the next stage):
 
 1. sync: one sync job per switched-on source that has a list
 2. transfer: the trials each source lists that are new, changed since their transfer (stale) or whose
-   last transfer failed, in batches of TRANSFER_BATCH
-3. check: the trials ready for a check that were never judged or whose judgement is outdated (a
+   last transfer failed, in batches of TRANSFER_BATCH, the ones the list calls recruiting first
+3. annotate: the recruiting trials whose profile has no AI tags yet (new, or changed since), in batches
+   of ANNOTATE_BATCH, as automatic jobs the monthly spending cap holds (patient search, ADR-008). A
+   changed prompt does not tag every trial again: `trialwatch search annotate --all --outdated-prompt`.
+4. check: the trials ready for a check that were never judged or whose judgement is outdated (a
    record or document it read changed), in batches of CHECK_BATCH, as automatic jobs (the monthly
    spending cap holds them). Nothing changed: no check, no money spent.
-4. done: what happened, counted from the child jobs. A child that failed fails the refresh (it shows
+5. done: what happened, counted from the child jobs. A child that failed fails the refresh (it shows
    on /admin/jobs); the trials the other children brought in are still checked.
 """
 
@@ -21,16 +24,18 @@ from trialwatch.checks import settings as check_settings
 from trialwatch.db import checks as checks_db
 from trialwatch.db import core
 from trialwatch.db import jobs as jobs_db
+from trialwatch.db import search as search_db
 from trialwatch.db.jobs import Job
 from trialwatch.jobs import MAX_ATTEMPTS, PRIORITY_AUTOMATIC
 from trialwatch.jobs.steps import Context, Outcome
 from trialwatch.sources import registry, stages
 
 TRANSFER_BATCH = 50
+ANNOTATE_BATCH = 50
 CHECK_BATCH = 20
 # Which trials of a source the transfer stage takes (core.TRANSFER_CHOICES)
 TRANSFER_WHICH = ("pending", "stale", "failed")
-STAGES = ("sync", "transfer", "check", "done")
+STAGES = ("sync", "transfer", "annotate", "check", "done")
 
 
 def _sources(conn: psycopg.Connection, capability: str) -> list[core.RegisteredSource]:
@@ -70,11 +75,8 @@ def _transfer(ctx: Context, conn: psycopg.Connection, job: Job, result: dict) ->
     added = 0
     planned = {}
     for source in _sources(conn, "transfers"):
-        keys = []
-        for which in TRANSFER_WHICH:
-            for key in core.keys_to_transfer(conn, source.code, which):
-                if key not in keys:
-                    keys.append(key)
+        # recruiting trials first (patient search, ADR-008): their batches are queued, so run, first
+        keys = core.keys_to_transfer_any(conn, source.code, TRANSFER_WHICH)
         planned[source.code] = len(keys)
         for batch in _in_batches(keys, TRANSFER_BATCH):
             _add_child(conn, job, "transfer", {"source": source.code, "keys": batch})
@@ -82,6 +84,17 @@ def _transfer(ctx: Context, conn: psycopg.Connection, job: Job, result: dict) ->
         ctx.add(f"transfer: {len(keys)} trials from {source.code} ({', '.join(TRANSFER_WHICH)}) in "
                 f"{len(_in_batches(keys, TRANSFER_BATCH))} jobs")
     result["to_transfer"] = planned
+    return added
+
+
+def _annotate(ctx: Context, conn: psycopg.Connection, job: Job, result: dict) -> int:
+    waiting = search_db.trials_to_annotate(conn)
+    result["to_annotate"] = len(waiting)
+    added = 0
+    for batch in _in_batches(waiting, ANNOTATE_BATCH):
+        _add_child(conn, job, "annotate", {"trial_ids": batch})
+        added += 1
+    ctx.add(f"annotate: {len(waiting)} recruiting trials without AI tags for their profile, in {added} jobs")
     return added
 
 
@@ -120,7 +133,7 @@ def _done(ctx: Context, conn: psycopg.Connection, job: Job, result: dict) -> dic
     return failed
 
 
-PLANNERS = {"sync": _sync, "transfer": _transfer, "check": _check}
+PLANNERS = {"sync": _sync, "transfer": _transfer, "annotate": _annotate, "check": _check}
 
 
 def run_refresh(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:

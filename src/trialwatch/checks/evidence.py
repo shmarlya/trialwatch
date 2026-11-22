@@ -275,6 +275,29 @@ def token_count(usage: Any, name: str) -> int:
 
 
 def ask(client: MessagesClient, request: dict) -> CallResult:
+    """One model call of the check: the answer to each question by its key (see call_model)."""
+    result = call_model(client, request)
+    if result.error is not None:
+        return result
+    try:
+        parsed = json.loads(result.raw_text)
+        for answer in parsed["answers"]:
+            key = answer["key"]
+            if key not in result.answers:
+                result.answers[key] = answer
+            elif _differs(result.answers[key], answer):
+                # two different answers to one question: neither is settled by its position, a person looks
+                result.answers[key] = {"key": key, "found": "dont_know", "quote": "", "document": 0, "page": 0,
+                                       "kind": "other", "note": "the model answered this question twice, differently"}
+    except (ValueError, KeyError, TypeError) as exc:
+        result.error = f"invalid answer: {type(exc).__name__}: {exc}"
+    return result
+
+
+def call_model(client: MessagesClient, request: dict) -> CallResult:
+    """Send one request and price it: tokens, costs, who answered, the answer's text as sent. An error
+    that a retry may fix (overloaded, too large, a timeout) or a refusal is the result's error; bad
+    credentials raise (the same for every trial). Also used by patient search's AI tags (ADR-008)."""
     started = time.monotonic()
     try:
         # the prepared request dictionary is passed as keyword arguments to the SDK call
@@ -305,19 +328,6 @@ def ask(client: MessagesClient, request: dict) -> CallResult:
         category = getattr(details, "category", None)
         if category:
             result.error = f"{result.error} ({category})"
-        return result
-    try:
-        parsed = json.loads(text)
-        for answer in parsed["answers"]:
-            key = answer["key"]
-            if key not in result.answers:
-                result.answers[key] = answer
-            elif _differs(result.answers[key], answer):
-                # two different answers to one question: neither is settled by its position, a person looks
-                result.answers[key] = {"key": key, "found": "dont_know", "quote": "", "document": 0, "page": 0,
-                                       "kind": "other", "note": "the model answered this question twice, differently"}
-    except (ValueError, KeyError, TypeError) as exc:
-        result.error = f"invalid answer: {type(exc).__name__}: {exc}"
     return result
 
 

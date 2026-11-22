@@ -3,7 +3,8 @@
 Every route that changes something names one of these actions, and tests/test_auth.py fails if one
 doesn't. A role is stored per user (auth.app_user.role); what it allows is only here. "public" is
 anyone not signed in: besides the home page and the sign-in page they may only "view.published":
-a trial with a published judgement and how its evidence was collected (ADR-007).
+a trial with a published judgement and how its evidence was collected (ADR-007), and
+"view.recruiting": search the trials that recruit now and open their pages (ADR-008).
 Staff (moderators and admins) "view" trials, sponsors, documents, judgements, runs, prompts and
 requirement sets, and "view.internal": unpublished judgements and their traces, sources and transfers,
 gold datasets and who did what. /admin/roles shows this chart as a table.
@@ -30,6 +31,8 @@ ACTIONS = (
     Action("view.published", "Open a trial with a published judgement and its full trace (questions, pages read, "
            "what the model was sent and answered, quote checks, rules), the run, prompts, requirement sets "
            "and the documents it quotes", (PUBLIC, MODERATOR, ADMIN)),
+    Action("view.recruiting", "Search the trials that recruit now (/find) and open the page of one: who can join, "
+           "where it recruits, what is tested (ADR-008)", (PUBLIC, MODERATOR, ADMIN)),
     Action("view", "Browse every trial, sponsors, their documents, judgements and runs", (MODERATOR, ADMIN)),
     Action("view.internal", "See unpublished judgements and their traces, sources and transfers, gold datasets, "
            "and staff names in history", (MODERATOR, ADMIN)),

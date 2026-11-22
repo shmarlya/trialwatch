@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "macros.html" import when, run_status, setup_select, label %}
 {% from "components.html" import stat %}
+{% from "patient.html" import search_box %}
 
 {# The schedule and the money: on the home page for everyone #}
 {% macro at_a_glance(times, spend) %}
@@ -35,6 +36,11 @@
 {% if not can("view.internal") %}
 <h1>TrialWatch</h1>
 <p class="sub">We follow clinical trials in the EU register and check whether their sponsors posted the results the law requires. A model reads each trial's results documents and quotes what it finds, and every quote is checked against the document's page before it counts.</p>
+<section class="panel find-panel">
+  <h2 class="panel-title">Find a trial that is recruiting</h2>
+  <p class="small muted">Trials of medicines in the EU register looking for participants now, by condition and place, in any EU language.</p>
+  {{ search_box() }}
+</section>
 {{ at_a_glance(times, spend) }}
 
 <h2>Checked trials</h2>

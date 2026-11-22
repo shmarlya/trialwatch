@@ -67,6 +67,24 @@ Abbreviations and terms used in this project, roughly grouped. Add new ones as t
 | **COMPare** | Oxford project that checked published trials for outcome switching; its labels are our benchmark for that check. |
 | **CC BY 4.0** | Creative Commons Attribution licence: reuse is allowed if the source is credited. |
 
+## Patient search (ADR-008)
+
+| Term | Meaning |
+|---|---|
+| **Recruiting** | A trial looking for participants now: CTIS overall status "Authorised, recruiting" (3) or "Ongoing, recruiting" (4). CTIS gives the status per member state, not per site, so a card says "recruiting in France", never "at this hospital". The list (re-read at every sync) wins over a stored record. |
+| **Trial profile** | What someone looking for a trial needs, read from its record into one shape for every source (`core.trial_profile`, src/trialwatch/sources/profile.py): conditions with translations, MedDRA terms, MeSH areas, phase, who can join, products, status per country. Never people. Not part of `registered`. |
+| **Search document** | One per trial (`search.document`), built from its profile inside each transfer: its words weighted A (conditions) to D (inclusion criteria), its concepts, categories, ages, countries. Exclusion criteria are never indexed. |
+| **Gazetteer** | A dictionary of places with their names in many languages and their coordinates: GeoNames' places and postal codes, loaded offline (`trialwatch geo load`). |
+| **Geocoding** | Giving a site address a point (latitude, longitude): by its postcode, else its city's name, else a city named alike; its **precision** says which (`geo.address_point`). A site with none is never in a distance search. |
+| **Reading (interpretation)** | How the search read a query: condition words, place and distance, age, sex, healthy volunteers, phase. Shown above the results ("diabetes · near Paris, France · within 50 km") so a person can change it. Made by rules, never a model. |
+| **MeSH** | Medical Subject Headings, the U.S. National Library of Medicine's vocabulary: descriptors (e.g. D003920 Diabetes Mellitus) with entry terms (synonyms, many in lay words) and tree numbers (the hierarchy). Free to use. Our concept layer (`vocab.*`). |
+| **MeSH tree code** | A branch of MeSH's hierarchy, e.g. C04 Neoplasms, C18.452.394.750 Diabetes Mellitus; CTIS files a trial's therapeutic areas by the top branch. |
+| **MedDRA** | The Medical Dictionary for Regulatory Activities, which CTIS codes conditions in (LLT, PT, HLT, HLGT, SOC levels). Licensed: we keep only the terms CTIS publishes per trial. |
+| **Concept (of a trial)** | A MeSH descriptor a trial's conditions name, found without AI (exact name, same words, a phrase in the text) or by the AI tags from a shortlist, always with the words it was found in (`search.trial_concept`). A search for a concept also finds the trials under it in the tree. |
+| **Lay category** | A plain-language area (cancer, heart and blood vessels, …) made of MeSH branches, with the words people type for it in eight languages (src/trialwatch/search/categories.json). |
+| **AI tag** | A tag a model gave a recruiting trial (category, kind of medicine, purpose, synonym, MeSH concept, age limit), each naming the field it comes from and quoting it; kept only if the quote is in that field word for word (`search.annotation`). Shown as AI-made. |
+| **recall@k, nDCG** | Search quality measures: the share of the relevant trials found in the first k results; and how high the relevant ones rank (normalised discounted cumulative gain). |
+
 ## Project and tech
 
 | Term | Meaning |

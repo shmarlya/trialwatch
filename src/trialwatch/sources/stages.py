@@ -8,7 +8,10 @@ adapter, and the rule for which trials a check may read:
    (unlinking the ones the source no longer lists); then their page text is read. The trial's
    core.evidence_transfer row says 'complete' only when the record, every configured document and
    every page came in, else 'failed' and why. While a trial is being transferred its row says
-   failed, so an interrupted transfer never leaves half-new evidence looking complete.
+   failed, so an interrupted transfer never leaves half-new evidence looking complete. Each trial is
+   then indexed for patient search (ADR-008: its new sites geocoded, its search document built from
+   the profile the adapter stored), so it is findable the moment it arrives; a failure there is
+   reported but leaves the evidence complete.
 3. not_ready: a check reads a trial only when every source that holds the trial gave its evidence
    completely and it is still current (a stale transfer is transferred again first), including the
    document kinds the check reads that the source can give at all.
@@ -25,7 +28,10 @@ from pathlib import Path
 import psycopg
 
 from trialwatch.db import core
+from trialwatch.db import search as search_db
 from trialwatch.db.core import EvidenceRow, RegisteredSource
+from trialwatch.geo import load as geo_load
+from trialwatch.search import index as search_index
 from trialwatch.progress import Progress, report
 from trialwatch.sources.pages import extract_missing
 from trialwatch.sources.registry import Adapter, Fetched, adapter_class
@@ -222,6 +228,8 @@ def transfer(conn: psycopg.Connection, source: RegisteredSource, adapter: Adapte
                 status = _transfer_one(conn, source, adapter, key, kinds, files_dir, extract, result)
                 result.statuses[key] = status
                 report(progress, f"{number}/{len(wanted)} {key}: {status}")
+            if result.trial_ids:
+                _refresh_search_words(conn, result)
         except BaseException as exc:
             # Ctrl-C or a database error: the run is closed as failed (the trial in hand stays failed),
             # then the error goes on
@@ -274,6 +282,10 @@ def _transfer_one(conn: psycopg.Connection, source: RegisteredSource, adapter: A
     unread = core.files_without_pages(conn, [fetched.trial_id], results_only=False, kinds=kinds)
     if unread and not pages.failed:
         errors["pages"] = f"{len(unread)} files without page text"
+    problem = _index(conn, fetched.trial_id)
+    if problem is not None:
+        # what search reads is not evidence: reported, the transfer can still complete
+        result.failed[f"{key}/search"] = problem
     documents, page_count = core.evidence_counts(conn, fetched.trial_id, kinds)
     status = core.save_transfer(conn, source=source.code, source_key=key, run_id=result.run_id,
                                 documents=documents, pages=page_count, errors=errors, document_kinds=kinds)
@@ -282,6 +294,27 @@ def _transfer_one(conn: psycopg.Connection, source: RegisteredSource, adapter: A
     if status == "complete":
         result.complete += 1
     return status
+
+
+def _index(conn: psycopg.Connection, trial_id: int) -> str | None:
+    """Make the trial findable by patient search now (ADR-008): find where its new sites are and build
+    its search document from the profile just stored. Returns what went wrong, if anything."""
+    try:
+        with conn.transaction():
+            geo_load.geocode_missing(conn)
+            search_index.rebuild_trial(conn, trial_id)
+    except Exception as exc:  # `trialwatch search reindex` builds it later
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+def _refresh_search_words(conn: psycopg.Connection, result: TransferResult) -> None:
+    """Once a run's trials are indexed: the words "did you mean" offers (it reads every document)."""
+    try:
+        with conn.transaction():
+            search_db.refresh_terms(conn)
+    except Exception as exc:
+        result.failed["search words"] = f"{type(exc).__name__}: {exc}"
 
 
 # --- 3. which trials a check may read ----------------------------------------------------------

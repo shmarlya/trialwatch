@@ -37,10 +37,59 @@ CREATE SCHEMA core;
 
 
 --
+-- Name: geo; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA geo;
+
+
+--
 -- Name: jobs; Type: SCHEMA; Schema: -; Owner: -
 --
 
 CREATE SCHEMA jobs;
+
+
+--
+-- Name: search; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA search;
+
+
+--
+-- Name: vocab; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA vocab;
+
+
+--
+-- Name: pg_trgm; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION pg_trgm; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching based on trigrams';
+
+
+--
+-- Name: unaccent; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION unaccent; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION unaccent IS 'text search dictionary that removes accents';
 
 
 --
@@ -136,6 +185,107 @@ BEGIN
     RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;
 END
 $$;
+
+
+--
+-- Name: distance_km(double precision, double precision, double precision, double precision); Type: FUNCTION; Schema: geo; Owner: -
+--
+
+CREATE FUNCTION geo.distance_km(lat1 double precision, lon1 double precision, lat2 double precision, lon2 double precision) RETURNS double precision
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    RETURN (((2 * 6371))::double precision * asin(LEAST((1)::double precision, sqrt((power(sin((radians((lat2 - lat1)) / (2)::double precision)), (2)::double precision) + ((cos(radians(lat1)) * cos(radians(lat2))) * power(sin((radians((lon2 - lon1)) / (2)::double precision)), (2)::double precision)))))));
+
+
+--
+-- Name: name_key(text); Type: FUNCTION; Schema: geo; Owner: -
+--
+
+CREATE FUNCTION geo.name_key(name text) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    RETURN btrim(regexp_replace(lower(public.unaccent('public.unaccent'::regdictionary, COALESCE(name, ''::text))), '[^[:alnum:]]+'::text, ' '::text, 'g'::text));
+
+
+--
+-- Name: postcode_key(text); Type: FUNCTION; Schema: geo; Owner: -
+--
+
+CREATE FUNCTION geo.postcode_key(postcode text) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    RETURN regexp_replace(upper(COALESCE(postcode, ''::text)), '[^[:alnum:]]'::text, ''::text, 'g'::text);
+
+
+--
+-- Name: words_key(text); Type: FUNCTION; Schema: vocab; Owner: -
+--
+
+CREATE FUNCTION vocab.words_key(name text) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    RETURN array_to_string(ARRAY(SELECT DISTINCT word.word FROM unnest(string_to_array(geo.name_key(words_key.name), ' '::text)) word(word) WHERE (word.word <> ''::text) ORDER BY word.word), ' '::text);
+
+
+--
+-- Name: trialwatch; Type: TEXT SEARCH CONFIGURATION; Schema: search; Owner: -
+--
+
+CREATE TEXT SEARCH CONFIGURATION search.trialwatch (
+    PARSER = pg_catalog."default" );
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR asciiword WITH public.unaccent, simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR word WITH public.unaccent, simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR numword WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR email WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR url WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR host WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR sfloat WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR version WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR hword_numpart WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR hword_part WITH public.unaccent, simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR hword_asciipart WITH public.unaccent, simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR numhword WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR asciihword WITH public.unaccent, simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR hword WITH public.unaccent, simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR url_path WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR file WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR "float" WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR "int" WITH simple;
+
+ALTER TEXT SEARCH CONFIGURATION search.trialwatch
+    ADD MAPPING FOR uint WITH simple;
 
 
 SET default_tablespace = '';
@@ -663,7 +813,8 @@ CREATE TABLE core.api_call (
     cost_usd numeric(14,6),
     prices jsonb,
     request_id text,
-    job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint
+    job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint,
+    annotation_run_id bigint
 );
 
 
@@ -805,8 +956,16 @@ CREATE TABLE core.source_listing (
     first_listed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     last_listed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     last_run bigint NOT NULL,
-    delisted_at timestamp with time zone
+    delisted_at timestamp with time zone,
+    recruiting boolean
 );
+
+
+--
+-- Name: COLUMN source_listing.recruiting; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core.source_listing.recruiting IS 'the source''s list says the trial recruits now (CTIS: overall status 3 or 4); NULL: it doesn''t say';
 
 
 --
@@ -833,7 +992,8 @@ CREATE VIEW core.evidence_status AS
     e.document_kinds,
     e.documents,
     e.pages,
-    e.errors
+    e.errors,
+    l.recruiting
    FROM ((core.trial_source ts
      LEFT JOIN core.source_listing l USING (source_id, source_key))
      LEFT JOIN core.evidence_transfer e USING (source_id, source_key));
@@ -1096,6 +1256,9 @@ CREATE TABLE core.trial_location (
     status text,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     created_by bigint NOT NULL,
+    country_key text GENERATED ALWAYS AS (geo.name_key(country)) STORED,
+    postcode_key text GENERATED ALWAYS AS (geo.postcode_key(postcode)) STORED,
+    city_key text GENERATED ALWAYS AS (geo.name_key(city)) STORED,
     CONSTRAINT trial_location_country_check CHECK ((btrim(country) <> ''::text))
 );
 
@@ -1119,6 +1282,31 @@ ALTER TABLE core.trial_location ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY
     NO MAXVALUE
     CACHE 1
 );
+
+
+--
+-- Name: trial_profile; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.trial_profile (
+    trial_id bigint NOT NULL,
+    source_id smallint NOT NULL,
+    trial_record_id bigint,
+    profile jsonb NOT NULL,
+    profile_hash bytea NOT NULL,
+    recruiting boolean NOT NULL,
+    read_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    created_by bigint NOT NULL,
+    CONSTRAINT trial_profile_profile_hash_check CHECK ((length(profile_hash) = 32))
+);
+ALTER TABLE ONLY core.trial_profile ALTER COLUMN profile SET COMPRESSION lz4;
+
+
+--
+-- Name: TABLE trial_profile; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.trial_profile IS 'what a person looking for a trial needs, per trial and source, read from its record (sources/profile.py)';
 
 
 --
@@ -1155,6 +1343,167 @@ CREATE TABLE core.trial_sponsor (
 
 
 --
+-- Name: address_point; Type: TABLE; Schema: geo; Owner: -
+--
+
+CREATE TABLE geo.address_point (
+    country_key text NOT NULL,
+    postcode_key text NOT NULL,
+    city_key text NOT NULL,
+    iso2 character(2),
+    latitude double precision,
+    longitude double precision,
+    "precision" text NOT NULL,
+    matched text,
+    geocoded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT address_point_check CHECK ((("precision" = 'none'::text) = (latitude IS NULL))),
+    CONSTRAINT address_point_precision_check CHECK (("precision" = ANY (ARRAY['postcode'::text, 'city'::text, 'city-fuzzy'::text, 'none'::text])))
+);
+
+
+--
+-- Name: TABLE address_point; Type: COMMENT; Schema: geo; Owner: -
+--
+
+COMMENT ON TABLE geo.address_point IS 'where each distinct site address is (derived from geo.postcode and geo.place; trialwatch geo geocode)';
+
+
+--
+-- Name: country; Type: TABLE; Schema: geo; Owner: -
+--
+
+CREATE TABLE geo.country (
+    iso2 character(2) NOT NULL,
+    iso3 character(3),
+    name text NOT NULL,
+    languages text[] DEFAULT '{}'::text[] NOT NULL,
+    eea boolean DEFAULT false NOT NULL
+);
+
+
+--
+-- Name: TABLE country; Type: COMMENT; Schema: geo; Owner: -
+--
+
+COMMENT ON TABLE geo.country IS 'countries (GeoNames countryInfo), reference data replaced by each geo load';
+
+
+--
+-- Name: country_name; Type: TABLE; Schema: geo; Owner: -
+--
+
+CREATE TABLE geo.country_name (
+    name_key text NOT NULL,
+    iso2 character(2) NOT NULL,
+    name text NOT NULL
+);
+
+
+--
+-- Name: TABLE country_name; Type: COMMENT; Schema: geo; Owner: -
+--
+
+COMMENT ON TABLE geo.country_name IS 'every name we know a country by (English, its own languages, CTIS''s spellings), keyed by geo.name_key';
+
+
+--
+-- Name: load_run; Type: TABLE; Schema: geo; Owner: -
+--
+
+CREATE TABLE geo.load_run (
+    id bigint NOT NULL,
+    files jsonb DEFAULT '[]'::jsonb NOT NULL,
+    countries text[] NOT NULL,
+    places integer,
+    postcodes integer,
+    license text DEFAULT 'GeoNames, CC BY 4.0 (https://www.geonames.org)'::text NOT NULL,
+    started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    finished_at timestamp with time zone,
+    created_by bigint NOT NULL
+);
+
+
+--
+-- Name: TABLE load_run; Type: COMMENT; Schema: geo; Owner: -
+--
+
+COMMENT ON TABLE geo.load_run IS 'each load of GeoNames reference data (trialwatch geo load)';
+
+
+--
+-- Name: load_run_id_seq; Type: SEQUENCE; Schema: geo; Owner: -
+--
+
+ALTER TABLE geo.load_run ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME geo.load_run_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: place; Type: TABLE; Schema: geo; Owner: -
+--
+
+CREATE TABLE geo.place (
+    geonameid bigint NOT NULL,
+    name text NOT NULL,
+    country_code character(2) NOT NULL,
+    population bigint DEFAULT 0 NOT NULL,
+    latitude double precision NOT NULL,
+    longitude double precision NOT NULL
+);
+
+
+--
+-- Name: TABLE place; Type: COMMENT; Schema: geo; Owner: -
+--
+
+COMMENT ON TABLE geo.place IS 'populated places of the EU/EEA with 1000+ people (GeoNames cities1000)';
+
+
+--
+-- Name: place_name; Type: TABLE; Schema: geo; Owner: -
+--
+
+CREATE TABLE geo.place_name (
+    geonameid bigint NOT NULL,
+    name_key text NOT NULL
+);
+
+
+--
+-- Name: TABLE place_name; Type: COMMENT; Schema: geo; Owner: -
+--
+
+COMMENT ON TABLE geo.place_name IS 'every name of a place (its own, ASCII, and alternate names in other languages: Wien, Vienna, Vienne)';
+
+
+--
+-- Name: postcode; Type: TABLE; Schema: geo; Owner: -
+--
+
+CREATE TABLE geo.postcode (
+    country_code character(2) NOT NULL,
+    postcode_key text NOT NULL,
+    postcode text NOT NULL,
+    place_name text NOT NULL,
+    latitude double precision NOT NULL,
+    longitude double precision NOT NULL
+);
+
+
+--
+-- Name: TABLE postcode; Type: COMMENT; Schema: geo; Owner: -
+--
+
+COMMENT ON TABLE geo.postcode IS 'postal codes with a point (GeoNames postal code files), EU/EEA';
+
+
+--
 -- Name: job; Type: TABLE; Schema: jobs; Owner: -
 --
 
@@ -1180,7 +1529,7 @@ CREATE TABLE jobs.job (
     started_at timestamp with time zone,
     finished_at timestamp with time zone,
     CONSTRAINT job_check CHECK (((status = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text])) = (finished_at IS NOT NULL))),
-    CONSTRAINT job_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text]))),
+    CONSTRAINT job_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text, 'annotate'::text]))),
     CONSTRAINT job_max_attempts_check CHECK ((max_attempts >= 1)),
     CONSTRAINT job_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'waiting'::text, 'held'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
 );
@@ -1243,7 +1592,7 @@ CREATE TABLE jobs.schedule (
     frequency text DEFAULT 'weekly'::text NOT NULL,
     CONSTRAINT schedule_frequency_check CHECK ((frequency = ANY (ARRAY['daily'::text, 'weekly'::text, 'monthly'::text]))),
     CONSTRAINT schedule_hour_utc_check CHECK (((hour_utc >= 0) AND (hour_utc <= 23))),
-    CONSTRAINT schedule_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text]))),
+    CONSTRAINT schedule_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text, 'annotate'::text]))),
     CONSTRAINT schedule_weekday_check CHECK (((weekday >= 1) AND (weekday <= 7)))
 );
 
@@ -1283,6 +1632,270 @@ ALTER TABLE jobs.schedule ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
 CREATE TABLE public.schema_migrations (
     version character varying NOT NULL
 );
+
+
+--
+-- Name: annotation; Type: TABLE; Schema: search; Owner: -
+--
+
+CREATE TABLE search.annotation (
+    id bigint NOT NULL,
+    run_id bigint CONSTRAINT annotation_run_id_not_null1 NOT NULL,
+    trial_id bigint NOT NULL,
+    profile_hash bytea NOT NULL,
+    served_by text,
+    facts jsonb DEFAULT '{}'::jsonb NOT NULL,
+    dropped jsonb DEFAULT '[]'::jsonb NOT NULL,
+    request jsonb,
+    raw_answer text,
+    error text,
+    input_tokens integer DEFAULT 0 NOT NULL,
+    output_tokens integer DEFAULT 0 NOT NULL,
+    cost_usd numeric(14,6),
+    duration_ms integer,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT annotation_profile_hash_check CHECK ((length(profile_hash) = 32))
+);
+ALTER TABLE ONLY search.annotation ALTER COLUMN request SET COMPRESSION lz4;
+
+
+--
+-- Name: TABLE annotation; Type: COMMENT; Schema: search; Owner: -
+--
+
+COMMENT ON TABLE search.annotation IS 'one trial''s AI tags in a run: kept facts with their quotes, dropped ones with why';
+
+
+--
+-- Name: annotation_id_seq; Type: SEQUENCE; Schema: search; Owner: -
+--
+
+ALTER TABLE search.annotation ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME search.annotation_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: annotation_run; Type: TABLE; Schema: search; Owner: -
+--
+
+CREATE TABLE search.annotation_run (
+    id bigint NOT NULL,
+    model text NOT NULL,
+    effort text NOT NULL,
+    prompt text NOT NULL,
+    prompt_sha256 bytea NOT NULL,
+    prompt_text text NOT NULL,
+    params jsonb DEFAULT '{}'::jsonb NOT NULL,
+    status text DEFAULT 'running'::text NOT NULL,
+    error text,
+    trials integer DEFAULT 0 NOT NULL,
+    input_tokens bigint DEFAULT 0 NOT NULL,
+    output_tokens bigint DEFAULT 0 NOT NULL,
+    cost_usd numeric(14,6) DEFAULT 0 NOT NULL,
+    job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint,
+    started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    finished_at timestamp with time zone,
+    created_by bigint NOT NULL,
+    CONSTRAINT annotation_run_prompt_sha256_check CHECK ((length(prompt_sha256) = 32)),
+    CONSTRAINT annotation_run_status_check CHECK ((status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'stopped'::text])))
+);
+
+
+--
+-- Name: TABLE annotation_run; Type: COMMENT; Schema: search; Owner: -
+--
+
+COMMENT ON TABLE search.annotation_run IS 'a run of AI tagging of recruiting trials, with the exact prompt it sent';
+
+
+--
+-- Name: annotation_run_id_seq; Type: SEQUENCE; Schema: search; Owner: -
+--
+
+ALTER TABLE search.annotation_run ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME search.annotation_run_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: document; Type: TABLE; Schema: search; Owner: -
+--
+
+CREATE TABLE search.document (
+    trial_id bigint NOT NULL,
+    source_id smallint NOT NULL,
+    profile_hash bytea NOT NULL,
+    recruiting boolean NOT NULL,
+    recruiting_countries text[] DEFAULT '{}'::text[] NOT NULL,
+    title text,
+    conditions text[] DEFAULT '{}'::text[] NOT NULL,
+    categories text[] DEFAULT '{}'::text[] NOT NULL,
+    phase text,
+    age_groups text[] DEFAULT '{}'::text[] NOT NULL,
+    female boolean,
+    male boolean,
+    healthy_volunteers boolean,
+    patients boolean,
+    rare boolean DEFAULT false NOT NULL,
+    tsv tsvector NOT NULL,
+    built_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    annotation_id bigint,
+    age_min numeric,
+    age_max numeric,
+    interventions text[] DEFAULT '{}'::text[] NOT NULL,
+    purposes text[] DEFAULT '{}'::text[] NOT NULL
+);
+
+
+--
+-- Name: TABLE document; Type: COMMENT; Schema: search; Owner: -
+--
+
+COMMENT ON TABLE search.document IS 'one per trial, built from its profile: what patient search matches (ADR-008)';
+
+
+--
+-- Name: term; Type: TABLE; Schema: search; Owner: -
+--
+
+CREATE TABLE search.term (
+    term text NOT NULL,
+    documents integer NOT NULL
+);
+
+
+--
+-- Name: TABLE term; Type: COMMENT; Schema: search; Owner: -
+--
+
+COMMENT ON TABLE search.term IS 'words of recruiting trials'' conditions and titles, for "did you mean"';
+
+
+--
+-- Name: trial_concept; Type: TABLE; Schema: search; Owner: -
+--
+
+CREATE TABLE search.trial_concept (
+    trial_id bigint NOT NULL,
+    ui text NOT NULL,
+    method text NOT NULL,
+    field text NOT NULL,
+    quote text NOT NULL,
+    CONSTRAINT trial_concept_method_check CHECK ((method = ANY (ARRAY['exact-name'::text, 'same-words'::text, 'phrase'::text, 'ai-quote'::text])))
+);
+
+
+--
+-- Name: TABLE trial_concept; Type: COMMENT; Schema: search; Owner: -
+--
+
+COMMENT ON TABLE search.trial_concept IS 'the MeSH descriptors a trial''s conditions name, with the words they were found in';
+
+
+--
+-- Name: load_run; Type: TABLE; Schema: vocab; Owner: -
+--
+
+CREATE TABLE vocab.load_run (
+    id bigint NOT NULL,
+    vocabulary text NOT NULL,
+    version text NOT NULL,
+    file text NOT NULL,
+    sha256 text NOT NULL,
+    descriptors integer,
+    terms integer,
+    license text NOT NULL,
+    started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    finished_at timestamp with time zone,
+    created_by bigint NOT NULL
+);
+
+
+--
+-- Name: TABLE load_run; Type: COMMENT; Schema: vocab; Owner: -
+--
+
+COMMENT ON TABLE vocab.load_run IS 'each load of a vocabulary (trialwatch vocab load)';
+
+
+--
+-- Name: load_run_id_seq; Type: SEQUENCE; Schema: vocab; Owner: -
+--
+
+ALTER TABLE vocab.load_run ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME vocab.load_run_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: mesh_descriptor; Type: TABLE; Schema: vocab; Owner: -
+--
+
+CREATE TABLE vocab.mesh_descriptor (
+    ui text NOT NULL,
+    name text NOT NULL,
+    tree_numbers text[] NOT NULL,
+    CONSTRAINT mesh_descriptor_ui_check CHECK ((ui ~ '^D[0-9]+$'::text))
+);
+
+
+--
+-- Name: TABLE mesh_descriptor; Type: COMMENT; Schema: vocab; Owner: -
+--
+
+COMMENT ON TABLE vocab.mesh_descriptor IS 'MeSH descriptors of diseases (C) and mental disorders (F03)';
+
+
+--
+-- Name: mesh_term; Type: TABLE; Schema: vocab; Owner: -
+--
+
+CREATE TABLE vocab.mesh_term (
+    name_key text NOT NULL,
+    ui text NOT NULL,
+    term text NOT NULL,
+    words_key text NOT NULL
+);
+
+
+--
+-- Name: TABLE mesh_term; Type: COMMENT; Schema: vocab; Owner: -
+--
+
+COMMENT ON TABLE vocab.mesh_term IS 'every entry term of a MeSH descriptor (its name and synonyms), keyed by geo.name_key';
+
+
+--
+-- Name: mesh_tree; Type: TABLE; Schema: vocab; Owner: -
+--
+
+CREATE TABLE vocab.mesh_tree (
+    tree_number text NOT NULL,
+    ui text NOT NULL
+);
+
+
+--
+-- Name: TABLE mesh_tree; Type: COMMENT; Schema: vocab; Owner: -
+--
+
+COMMENT ON TABLE vocab.mesh_tree IS 'where each MeSH descriptor sits in the hierarchy (C18.452.394.750 is under C18.452.394)';
 
 
 --
@@ -1574,6 +2187,14 @@ ALTER TABLE ONLY core.trial
 
 
 --
+-- Name: trial_profile trial_profile_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_profile
+    ADD CONSTRAINT trial_profile_pkey PRIMARY KEY (trial_id, source_id);
+
+
+--
 -- Name: trial_record trial_record_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -1595,6 +2216,54 @@ ALTER TABLE ONLY core.trial_source
 
 ALTER TABLE ONLY core.trial_sponsor
     ADD CONSTRAINT trial_sponsor_pkey PRIMARY KEY (trial_id, organisation_id);
+
+
+--
+-- Name: address_point address_point_pkey; Type: CONSTRAINT; Schema: geo; Owner: -
+--
+
+ALTER TABLE ONLY geo.address_point
+    ADD CONSTRAINT address_point_pkey PRIMARY KEY (country_key, postcode_key, city_key);
+
+
+--
+-- Name: country_name country_name_pkey; Type: CONSTRAINT; Schema: geo; Owner: -
+--
+
+ALTER TABLE ONLY geo.country_name
+    ADD CONSTRAINT country_name_pkey PRIMARY KEY (name_key, iso2);
+
+
+--
+-- Name: country country_pkey; Type: CONSTRAINT; Schema: geo; Owner: -
+--
+
+ALTER TABLE ONLY geo.country
+    ADD CONSTRAINT country_pkey PRIMARY KEY (iso2);
+
+
+--
+-- Name: load_run load_run_pkey; Type: CONSTRAINT; Schema: geo; Owner: -
+--
+
+ALTER TABLE ONLY geo.load_run
+    ADD CONSTRAINT load_run_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: place_name place_name_pkey; Type: CONSTRAINT; Schema: geo; Owner: -
+--
+
+ALTER TABLE ONLY geo.place_name
+    ADD CONSTRAINT place_name_pkey PRIMARY KEY (name_key, geonameid);
+
+
+--
+-- Name: place place_pkey; Type: CONSTRAINT; Schema: geo; Owner: -
+--
+
+ALTER TABLE ONLY geo.place
+    ADD CONSTRAINT place_pkey PRIMARY KEY (geonameid);
 
 
 --
@@ -1635,6 +2304,86 @@ ALTER TABLE ONLY jobs.schedule
 
 ALTER TABLE ONLY public.schema_migrations
     ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
+
+
+--
+-- Name: annotation annotation_pkey; Type: CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.annotation
+    ADD CONSTRAINT annotation_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: annotation annotation_run_id_trial_id_key; Type: CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.annotation
+    ADD CONSTRAINT annotation_run_id_trial_id_key UNIQUE (run_id, trial_id);
+
+
+--
+-- Name: annotation_run annotation_run_pkey; Type: CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.annotation_run
+    ADD CONSTRAINT annotation_run_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: document document_pkey; Type: CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.document
+    ADD CONSTRAINT document_pkey PRIMARY KEY (trial_id);
+
+
+--
+-- Name: term term_pkey; Type: CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.term
+    ADD CONSTRAINT term_pkey PRIMARY KEY (term);
+
+
+--
+-- Name: trial_concept trial_concept_pkey; Type: CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.trial_concept
+    ADD CONSTRAINT trial_concept_pkey PRIMARY KEY (trial_id, ui, field);
+
+
+--
+-- Name: load_run load_run_pkey; Type: CONSTRAINT; Schema: vocab; Owner: -
+--
+
+ALTER TABLE ONLY vocab.load_run
+    ADD CONSTRAINT load_run_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: mesh_descriptor mesh_descriptor_pkey; Type: CONSTRAINT; Schema: vocab; Owner: -
+--
+
+ALTER TABLE ONLY vocab.mesh_descriptor
+    ADD CONSTRAINT mesh_descriptor_pkey PRIMARY KEY (ui);
+
+
+--
+-- Name: mesh_term mesh_term_pkey; Type: CONSTRAINT; Schema: vocab; Owner: -
+--
+
+ALTER TABLE ONLY vocab.mesh_term
+    ADD CONSTRAINT mesh_term_pkey PRIMARY KEY (name_key, ui);
+
+
+--
+-- Name: mesh_tree mesh_tree_pkey; Type: CONSTRAINT; Schema: vocab; Owner: -
+--
+
+ALTER TABLE ONLY vocab.mesh_tree
+    ADD CONSTRAINT mesh_tree_pkey PRIMARY KEY (tree_number);
 
 
 --
@@ -1785,6 +2534,13 @@ CREATE INDEX trial_identifier_trial_idx ON core.trial_identifier USING btree (tr
 
 
 --
+-- Name: trial_location_address_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX trial_location_address_idx ON core.trial_location USING btree (country_key, postcode_key, city_key);
+
+
+--
 -- Name: trial_location_city_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -1806,6 +2562,13 @@ CREATE INDEX trial_location_trial_idx ON core.trial_location USING btree (trial_
 
 
 --
+-- Name: trial_profile_recruiting_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX trial_profile_recruiting_idx ON core.trial_profile USING btree (trial_id) WHERE recruiting;
+
+
+--
 -- Name: trial_record_latest_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -1824,6 +2587,34 @@ CREATE INDEX trial_source_trial_idx ON core.trial_source USING btree (trial_id);
 --
 
 CREATE INDEX trial_sponsor_organisation_idx ON core.trial_sponsor USING btree (organisation_id);
+
+
+--
+-- Name: address_point_latitude_idx; Type: INDEX; Schema: geo; Owner: -
+--
+
+CREATE INDEX address_point_latitude_idx ON geo.address_point USING btree (latitude) WHERE (latitude IS NOT NULL);
+
+
+--
+-- Name: place_country_idx; Type: INDEX; Schema: geo; Owner: -
+--
+
+CREATE INDEX place_country_idx ON geo.place USING btree (country_code);
+
+
+--
+-- Name: place_name_trgm_idx; Type: INDEX; Schema: geo; Owner: -
+--
+
+CREATE INDEX place_name_trgm_idx ON geo.place_name USING gin (name_key public.gin_trgm_ops);
+
+
+--
+-- Name: postcode_idx; Type: INDEX; Schema: geo; Owner: -
+--
+
+CREATE INDEX postcode_idx ON geo.postcode USING btree (country_code, postcode_key);
 
 
 --
@@ -1852,6 +2643,55 @@ CREATE INDEX job_queue_idx ON jobs.job USING btree (priority, id) WHERE (status 
 --
 
 CREATE INDEX job_status_idx ON jobs.job USING btree (status, id DESC);
+
+
+--
+-- Name: annotation_trial_idx; Type: INDEX; Schema: search; Owner: -
+--
+
+CREATE INDEX annotation_trial_idx ON search.annotation USING btree (trial_id, profile_hash, id DESC);
+
+
+--
+-- Name: document_recruiting_idx; Type: INDEX; Schema: search; Owner: -
+--
+
+CREATE INDEX document_recruiting_idx ON search.document USING btree (trial_id) WHERE recruiting;
+
+
+--
+-- Name: document_tsv_idx; Type: INDEX; Schema: search; Owner: -
+--
+
+CREATE INDEX document_tsv_idx ON search.document USING gin (tsv);
+
+
+--
+-- Name: term_trgm_idx; Type: INDEX; Schema: search; Owner: -
+--
+
+CREATE INDEX term_trgm_idx ON search.term USING gin (term public.gin_trgm_ops);
+
+
+--
+-- Name: mesh_term_trgm_idx; Type: INDEX; Schema: vocab; Owner: -
+--
+
+CREATE INDEX mesh_term_trgm_idx ON vocab.mesh_term USING gin (name_key public.gin_trgm_ops);
+
+
+--
+-- Name: mesh_term_words_idx; Type: INDEX; Schema: vocab; Owner: -
+--
+
+CREATE INDEX mesh_term_words_idx ON vocab.mesh_term USING btree (words_key);
+
+
+--
+-- Name: mesh_tree_ui_idx; Type: INDEX; Schema: vocab; Owner: -
+--
+
+CREATE INDEX mesh_tree_ui_idx ON vocab.mesh_tree USING btree (ui);
 
 
 --
@@ -2016,6 +2856,13 @@ CREATE TRIGGER trial_location_audit AFTER INSERT OR DELETE OR UPDATE ON core.tri
 
 
 --
+-- Name: trial_profile trial_profile_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER trial_profile_audit AFTER INSERT OR DELETE OR UPDATE ON core.trial_profile FOR EACH ROW EXECUTE FUNCTION core.audit('trial_id,source_id', 'profile,read_at');
+
+
+--
 -- Name: trial_record trial_record_audit; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -2037,6 +2884,13 @@ CREATE TRIGGER trial_sponsor_audit AFTER INSERT OR DELETE OR UPDATE ON core.tria
 
 
 --
+-- Name: load_run load_run_audit; Type: TRIGGER; Schema: geo; Owner: -
+--
+
+CREATE TRIGGER load_run_audit AFTER INSERT OR DELETE OR UPDATE ON geo.load_run FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
 -- Name: job job_audit; Type: TRIGGER; Schema: jobs; Owner: -
 --
 
@@ -2048,6 +2902,20 @@ CREATE TRIGGER job_audit AFTER INSERT OR DELETE OR UPDATE ON jobs.job FOR EACH R
 --
 
 CREATE TRIGGER schedule_audit AFTER INSERT OR DELETE OR UPDATE ON jobs.schedule FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
+-- Name: annotation_run annotation_run_audit; Type: TRIGGER; Schema: search; Owner: -
+--
+
+CREATE TRIGGER annotation_run_audit AFTER INSERT OR DELETE OR UPDATE ON search.annotation_run FOR EACH ROW EXECUTE FUNCTION core.audit('id', 'prompt_text');
+
+
+--
+-- Name: load_run load_run_audit; Type: TRIGGER; Schema: vocab; Owner: -
+--
+
+CREATE TRIGGER load_run_audit AFTER INSERT OR DELETE OR UPDATE ON vocab.load_run FOR EACH ROW EXECUTE FUNCTION core.audit('id');
 
 
 --
@@ -2192,6 +3060,14 @@ ALTER TABLE ONLY checks.step
 
 ALTER TABLE ONLY core.api_call
     ADD CONSTRAINT api_call_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES core.actor(id);
+
+
+--
+-- Name: api_call api_call_annotation_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.api_call
+    ADD CONSTRAINT api_call_annotation_run_id_fkey FOREIGN KEY (annotation_run_id) REFERENCES search.annotation_run(id);
 
 
 --
@@ -2571,6 +3447,38 @@ ALTER TABLE ONLY core.trial
 
 
 --
+-- Name: trial_profile trial_profile_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_profile
+    ADD CONSTRAINT trial_profile_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: trial_profile trial_profile_source_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_profile
+    ADD CONSTRAINT trial_profile_source_id_fkey FOREIGN KEY (source_id) REFERENCES core.source(id);
+
+
+--
+-- Name: trial_profile trial_profile_trial_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_profile
+    ADD CONSTRAINT trial_profile_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: trial_profile trial_profile_trial_record_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.trial_profile
+    ADD CONSTRAINT trial_profile_trial_record_id_fkey FOREIGN KEY (trial_record_id) REFERENCES core.trial_record(id);
+
+
+--
 -- Name: trial_record trial_record_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -2651,6 +3559,30 @@ ALTER TABLE ONLY core.trial_sponsor
 
 
 --
+-- Name: country_name country_name_iso2_fkey; Type: FK CONSTRAINT; Schema: geo; Owner: -
+--
+
+ALTER TABLE ONLY geo.country_name
+    ADD CONSTRAINT country_name_iso2_fkey FOREIGN KEY (iso2) REFERENCES geo.country(iso2);
+
+
+--
+-- Name: load_run load_run_created_by_fkey; Type: FK CONSTRAINT; Schema: geo; Owner: -
+--
+
+ALTER TABLE ONLY geo.load_run
+    ADD CONSTRAINT load_run_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: place_name place_name_geonameid_fkey; Type: FK CONSTRAINT; Schema: geo; Owner: -
+--
+
+ALTER TABLE ONLY geo.place_name
+    ADD CONSTRAINT place_name_geonameid_fkey FOREIGN KEY (geonameid) REFERENCES geo.place(geonameid) ON DELETE CASCADE;
+
+
+--
 -- Name: job job_created_by_fkey; Type: FK CONSTRAINT; Schema: jobs; Owner: -
 --
 
@@ -2683,6 +3615,94 @@ ALTER TABLE ONLY jobs.job
 
 
 --
+-- Name: annotation_run annotation_run_created_by_fkey; Type: FK CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.annotation_run
+    ADD CONSTRAINT annotation_run_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: annotation annotation_run_id_fkey; Type: FK CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.annotation
+    ADD CONSTRAINT annotation_run_id_fkey FOREIGN KEY (run_id) REFERENCES search.annotation_run(id);
+
+
+--
+-- Name: annotation_run annotation_run_job_id_fkey; Type: FK CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.annotation_run
+    ADD CONSTRAINT annotation_run_job_id_fkey FOREIGN KEY (job_id) REFERENCES jobs.job(id);
+
+
+--
+-- Name: annotation annotation_trial_id_fkey; Type: FK CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.annotation
+    ADD CONSTRAINT annotation_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: document document_annotation_id_fkey; Type: FK CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.document
+    ADD CONSTRAINT document_annotation_id_fkey FOREIGN KEY (annotation_id) REFERENCES search.annotation(id);
+
+
+--
+-- Name: document document_source_id_fkey; Type: FK CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.document
+    ADD CONSTRAINT document_source_id_fkey FOREIGN KEY (source_id) REFERENCES core.source(id);
+
+
+--
+-- Name: document document_trial_id_fkey; Type: FK CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.document
+    ADD CONSTRAINT document_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: trial_concept trial_concept_trial_id_fkey; Type: FK CONSTRAINT; Schema: search; Owner: -
+--
+
+ALTER TABLE ONLY search.trial_concept
+    ADD CONSTRAINT trial_concept_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: load_run load_run_created_by_fkey; Type: FK CONSTRAINT; Schema: vocab; Owner: -
+--
+
+ALTER TABLE ONLY vocab.load_run
+    ADD CONSTRAINT load_run_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
+-- Name: mesh_term mesh_term_ui_fkey; Type: FK CONSTRAINT; Schema: vocab; Owner: -
+--
+
+ALTER TABLE ONLY vocab.mesh_term
+    ADD CONSTRAINT mesh_term_ui_fkey FOREIGN KEY (ui) REFERENCES vocab.mesh_descriptor(ui) ON DELETE CASCADE;
+
+
+--
+-- Name: mesh_tree mesh_tree_ui_fkey; Type: FK CONSTRAINT; Schema: vocab; Owner: -
+--
+
+ALTER TABLE ONLY vocab.mesh_tree
+    ADD CONSTRAINT mesh_tree_ui_fkey FOREIGN KEY (ui) REFERENCES vocab.mesh_descriptor(ui) ON DELETE CASCADE;
+
+
+--
 -- PostgreSQL database dump complete
 --
 
@@ -2703,4 +3723,10 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261122120000'),
     ('20261122130000'),
     ('20261122140000'),
-    ('20261122150000');
+    ('20261122150000'),
+    ('20261123100000'),
+    ('20261123110000'),
+    ('20261123120000'),
+    ('20261123130000'),
+    ('20261123140000'),
+    ('20261123150000');

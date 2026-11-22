@@ -1183,3 +1183,13 @@ def trial_transfers(conn: psycopg.Connection, trial_id: int) -> list[TransferRow
             """,
             (trial_id,),
         ).fetchall()
+
+
+def listing_updated_on(conn: psycopg.Connection, trial_id: int) -> date | None:
+    """The day a source last changed the trial, as its list says (the newest of its sources)."""
+    row = conn.execute(
+        "SELECT max(l.source_updated_on) FROM core.trial_source ts JOIN core.source_listing l USING (source_id, source_key) "
+        "WHERE ts.trial_id = %s",
+        (trial_id,),
+    ).fetchone()
+    return row[0]

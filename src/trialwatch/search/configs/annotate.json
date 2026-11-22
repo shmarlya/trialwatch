@@ -1,0 +1,9 @@
+{
+  "description": "AI tags with checked quotes for patient search (ADR-008): one call per recruiting trial",
+  "model": "claude-haiku-5-5",
+  "effort": "low",
+  "prompt": "annotate",
+  "max_tokens": 8000,
+  "max_languages": 6,
+  "max_candidates": 15
+}

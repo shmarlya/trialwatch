@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% from "patient.html" import search_box, trial_card, disclaimer %}
+{% block title %}Find a trial that is recruiting · TrialWatch{% endblock %}
+{% block content %}
+<h1>Find a trial that is recruiting</h1>
+<p class="sub">Clinical trials of medicines in the EU register (CTIS) that are looking for participants now: {{ "{:,}".format(indexed) }} trials, searched by condition, place and who can join.</p>
+{{ search_box(params.q, autofocus=not result) }}
+
+{% if result %}
+{% set reading = result.reading %}
+<div class="interpretation" role="status">
+  <span class="small muted">Searching for</span>
+  {% for part in describe(reading) %}<b>{{ part }}</b>{% if not loop.last %} · {% endif %}{% endfor %}
+  {% for word, known in result.corrected.items() %}<br><span class="small">“{{ word }}” is in no recruiting trial: searched for <b>{{ known }}</b> instead.</span>{% endfor %}
+  {% if result.relaxed %}<br><span class="small">No trial has all of these words: showing trials with any of them.</span>{% endif %}
+  {% for note in reading.notes %}<br><span class="small muted">{{ note }}</span>{% endfor %}
+  {% if reading.concepts %}<br><span class="small muted">Also finds trials filed under: {% for ui, name in reading.concepts %}{{ name }}{% if not loop.last %}, {% endif %}{% endfor %} (MeSH)</span>{% endif %}
+  {% if links.alternatives %}<br><span class="small">Or did you mean:
+    {% for label, href in links.alternatives %}<a href="{{ href }}">{{ label }}</a>{% if not loop.last %} · {% endif %}{% endfor %}</span>{% endif %}
+</div>
+
+<details class="refine"{% if params.what or params.where %} open{% endif %}>
+  <summary>Change the search</summary>
+  <form method="get" action="/find" class="refine-form">
+    <label>Condition <input type="text" name="what" value="{{ params.what or reading.condition_words | join(' ') }}" maxlength="200"></label>
+    <label>Place, postal code or country <input type="text" name="where" value="{% if params.where %}{{ params.where }}{% elif reading.place %}{{ reading.place.name }}, {{ reading.place.country_name }}{% elif reading.country %}{{ reading.country[1] }}{% endif %}" maxlength="200"></label>
+    <label>Distance <select name="km">{% for km in distances %}<option value="{{ km }}"{% if (reading.radius_km == km) or (km == 0 and reading.place and reading.radius_km is none) %} selected{% endif %}>{% if km %}within {{ km }} km{% else %}anywhere in the country{% endif %}</option>{% endfor %}</select></label>
+    <label>Age <input type="number" name="age" min="0" max="120" value="{{ reading.age if reading.age is not none else '' }}"></label>
+    <label>Sex <select name="sex"><option value="">any</option><option value="female"{% if reading.sex == "female" %} selected{% endif %}>a woman</option><option value="male"{% if reading.sex == "male" %} selected{% endif %}>a man</option></select></label>
+    <label>Taking part as <select name="hv"><option value="">anyone</option><option value="no"{% if reading.healthy_volunteers is sameas false %} selected{% endif %}>a patient</option><option value="yes"{% if reading.healthy_volunteers %} selected{% endif %}>a healthy volunteer</option></select></label>
+    <label>Phase <select name="phase"><option value="">any</option>{% for phase in ["1", "2", "3", "4"] %}<option value="{{ phase }}"{% if reading.phase == phase %} selected{% endif %}>{{ phase_words[phase] }}</option>{% endfor %}</select></label>
+    <label>Area <select name="cat"><option value="">any</option>{% for category in categories %}<option value="{{ category.slug }}"{% if reading.category == category.slug %} selected{% endif %}>{{ category.name }}</option>{% endfor %}</select></label>
+    <button>Search</button>
+  </form>
+</details>
+
+{% if links.distances %}
+<p class="small radius-counts">{% for km, count, href, current in links.distances %}<a href="{{ href }}"{% if current %} aria-current="true"{% endif %}>{{ count }} within {{ km }} km</a> · {% endfor %}{{ result.counts.anywhere }} anywhere</p>
+{% endif %}
+
+<p class="small muted">{{ "{:,}".format(result.total) }} trial{% if result.total != 1 %}s{% endif %} recruiting{% if result.pages > 1 %} · page {{ result.page }} of {{ result.pages }}{% endif %}</p>
+{% for hit in result.hits %}
+  {{ trial_card(hit, urls[hit.trial_id], reading.radius_km, phase_words, age_words) }}
+{% else %}
+  <div class="panel"><p>No recruiting trial matches.{% if reading.place and result.counts and result.counts.anywhere %} {{ result.counts.anywhere }} recruit further away: choose a larger distance above.{% else %} Try fewer words, the condition's everyday name, or another place.{% endif %}</p></div>
+{% endfor %}
+{% if result.pages > 1 %}
+<div class="pager small">
+  {% if links.previous %}<a href="{{ links.previous }}">← previous</a>{% endif %}
+  <span class="muted">page {{ result.page }} of {{ result.pages }}</span>
+  {% if links.next %}<a href="{{ links.next }}">next →</a>{% endif %}
+</div>
+{% endif %}
+{% else %}
+<p class="small">Try: {% for example, href in examples %}<a href="{{ href }}">{{ example }}</a>{% if not loop.last %} · {% endif %}{% endfor %}</p>
+<p class="small muted">The search reads the condition and the place out of what you type, in any EU language; it shows how it read them, and you can change that. It finds a condition by its everyday and medical names (MeSH, U.S. National Library of Medicine), and a place by its name in any language or its postal code, then measures the distance to each trial site (place data: GeoNames). Nothing you search for is stored.</p>
+{% endif %}
+{{ disclaimer() }}
+{% endblock %}

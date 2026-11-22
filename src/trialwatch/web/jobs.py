@@ -26,7 +26,7 @@ class JobRequest:
     # list and transfer: the registered source (core.source code)
     source: str = ""
     # transfer: the source's keys of the chosen trials (e.g. EU CT numbers), or which of its trials
-    # (core.TRANSFER_CHOICES: pending, failed, stale, listed)
+    # (core.TRANSFER_CHOICES: pending, failed, stale, recruiting, listed)
     keys: list[str] = field(default_factory=list)
     which: str = ""
     # core.trial ids, for checking trials chosen in the interface (e.g. "check again" on a trial page)

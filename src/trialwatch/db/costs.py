@@ -15,17 +15,18 @@ MONTHLY_CAP = "spend.monthly_cap_usd"
 
 
 def record_call(conn: psycopg.Connection, cost: CallCost, *, operation: str, check_run_id: int | None = None,
-                trial_id: int | None = None, call_number: int | None = None, request_id: str | None = None) -> None:
-    """Add one billed attempt, made for the session's actor."""
+                trial_id: int | None = None, call_number: int | None = None, request_id: str | None = None,
+                annotation_run_id: int | None = None) -> None:
+    """Add one billed attempt, made for the session's actor (for a check run, or an AI tagging run)."""
     prices = None
     if cost.prices is not None:
         prices = Jsonb(cost.prices)
     conn.execute(
         "INSERT INTO core.api_call (actor_id, model, operation, check_run_id, trial_id, call_number, input_tokens, "
-        "output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, prices, request_id) "
-        "VALUES (current_setting('trialwatch.actor')::bigint, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, prices, request_id, annotation_run_id) "
+        "VALUES (current_setting('trialwatch.actor')::bigint, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (cost.model, operation, check_run_id, trial_id, call_number, cost.input_tokens, cost.output_tokens,
-         cost.cache_write_tokens, cost.cache_read_tokens, cost.cost_usd, prices, request_id),
+         cost.cache_write_tokens, cost.cache_read_tokens, cost.cost_usd, prices, request_id, annotation_run_id),
     )
 
 

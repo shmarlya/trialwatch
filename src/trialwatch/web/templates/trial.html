@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "macros.html" import label, part, when, outcome, found_answer, evidence_state, setup_select %}
+{% from "patient.html" import patient_sections %}
 {% block title %}{{ row.name }} · TrialWatch{% endblock %}
 {% block content %}
 <h1>{{ row.name }}</h1>
@@ -49,6 +50,11 @@
     {% else %}<p class="muted">None registered.</p>{% endif %}
   </div>
 </div>
+
+{% if patient %}
+<h2 id="patients">For people looking for a trial</h2>
+{{ patient_sections(patient) }}
+{% endif %}
 
 <h2 id="where">Where it runs</h2>
 {% if locations %}

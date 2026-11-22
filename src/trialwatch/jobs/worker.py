@@ -45,6 +45,7 @@ RUNNERS: dict[str, Callable[[Context, psycopg.Connection, Job], Outcome]] = {
     "sync": steps.run_sync,
     "transfer": steps.run_transfer,
     "check": steps.run_check,
+    "annotate": steps.run_annotate,
     "refresh": refresh.run_refresh,
 }
 

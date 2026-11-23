@@ -84,7 +84,7 @@ def fake_world(app_conn, monkeypatch):
         yield ctis.CtisAdapter(fake)
 
     monkeypatch.setattr(steps.registry, "open_adapter", open_fake)
-    monkeypatch.setattr("trialwatch.sources.pages.extract_pages", PageTexts(PAGES))
+    monkeypatch.setattr("trialwatch.trials.pages.extract_pages", PageTexts(PAGES))
     model = Model()
     monkeypatch.setattr(steps, "anthropic_client", model)
     # the weekly schedule is not due in these tests

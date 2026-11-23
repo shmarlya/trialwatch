@@ -6,10 +6,12 @@ a minimum gap between requests, and backoff on errors.
 
 import re
 import time
-from dataclasses import dataclass
 from importlib.metadata import version
 
 import httpx
+
+# Shared with every source (the snapshot replays them for any adapter)
+from trialwatch.sources.registry import DownloadedFile, TrialNotFound
 
 BASE_URL = "https://euclinicaltrials.eu/ctis-public-api"
 USER_AGENT = f"TrialWatch/{version('trialwatch')} (+https://github.com/shmarlya/trialwatch)"
@@ -21,18 +23,6 @@ SEARCH_LIMIT = 10_000
 # The search page always sends its three text fields, empty when not used
 SEARCH_TEXT_DEFAULTS = {"containAll": "", "containAny": "", "containNot": ""}
 DOCUMENT_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-
-
-class TrialNotFound(Exception):
-    pass
-
-
-@dataclass(frozen=True)
-class DownloadedFile:
-    content: bytes
-    media_type: str | None
-    # the file name the storage service gives it (its x-amz-meta-filename header), if any
-    file_name: str | None
 
 
 def is_https_link(link: object) -> bool:

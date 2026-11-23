@@ -7,9 +7,10 @@ from datetime import UTC, datetime
 from trialwatch.db import core, overview
 from trialwatch.db.core import Identifier
 from trialwatch.hashing import storable
-from trialwatch.sources import ctis, stages
+from trialwatch.sources import ctis
+from trialwatch.trials import ingest, readiness
 from trialwatch.sources.ctis_client import DownloadedFile
-from trialwatch.sources.pages import extract_missing, text_fingerprint
+from trialwatch.trials.pages import extract_missing, text_fingerprint
 
 CT = "1999-000000-00-11"
 SUMMARY = {"uuid": "00000000-0000-4000-8000-000000000001", "documentType": "103", "fileType": "PDF",
@@ -152,12 +153,12 @@ def ctis_source(conn, **config):
     return dataclasses.replace(source, config=changed)
 
 
-def transfer(conn, fake, keys=(CT,), source=None, extract=read_text, why="chosen", files_dir=None, should_stop=None):
+def transfer(conn, fake, keys=(CT,), source=None, extract=read_text, why="chosen", should_stop=None):
     """A transfer from the fake CTIS, as the registered source (or `source`) is configured."""
     if source is None:
         source = ctis_source(conn)
-    return stages.transfer(conn, source, ctis.CtisAdapter(fake), keys, why=why, files_dir=files_dir,
-                           should_stop=should_stop, extract=extract)
+    return ingest.transfer(conn, source, ctis.CtisAdapter(fake), keys, why=why, should_stop=should_stop,
+                           extract=extract)
 
 
 def listing_rows(keys):
@@ -324,10 +325,10 @@ def test_a_failed_download_fails_the_transfer_and_the_run_goes_on(conn):
     assert status == ("failed",)
     trial_id = core.trials_with_scheme(conn, "eu-ct", [CT])[CT]
     kinds = ["results-summary", "study-report"]
-    assert stages.not_ready(conn, [trial_id], kinds) == {trial_id: "ctis: its last transfer failed"}
+    assert readiness.not_ready(conn, [trial_id], kinds) == {trial_id: "ctis: its last transfer failed"}
     # the next transfer gets the file: complete, and the trial can be checked
     again = transfer(conn, FakeCtis(RECORD))
-    assert again.statuses == {CT: "complete"} and stages.not_ready(conn, [trial_id], kinds) == {}
+    assert again.statuses == {CT: "complete"} and readiness.not_ready(conn, [trial_id], kinds) == {}
 
 
 def test_a_record_without_its_list_of_documents_fails_and_unlinks_nothing(conn):
@@ -388,7 +389,7 @@ def test_page_text_is_extracted_once_and_fingerprinted(conn, monkeypatch):
     core.act_as(conn, "ctis-adapter", "process")
     result = transfer(conn, FakeCtis(RECORD), extract=unreadable)
     assert result.statuses == {CT: "failed"}  # files without page text: the evidence is not complete
-    monkeypatch.setattr("trialwatch.sources.pages.extract_pages", two_pages)
+    monkeypatch.setattr("trialwatch.trials.pages.extract_pages", two_pages)
     first = extract_missing(conn)
     again = extract_missing(conn)
     assert (first.files, first.pages, again.files) == (2, 4, 0)
@@ -456,7 +457,7 @@ def test_a_record_with_text_postgres_cannot_store_is_stored_cleaned(conn):
     assert stored["authorizedApplication"]["authorizedPartI"]["trialDetails"]["clinicalTrialIdentifiers"][
         "publicTitle"] == "A study of� things"
     # a listed trial's row too, its title included
-    sync = stages.sync_list(conn, ctis_source(conn), ctis.CtisAdapter(FakeCtis(RECORD, [
+    sync = ingest.sync_list(conn, ctis_source(conn), ctis.CtisAdapter(FakeCtis(RECORD, [
         listed_row(CT, title="A listed\x00 study\ud800")])))
     assert (sync.listed, sync.failed) == (1, {})
     listing = conn.execute("SELECT title, summary->>'ctTitle' FROM core.source_listing WHERE source_key = %s",
@@ -464,54 +465,15 @@ def test_a_record_with_text_postgres_cannot_store_is_stored_cleaned(conn):
     assert listing == ("A listed study�", "A listed study�")
 
 
-def test_documents_are_copied_to_a_folder_to_read_by_hand(conn, tmp_path):
-    core.act_as(conn, "ctis-adapter", "process")
-    adapter = ctis.CtisAdapter(FakeCtis(RECORD))
-    config = core.registered_source(conn, "ctis").config
-    folder = tmp_path / "documents"
-    fetched = adapter.fetch(conn, "ctis", CT, config, folder)
-    assert (fetched.written, fetched.warnings, fetched.errors) == (2, {}, {})
-    copy_path = ctis.file_path(folder, CT, SUMMARY)
-    assert copy_path == folder / CT / "103_Results_summary_00000000_v1.pdf"
-    assert copy_path.read_bytes() == f"%PDF-1.7 {SUMMARY['uuid']} v1".encode()
-    # never written twice
-    assert adapter.fetch(conn, "ctis", CT, config, folder).written == 0
-
-
-def test_a_copy_that_cannot_be_written_is_a_warning_and_the_transfer_completes(conn, tmp_path):
-    core.act_as(conn, "ctis-adapter", "process")
-    not_a_folder = tmp_path / "copies"
-    not_a_folder.write_text("a file where the folder should be")
-    fetched = ctis.CtisAdapter(FakeCtis(RECORD)).fetch(conn, "ctis", CT, core.registered_source(conn, "ctis").config,
-                                                       not_a_folder)
-    # a copy to read by hand is not evidence: the documents themselves are stored
-    assert fetched.errors == {} and fetched.written == 0
-    assert sorted(fetched.warnings) == [f"copy {SUMMARY['uuid']}", f"copy {REPORT['uuid']}"]
-    result = transfer(conn, FakeCtis(RECORD), files_dir=not_a_folder)
-    assert result.statuses == {CT: "complete"}
-    assert sorted(result.failed) == [f"{CT}/copy {SUMMARY['uuid']}", f"{CT}/copy {REPORT['uuid']}"]
-
-
-class ReplaceFails:
-    """The os module as write_file uses it, when moving the written file into place fails."""
-
-    def replace(self, source, target):
-        raise OSError("disk full")
-
-
-def test_a_copy_that_fails_half_way_leaves_no_file_behind(tmp_path, monkeypatch):
-    monkeypatch.setattr(ctis, "os", ReplaceFails())
-    path = tmp_path / CT / "document.pdf"
-    try:
-        ctis.write_file(path, b"%PDF-1.7 content")
-    except OSError as exc:
-        assert str(exc) == "disk full"
-    else:
-        raise AssertionError("write_file did not fail")
-    left = []
-    for leftover in (tmp_path / CT).iterdir():
-        left.append(leftover.name)
-    assert left == []
+def test_the_adapter_reads_a_record_without_the_database_or_the_network():
+    # no client and no connection: reading a record is the adapter's whole part; trials/ingest.py saves it
+    read = ctis.CtisAdapter().parse(RECORD, None)
+    schemes = [identifier.scheme for identifier in read.identifiers]
+    assert "eu-ct" in schemes and read.registered == ctis.registered(RECORD)
+    by_key = {document.key: document for document in read.documents}
+    summary = by_key[SUMMARY["uuid"]]
+    assert (summary.kind, summary.version, summary.listed_as_pdf, summary.problem) == ("results-summary", "1", True, None)
+    assert read.warnings == {} and read.content_hash == ctis.content_hash(RECORD)
 
 
 def test_a_trial_repeated_on_the_next_page_when_the_list_shifts_is_given_once():
@@ -556,7 +518,7 @@ def test_the_descending_pass_stops_only_at_a_trial_the_ascending_pass_read(conn,
     core.act_as(conn, "ctis-adapter", "process")
     fake = ShiftingCtis(RECORD, listing_rows(keys), 4, arriving)
     source = ctis_source(conn, listing={"criteria": {}, "page_size": 2})
-    result = stages.sync_list(conn, source, ctis.CtisAdapter(fake))
+    result = ingest.sync_list(conn, source, ctis.CtisAdapter(fake))
     assert (result.listed, result.total, result.complete, result.failed) == (10, 10, True, {})
 
 

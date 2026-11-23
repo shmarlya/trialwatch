@@ -23,7 +23,8 @@ from trialwatch.db import jobs as jobs_db
 from trialwatch.db import search as search_db
 from trialwatch.jobs import refresh, steps
 from trialwatch.search import annotate
-from trialwatch.sources import ctis, profile, stages
+from trialwatch.sources import ctis, profile
+from trialwatch.trials import ingest
 
 CT = "2026-500021-11-00"
 ENDED = "2026-500022-11-00"
@@ -76,7 +77,7 @@ def recruiting(app_conn, tmp_path):
     load_mesh(app_conn, tmp_path)
     records = {CT: record(CT), ENDED: record(ENDED, status="Ended", status_code=8)}
     fake = ManyCtis(records, [listing(CT), listing(ENDED, status_code=8, countries={"France": 8})])
-    stages.sync_list(app_conn, core.registered_source(app_conn, "ctis"), ctis.CtisAdapter(fake))
+    ingest.sync_list(app_conn, core.registered_source(app_conn, "ctis"), ctis.CtisAdapter(fake))
     transfer(app_conn, fake, keys=[CT, ENDED])
     found = core.trials_with_scheme(app_conn, "eu-ct", [CT, ENDED])
     app_conn.execute("UPDATE jobs.schedule SET enabled = false")

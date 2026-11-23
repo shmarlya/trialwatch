@@ -17,8 +17,6 @@ x-trialwatch: &trialwatch
   volumes:
     # Research files and gold datasets, read-only: data/bruckner/ and data/gold/ are in git
     - ./data:/app/data:ro
-    # Writable, git-ignored: `source transfer ctis --files-dir data/ctis/documents` writes copies of the PDFs there
-    - ./data/ctis:/app/data/ctis
   depends_on:
     migrate:
       condition: service_completed_successfully

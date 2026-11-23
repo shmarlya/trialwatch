@@ -28,7 +28,8 @@ from trialwatch.db import search as search_db
 from trialwatch.db.jobs import Job
 from trialwatch.jobs import MAX_ATTEMPTS, PRIORITY_AUTOMATIC
 from trialwatch.jobs.steps import Context, Outcome
-from trialwatch.sources import registry, stages
+from trialwatch.sources import registry
+from trialwatch.trials import readiness
 
 TRANSFER_BATCH = 50
 ANNOTATE_BATCH = 50
@@ -102,7 +103,7 @@ def _check(ctx: Context, conn: psycopg.Connection, job: Job, result: dict) -> in
     config = job.params.get("config", check_settings.DEFAULT)
     settings = check_settings.load(config)
     requirement_set = requirement_sets.load(settings.requirements)
-    ready = stages.ready_trials(conn, requirement_set.document_kinds)
+    ready = readiness.ready_trials(conn, requirement_set.document_kinds)
     changed = checks_db.trials_needing_check(conn, ready, requirement_set.name)
     result["ready"] = len(ready)
     result["to_check"] = len(changed)

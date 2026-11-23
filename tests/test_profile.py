@@ -11,7 +11,8 @@ from typer.testing import CliRunner
 
 from trialwatch import cli
 from trialwatch.db import core
-from trialwatch.sources import ctis, profile, stages
+from trialwatch.sources import ctis, profile
+from trialwatch.trials import ingest
 
 CT = "2026-500001-11-00"
 
@@ -80,7 +81,7 @@ def test_stored_json_reads_back_the_same_and_hashes_the_same():
 def test_a_transfer_stores_it_and_reading_it_again_changes_nothing(conn):
     core.act_as(conn, "test-person")
     fake = ManyCtis({CT: record(CT)}, [listing(CT)])
-    stages.sync_list(conn, core.registered_source(conn, "ctis"), ctis.CtisAdapter(fake))
+    ingest.sync_list(conn, core.registered_source(conn, "ctis"), ctis.CtisAdapter(fake))
     transfer(conn, fake, keys=(CT,))
     trial_id = core.trials_with_scheme(conn, "eu-ct", [CT])[CT]
     stored = core.trial_profile(conn, trial_id)

@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 from test_sources_ctis import CT, RECORD, FakeCtis, ctis_source, listed_row, transfer
 
 from trialwatch.db import core
-from trialwatch.sources import ctis, stages
+from trialwatch.sources import ctis
+from trialwatch.trials import ingest
 from trialwatch.web import app as web
 from trialwatch.db import jobs as jobs_db
 from trialwatch.web.jobs import JobRequest, check_request
@@ -27,7 +28,7 @@ def listed_only(conn):
     """A trial CTIS lists, whose evidence is not transferred yet; returns its id."""
     core.act_as(conn, "ctis-adapter", "process")
     listing = FakeCtis(RECORD, [listed_row(CT)])
-    stages.sync_list(conn, ctis_source(conn, listing={"criteria": {}, "page_size": 10}), ctis.CtisAdapter(listing))
+    ingest.sync_list(conn, ctis_source(conn, listing={"criteria": {}, "page_size": 10}), ctis.CtisAdapter(listing))
     return core.trials_with_scheme(conn, "eu-ct", [CT])[CT]
 
 
@@ -215,7 +216,7 @@ def test_a_bad_ct_number_goes_back_with_a_message(admin_client):
 
 
 def test_a_trial_typed_in_takes_valid_identifiers_and_pdf_files_only(app_conn, admin_client, monkeypatch):
-    monkeypatch.setattr("trialwatch.sources.pages.extract_pages", text_of_pdf)
+    monkeypatch.setattr("trialwatch.trials.pages.extract_pages", text_of_pdf)
     core.act_as(app_conn, "test-person")
     client = admin_client
     created = client.post("/trials/new", data={"title": "A typed-in study", "schemes": ["nct"], "values": ["NCT09999970"]},

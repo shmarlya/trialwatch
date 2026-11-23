@@ -1,8 +1,8 @@
 """Jobs: the workflow steps, queued in the database (jobs.job) and run one at a time by
 `trialwatch worker` (worker.py), with retries (retry.py).
 
-- sync: bring a source's list in (sources/stages.py sync_list)
-- transfer: transfer some trials' evidence from a source (stages.transfer)
+- sync: bring a source's list in (trials/ingest.py sync_list)
+- transfer: transfer some trials' evidence from a source (ingest.transfer)
 - check: judge trials with a check setup (checks/evidence.py run)
 - annotate: tag recruiting trials for patient search with AI, each tag with a checked quote
   (search/annotate.py, ADR-008)

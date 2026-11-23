@@ -751,7 +751,7 @@ def file_is_public(conn: psycopg.Connection, sha256: bytes) -> bool:
 
 @dataclass(frozen=True)
 class TrialChoice:
-    """A trial a check may read now (sources/stages.py ready_trials), as a form offers it."""
+    """A trial a check may read now (trials/readiness.py ready_trials), as a form offers it."""
 
     id: int
     name: str

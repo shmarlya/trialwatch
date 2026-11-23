@@ -58,7 +58,8 @@ from trialwatch.db import core, overview
 from trialwatch.db.core import Identifier, normalised
 from trialwatch.gold import datasets as gold_datasets
 from trialwatch.db import search as search_db
-from trialwatch.sources import manual, profile, registry, stages
+from trialwatch.sources import manual, profile, registry
+from trialwatch.trials import readiness
 from trialwatch.llm import dollars
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
@@ -738,7 +739,7 @@ def dashboard(request: Request, error: str | None = None, q: str = "", result: s
         runs = overview.runs(conn)
         default_set = requirement_sets.load(defaults.requirements)
         kinds = list(default_set.document_kinds)
-        choices = overview.trial_choices(conn, stages.ready_trials(conn, kinds), kinds, default_set.name)
+        choices = overview.trial_choices(conn, readiness.ready_trials(conn, kinds), kinds, default_set.name)
         sources = overview.source_rows(conn)
         recent = jobs_db.recent_jobs(conn, 15)
         job_costs = jobs_db.job_costs(conn, _ids_of(recent))
@@ -1273,7 +1274,7 @@ def trial_page(request: Request, trial_id: int, run: int | None = None, error: s
             kinds = core.document_kinds(conn)
             gold_items = _gold_items_for(identifiers, judgements)
             default_set = requirement_sets.load(default_settings().requirements)
-            blocked = stages.not_ready(conn, [trial_id], default_set.document_kinds)
+            blocked = readiness.not_ready(conn, [trial_id], default_set.document_kinds)
         chosen = None
         for judgement in judgements:
             if run is None or judgement.run_id == run:
@@ -1799,7 +1800,7 @@ def gold_item_page(request: Request, name: str, version: str, key: str, error: s
             judgements = overview.trial_judgements(conn, trial_id)
             documents = overview.trial_documents(conn, trial_id)
             kinds = requirement_sets.load(dataset.requirements).document_kinds
-            ready = trial_id not in stages.not_ready(conn, [trial_id], kinds)
+            ready = trial_id not in readiness.not_ready(conn, [trial_id], kinds)
     compared = []
     for judgement in judgements:
         if not _comparable(judgement, dataset):

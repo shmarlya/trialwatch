@@ -20,7 +20,8 @@ from trialwatch import llm
 from trialwatch.checks.prompts import load_prompt, prompt_names
 from trialwatch.db import SESSION_OPTIONS, core
 from trialwatch.db import checks as checks_db
-from trialwatch.sources import ctis, stages
+from trialwatch.sources import ctis
+from trialwatch.trials import ingest
 
 CT = "1999-000000-00-00"
 CT_2 = "1999-000000-00-09"
@@ -99,7 +100,7 @@ def seed(conn, pages=PAGES, ct_number=CT):
     """The trial and its results summary through the CTIS adapter, with these page texts. Returns the trial id."""
     core.act_as(conn, "test-person")
     source = core.registered_source(conn, "ctis")
-    result = stages.transfer(conn, source, ctis.CtisAdapter(FakeCtis(payload(ct_number))), [ct_number],
+    result = ingest.transfer(conn, source, ctis.CtisAdapter(FakeCtis(payload(ct_number))), [ct_number],
                              extract=PageTexts(pages))
     assert result.statuses == {ct_number: "complete"}
     return core.trials_with_scheme(conn, "eu-ct", [ct_number])[ct_number]
@@ -289,7 +290,7 @@ def test_a_current_judgement_is_outdated_once_the_document_it_read_is_replaced(c
     assert current_judgement(conn, trial) == (summary.run_id, False)
     replaced = payload()
     replaced["documents"][0]["systemVersion"] = "2"
-    stages.transfer(conn, core.registered_source(conn, "ctis"), ctis.CtisAdapter(FakeCtis(replaced)), [CT],
+    ingest.transfer(conn, core.registered_source(conn, "ctis"), ctis.CtisAdapter(FakeCtis(replaced)), [CT],
                     extract=PageTexts(PAGES))
     assert current_judgement(conn, trial) == (summary.run_id, True)
     again = ev.run(conn, FakeClient(GOOD), [trial], default_settings(), PROMPT)
@@ -511,7 +512,7 @@ def test_a_trial_whose_evidence_is_not_current_is_refused_before_anything_is_sen
     trial = seed(conn)
     # CTIS's list says the trial changed after its evidence came in: stale, transfer it again first
     listing = FakeCtis(payload(), [listed_row(CT, updated="31/12/2099")])
-    stages.sync_list(conn, ctis_source(conn, listing={"criteria": {}, "page_size": 10}), ctis.CtisAdapter(listing))
+    ingest.sync_list(conn, ctis_source(conn, listing={"criteria": {}, "page_size": 10}), ctis.CtisAdapter(listing))
     runs_before = conn.execute("SELECT count(*) FROM checks.run").fetchone()
     client = FakeClient(GOOD)
     with pytest.raises(ev.NotReady) as refused:

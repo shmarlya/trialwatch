@@ -14,7 +14,8 @@ from test_sources_ctis import CT, RECORD, FakeCtis, ctis_source, listed_row, lis
 from trialwatch.checks import evidence as ev
 from trialwatch.db import core, overview
 from trialwatch.db.core import Identifier
-from trialwatch.sources import ctis, manual, registry, stages
+from trialwatch.sources import ctis, manual, registry
+from trialwatch.trials import ingest, readiness
 from trialwatch.sources.ctis_client import CtisClient
 from trialwatch.web import app as web
 
@@ -27,7 +28,7 @@ def sync_list(conn, fake, source=None, should_stop=None):
     """A list sync from the fake CTIS, two trials a page, with the criteria {"status": [8]}."""
     if source is None:
         source = ctis_source(conn, listing={"criteria": {"status": [8]}, "page_size": 2})
-    return stages.sync_list(conn, source, ctis.CtisAdapter(fake), should_stop=should_stop)
+    return ingest.sync_list(conn, source, ctis.CtisAdapter(fake), should_stop=should_stop)
 
 
 def status_of(conn, key):
@@ -121,7 +122,7 @@ def test_syncing_the_list_brings_every_listed_trial_in_without_its_evidence(conn
     assert (rows[0].source_key, rows[0].title) == (CT, "A listed study")
     assert core.keys_to_transfer(conn, "ctis", "pending") == [CT, OTHERS[0], OTHERS[1]]
     # not transferred yet: no check
-    assert stages.not_ready(conn, [trial_id], KINDS) == {trial_id: "ctis: evidence not transferred"}
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {trial_id: "ctis: evidence not transferred"}
     with pytest.raises(ev.NotReady):
         ev.run(conn, FakeClient(GOOD), [trial_id], default_settings({"method": "files"}), PROMPT)
     run = conn.execute("SELECT kind, status, args->'config'->'listing'->'criteria' FROM core.ingest_run WHERE id = %s",
@@ -216,14 +217,14 @@ def test_stale_evidence_is_not_checked_until_it_is_transferred_again(conn):
     first = transfer(conn, FakeCtis(RECORD), keys=core.keys_to_transfer(conn, "ctis", "pending"), why="pending")
     assert first.statuses == {CT: "complete"}
     trial_id = core.trials_with_scheme(conn, "eu-ct", [CT])[CT]
-    assert stages.not_ready(conn, [trial_id], KINDS) == {}
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {}
     # CTIS says it changed the trial today, the day of our transfer: maybe after it
     today = datetime.now(UTC).strftime("%d/%m/%Y")
     sync_list(conn, FakeCtis(RECORD, [listed_row(CT, updated=today)]))
     assert status_of(conn, CT) == ("stale", False)
     assert core.keys_to_transfer(conn, "ctis", "stale") == [CT]
     # a check waits for the evidence as it is now
-    assert stages.not_ready(conn, [trial_id], KINDS) == {trial_id: "ctis: changed since its transfer, transfer it again"}
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {trial_id: "ctis: changed since its transfer, transfer it again"}
     # CTIS gives only the day of a change, so a transfer on that same day still can't rule out a later one
     transfer(conn, FakeCtis(RECORD), keys=[CT])
     assert status_of(conn, CT) == ("stale", False)
@@ -231,30 +232,30 @@ def test_stale_evidence_is_not_checked_until_it_is_transferred_again(conn):
     conn.execute("UPDATE core.evidence_transfer SET transferred_at = transferred_at + interval '1 day' "
                  "WHERE source_key = %s", (CT,))
     assert status_of(conn, CT) == ("complete", False)
-    assert stages.not_ready(conn, [trial_id], KINDS) == {}
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {}
 
 
 def test_a_check_waits_for_every_source_that_holds_the_trial(conn):
     core.act_as(conn, "test-person")
     trial_id = transfer(conn, FakeCtis(RECORD)).trial_ids[0]
-    assert stages.not_ready(conn, [trial_id], KINDS) == {}
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {}
     # a person also typed it in (found by its NCT number), and nothing came from that source yet
     typed = typed_in(conn, "entry-test", [Identifier("nct", "NCT09999911")])
     assert typed.trial_id == trial_id
-    assert stages.not_ready(conn, [trial_id], KINDS) == {trial_id: "manual: evidence not transferred"}
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {trial_id: "manual: evidence not transferred"}
     core.save_transfer(conn, source="manual", source_key="entry-test", run_id=None, documents=1, pages=0,
                        errors={"pages": "1 files without page text"}, document_kinds=None)
-    assert stages.not_ready(conn, [trial_id], KINDS) == {trial_id: "manual: its last transfer failed"}
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {trial_id: "manual: its last transfer failed"}
     # every source's problem is named
     failing = FakeCtis(RECORD)
     failing.retrieve_error = RuntimeError("CTIS said 500")
     transfer(conn, failing)
-    assert stages.not_ready(conn, [trial_id], KINDS) == {
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {
         trial_id: "ctis: its last transfer failed; manual: its last transfer failed"}
     # complete at both (a person's documents are of any kind): ready
     transfer(conn, FakeCtis(RECORD))
     manual.record_transfer(conn, trial_id)
-    assert stages.not_ready(conn, [trial_id], KINDS) == {}
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {}
 
 
 def test_a_transfer_that_did_not_bring_a_kind_the_check_reads_holds_it_up(conn):
@@ -263,12 +264,12 @@ def test_a_transfer_that_did_not_bring_a_kind_the_check_reads_holds_it_up(conn):
     trial_id = transfer(conn, FakeCtis(RECORD), source=only_summaries).trial_ids[0]
     assert status_of(conn, CT) == ("complete", False)
     # CTIS has study reports and the check reads them: it waits for a transfer that brings them
-    assert stages.not_ready(conn, [trial_id], KINDS) == {trial_id: "ctis: its transfer did not bring study-report"}
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {trial_id: "ctis: its transfer did not bring study-report"}
     # CTIS has no publications: a check reading them does not wait for CTIS to bring them
-    assert stages.not_ready(conn, [trial_id], ["results-summary", "publication"]) == {}
+    assert readiness.not_ready(conn, [trial_id], ["results-summary", "publication"]) == {}
     every_kind = ctis_source(conn, evidence={"document_kinds": None})
     transfer(conn, FakeCtis(RECORD), source=every_kind)
-    assert stages.not_ready(conn, [trial_id], KINDS) == {}
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {}
 
 
 def test_the_evidence_of_a_trial_merged_into_another_counts_for_it(conn):
@@ -277,18 +278,18 @@ def test_the_evidence_of_a_trial_merged_into_another_counts_for_it(conn):
     # a person confirmed this one is the same trial; its source has given nothing yet
     merged = typed_in(conn, "entry-merged", [Identifier("nct", "NCT09999988")]).trial_id
     conn.execute("UPDATE core.trial SET merged_into = %s WHERE id = %s", (kept, merged))
-    assert stages.not_ready(conn, [kept], KINDS) == {kept: "manual: evidence not transferred"}
-    assert stages.not_ready(conn, [987654321], KINDS) == {987654321: "no source has given its evidence"}
+    assert readiness.not_ready(conn, [kept], KINDS) == {kept: "manual: evidence not transferred"}
+    assert readiness.not_ready(conn, [987654321], KINDS) == {987654321: "no source has given its evidence"}
 
 
 def test_ready_trials_have_page_text_and_nothing_holding_them_up(conn):
     core.act_as(conn, "ctis-adapter", "process")
     trial_id = transfer(conn, FakeCtis(RECORD)).trial_ids[0]
-    assert stages.ready_trials(conn, KINDS) == [trial_id]
-    assert stages.ready_trials(conn, ["protocol"]) == []
+    assert readiness.ready_trials(conn, KINDS) == [trial_id]
+    assert readiness.ready_trials(conn, ["protocol"]) == []
     # the list now names another trial (no evidence yet) and says this one changed: neither is ready
     sync_list(conn, FakeCtis(RECORD, [listed_row(CT, updated="31/12/2099"), listed_row(OTHERS[0])]))
-    assert stages.ready_trials(conn, KINDS) == []
+    assert readiness.ready_trials(conn, KINDS) == []
 
 
 def test_the_config_chooses_the_documents_a_transfer_brings(conn):
@@ -337,7 +338,7 @@ def test_an_interrupted_transfer_leaves_the_trial_failed_and_its_run_failed(conn
     with pytest.raises(KeyboardInterrupt):
         transfer(conn, interrupted, keys=[CT, OTHERS[0]])
     assert status_of(conn, CT) == ("failed", False)
-    assert stages.not_ready(conn, [trial_id], KINDS) == {trial_id: "ctis: its last transfer failed"}
+    assert readiness.not_ready(conn, [trial_id], KINDS) == {trial_id: "ctis: its last transfer failed"}
     run_id, status, counts, errors = latest_run(conn, "transfer")
     assert (status, counts["trials"], errors) == ("failed", 1, {"run": "interrupted: KeyboardInterrupt: "})
     # the run and the source are let go of
@@ -364,9 +365,9 @@ def test_a_source_another_process_is_reading_is_busy(conn, other_session):
     runs_before = conn.execute("SELECT count(*) FROM core.ingest_run").fetchone()
     assert core.try_lock(other_session, core.LOCK_SOURCE, source.id)
     try:
-        with pytest.raises(stages.SourceBusy, match="another process is reading source ctis"):
+        with pytest.raises(ingest.SourceBusy, match="another process is reading source ctis"):
             sync_list(conn, FakeCtis(RECORD, [listed_row(CT)]), source=source)
-        with pytest.raises(stages.SourceBusy):
+        with pytest.raises(ingest.SourceBusy):
             transfer(conn, FakeCtis(RECORD))
     finally:
         core.unlock(other_session, core.LOCK_SOURCE, source.id)
@@ -388,12 +389,12 @@ def test_a_run_whose_process_died_is_closed_before_the_next_one_starts(conn):
 
 
 def test_a_run_says_in_one_line_what_it_did():
-    listed = stages.ListResult(run_id=3, listed=1200, new_trials=12, delisted=2, complete=True, possible_duplicates=1)
+    listed = ingest.ListResult(run_id=3, listed=1200, new_trials=12, delisted=2, complete=True, possible_duplicates=1)
     assert listed.summary() == ("list run 3 (complete): 1,200 listed, 12 new trials, 2 no longer listed, "
                                 "possible duplicates 1")
-    assert stages.ListResult(run_id=4, stopped=True).summary().startswith("list run 4 (stopped part-way):")
-    assert stages.ListResult(run_id=5).summary().startswith("list run 5 (not complete):")
-    transferred = stages.TransferResult(run_id=6, trials=3, complete=2, new_trials=1, documents=4, new_versions=2,
+    assert ingest.ListResult(run_id=4, stopped=True).summary().startswith("list run 4 (stopped part-way):")
+    assert ingest.ListResult(run_id=5).summary().startswith("list run 5 (not complete):")
+    transferred = ingest.TransferResult(run_id=6, trials=3, complete=2, new_trials=1, documents=4, new_versions=2,
                                         unchanged=1, unlinked=1, pages=9)
     assert transferred.summary() == ("transfer run 6: 2 of 3 complete, 1 new trials, documents 4 (2 new versions, "
                                      "1 unchanged, 1 no longer listed), 9 pages read")

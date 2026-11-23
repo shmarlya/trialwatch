@@ -13,7 +13,8 @@ from vocabulary import load_mesh
 
 from trialwatch.db import core
 from trialwatch.db import search as search_db
-from trialwatch.sources import ctis, stages
+from trialwatch.sources import ctis
+from trialwatch.trials import ingest
 from trialwatch.web import app as web
 from trialwatch.web import privacy
 
@@ -39,7 +40,7 @@ def trials(app_conn, tmp_path):
     rows = [listing(NEAR_PARIS), listing(IN_LYON), listing(ENDED, status_code=8, countries={"France": 8}),
             listing(ASTHMA_MADRID, countries={"Spain": 4})]
     fake = ManyCtis(records, rows)
-    stages.sync_list(app_conn, core.registered_source(app_conn, "ctis"), ctis.CtisAdapter(fake))
+    ingest.sync_list(app_conn, core.registered_source(app_conn, "ctis"), ctis.CtisAdapter(fake))
     result = transfer(app_conn, fake, keys=list(records))
     assert result.failed == {}, result.failed
     return core.trials_with_scheme(app_conn, "eu-ct", list(records))
@@ -150,7 +151,7 @@ def test_a_whole_country_search_shows_the_nearest_site_in_that_country(trials, a
     # Gent, in Belgium, is about 230 km from Paris; Nice, in France, about 690 km
     records = {FRANCE_AND_BELGIUM: record(FRANCE_AND_BELGIUM, sites=(NICE, GENT), title="A two-country trial")}
     fake = ManyCtis(records, [listing(FRANCE_AND_BELGIUM, countries={"France": 4, "Belgium": 4})])
-    stages.sync_list(app_conn, core.registered_source(app_conn, "ctis"), ctis.CtisAdapter(fake))
+    ingest.sync_list(app_conn, core.registered_source(app_conn, "ctis"), ctis.CtisAdapter(fake))
     result = transfer(app_conn, fake, keys=list(records))
     assert result.failed == {}, result.failed
     in_france = search_db.SearchFilter(latitude=PARIS_POINT[0], longitude=PARIS_POINT[1], radius_km=None,

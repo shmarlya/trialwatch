@@ -7,7 +7,8 @@ from test_sources_ctis import RECORD, FakeCtis, transfer
 
 from trialwatch.db import core, overview
 from trialwatch.db.core import Identifier
-from trialwatch.sources import manual, stages
+from trialwatch.sources import manual
+from trialwatch.trials import readiness
 from trialwatch.sources.manual import TrialEntry, UploadedFile
 
 ENTRY = TrialEntry(identifiers=[Identifier("nct", "NCT09999977")], public_title="A hand-entered study",
@@ -30,7 +31,7 @@ def broken_pdf(content):
 
 @pytest.fixture
 def no_pdf_reading(monkeypatch):
-    monkeypatch.setattr("trialwatch.sources.pages.extract_pages", text_of_pdf)
+    monkeypatch.setattr("trialwatch.trials.pages.extract_pages", text_of_pdf)
 
 
 def transfer_of(conn, trial_id):
@@ -65,7 +66,7 @@ def test_a_trial_added_by_hand_is_checked_like_any_other(conn, no_pdf_reading):
     assert who == [("insert", "test-person")]
     # its evidence is what the person gave, of any kind: complete, so a check may read it
     assert transfer_of(conn, trial_id) == ("complete", None, 1, 1)
-    assert stages.not_ready(conn, [trial_id], SET.document_kinds) == {}
+    assert readiness.not_ready(conn, [trial_id], SET.document_kinds) == {}
 
 
 def test_a_trial_without_identifiers_gets_our_own_number(conn):
@@ -137,17 +138,17 @@ def test_a_transfer_brings_a_trial_in_ready_for_a_check(conn, no_pdf_reading):
     result = transfer(conn, FakeCtis(RECORD), extract=None)
     assert len(result.trial_ids) == 1 and result.pages == 2
     assert result.trial_ids[0] in core.trials_with_pages(conn, ["results-summary"])
-    assert stages.ready_trials(conn, SET.document_kinds) == result.trial_ids
+    assert readiness.ready_trials(conn, SET.document_kinds) == result.trial_ids
 
 
 def test_a_trial_added_by_hand_is_ready_once_its_documents_are_read(conn, no_pdf_reading, monkeypatch):
     core.act_as(conn, "test-person")
     without_documents = manual.add_trial(conn, ENTRY, [], "results-summary")
-    assert stages.not_ready(conn, [without_documents], SET.document_kinds) == {}
-    monkeypatch.setattr("trialwatch.sources.pages.extract_pages", broken_pdf)
+    assert readiness.not_ready(conn, [without_documents], SET.document_kinds) == {}
+    monkeypatch.setattr("trialwatch.trials.pages.extract_pages", broken_pdf)
     other = TrialEntry(identifiers=[Identifier("nct", "NCT09999979")], public_title="Unreadable")
     broken = manual.add_trial(conn, other, [pdf("y")], "results-summary")
-    assert stages.not_ready(conn, [broken], SET.document_kinds) == {broken: "manual: its last transfer failed"}
+    assert readiness.not_ready(conn, [broken], SET.document_kinds) == {broken: "manual: its last transfer failed"}
     assert transfer_of(conn, broken)[0] == "failed"
 
 

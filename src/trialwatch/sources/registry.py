@@ -1,28 +1,41 @@
-"""The data source registry (ADR-005): which adapters exist, and what each one must do.
+"""The data source registry (ADR-005): which adapters exist, and what each one gives.
 
 A source is registered in core.source with the adapter that reads it and its config (what to list,
 what evidence to transfer). The adapter is code; the config is data, one current config per source,
-and every run records the config it used. The two stages that use an adapter are generic
-(trialwatch.sources.stages):
+and every run records the config it used.
 
-- syncing the list: the adapter gives the source's trials page by page (key, title, identifiers,
-  the day the source last changed it), each matched to or created as a core.trial;
-- transferring evidence: the adapter fetches one trial's full record and the configured documents
-  into the central model; the stage then reads their page text and records whether all of it came in.
+An adapter only reads its source and says what it read; it never writes to the database. Saving is
+the same for every source (trialwatch.trials.ingest):
 
-A source that is not read from anywhere (manual: a person types trials in) has no list and no
-transfer; it records its own transfers as the person adds documents.
+- its list, page by page: each trial's key, title, identifiers and the day the source last changed it;
+- one trial: `fetch` its record as the source gives it, `parse` it into a SourceTrial (identifiers,
+  the registered information checks ask about, sponsors, where it runs, its profile for patient
+  search, its documents), and `download` each document the transfer wants.
+
+`parse` reads a stored record too, so readings are rebuilt without fetching anything (`trialwatch
+source profiles`, `source locations`). A source that is not read from anywhere (manual: a person types
+trials in) has no list and no transfer.
 """
 
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
+from datetime import datetime
 
-import psycopg
-
-from trialwatch.db.core import Listed, Location
+from trialwatch.db.core import Identifier, Listed, Location, Sponsor
 from trialwatch.sources.profile import TrialProfile
+
+
+class TrialNotFound(Exception):
+    """The source does not know the trial."""
+
+
+@dataclass(frozen=True)
+class DownloadedFile:
+    content: bytes
+    media_type: str | None
+    # the file name the source gives it, if any
+    file_name: str | None
 
 
 @dataclass
@@ -36,32 +49,51 @@ class ListingPage:
     more: bool
 
 
-@dataclass
-class Fetched:
-    """What an adapter brought in for one trial."""
+@dataclass(frozen=True)
+class DocumentRef:
+    """A document a trial's record lists, as the source identifies it."""
 
-    # None when even the record could not be fetched
-    trial_id: int | None
-    new_trial: bool = False
-    new_record: bool = False
-    possible_duplicates: int = 0
-    # documents of the configured kinds the record lists
-    documents: int = 0
-    new_versions: int = 0
-    # documents whose current file we already held, byte for byte
-    unchanged: int = 0
-    # links to documents the source no longer lists, now removed
-    unlinked: int = 0
-    written: int = 0
-    # "record", or a document's key -> what went wrong: the evidence is not complete
-    errors: dict[str, str] = field(default_factory=dict)
-    # what went wrong besides the evidence (e.g. reading the sponsors): reported, not blocking
+    # the source's own id for the document (CTIS: its uuid)
+    key: str
+    # the source's version label (CTIS: its systemVersion)
+    version: str
+    # our document kind (core.document_kind)
+    kind: str
+    title: str | None = None
+    # ISO 639-1, when the source says
+    language: str | None = None
+    # when the source says this version was submitted or published
+    published_at: datetime | None = None
+    # the source lists it as a PDF: a file that is not one is an error
+    listed_as_pdf: bool = False
+    # why the record's entry for it can't be used (it is listed, but can't be fetched)
+    problem: str | None = None
+
+
+@dataclass
+class SourceTrial:
+    """What a source says about one trial, read from its record."""
+
+    # sha256 of the record without what changes on every fetch: the same hash, the same record
+    content_hash: bytes
+    identifiers: list[Identifier]
+    # the registered information checks ask about, the same shape for every source: titles, status,
+    # dates, primary endpoints [{id, number, text}]
+    registered: dict
+    # None when the record's sponsors, sites or profile could not be read (see `warnings`): what is
+    # stored for them is then left as it is
+    sponsors: list[Sponsor] | None
+    locations: list[Location] | None
+    profile: TrialProfile | None
+    # None: the record has no list of documents, so it says nothing about them (nothing is unlinked)
+    documents: list[DocumentRef] | None
+    # what could not be read besides the evidence, e.g. {"sponsors": "ValueError: …"}: reported, not blocking
     warnings: dict[str, str] = field(default_factory=dict)
 
 
 class Adapter:
-    """What the stages need from a source. Subclasses set the class attributes and override what
-    they support."""
+    """What saving needs from a source. Subclasses set the class attributes and override what they
+    support."""
 
     name = ""
     label = ""
@@ -101,17 +133,6 @@ class Adapter:
         """Why `key` cannot be one of this source's keys, or None."""
         return None
 
-    def locations(self, payload: dict) -> list[Location]:
-        """Where the trial of a stored record runs (sites and countries), read from its payload; a
-        transfer stores them, and `trialwatch source locations` reads them again from stored records."""
-        return []
-
-    def profile(self, payload: dict, listing: dict | None) -> TrialProfile | None:
-        """What a person looking for a trial needs (ADR-008), read from a stored record and the source's
-        list row for it (None: not listed); None when the source has no such reading. A transfer stores
-        it, and `trialwatch source profiles` reads it again from stored records."""
-        return None
-
     def public_url(self, key: str) -> str | None:
         """The trial's page at the source, for people to read it there (e.g. its contacts)."""
         return None
@@ -119,9 +140,18 @@ class Adapter:
     def list_pages(self, config: dict) -> Iterator[ListingPage]:
         raise NotImplementedError(f"{self.name} has no list to sync")
 
-    def fetch(self, conn: psycopg.Connection, source: str, key: str, config: dict,
-              files_dir: Path | None = None) -> Fetched:
+    def fetch(self, key: str) -> dict:
+        """The trial's record as the source gives it; TrialNotFound when the source doesn't know it."""
         raise NotImplementedError(f"{self.name} has no evidence to transfer")
+
+    def parse(self, payload: dict, listing: dict | None) -> SourceTrial:
+        """What a record says (`listing`: the source's list row for the trial, None when not listed).
+        Reads only the record: no network, no database."""
+        raise NotImplementedError(f"{self.name} has no records to read")
+
+    def download(self, key: str, document: DocumentRef) -> DownloadedFile:
+        """The current file of a document the trial's record lists."""
+        raise NotImplementedError(f"{self.name} has no documents to download")
 
 
 def _ctis_adapter():

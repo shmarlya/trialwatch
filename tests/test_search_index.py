@@ -14,7 +14,8 @@ from trialwatch.db import core
 from trialwatch.db import search as search_db
 from trialwatch.db import vocab as vocab_db
 from trialwatch.search import concepts, index
-from trialwatch.sources import ctis, stages
+from trialwatch.sources import ctis
+from trialwatch.trials import ingest
 
 DIABETES_CT = "2026-500001-11-00"
 NIDDM_CT = "2026-500002-11-00"
@@ -55,7 +56,7 @@ def bring_in(conn, tmp_path, mesh=True):
         load_mesh(conn, tmp_path)
     records, rows = trials()
     fake = ManyCtis(records, rows)
-    stages.sync_list(conn, core.registered_source(conn, "ctis"), ctis.CtisAdapter(fake))
+    ingest.sync_list(conn, core.registered_source(conn, "ctis"), ctis.CtisAdapter(fake))
     result = transfer(conn, fake, keys=list(records))
     assert result.failed == {}, result.failed
     found = {}

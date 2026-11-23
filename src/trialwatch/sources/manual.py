@@ -21,7 +21,7 @@ import psycopg
 from trialwatch.hashing import json_hash
 from trialwatch.db import core
 from trialwatch.db.core import Identifier
-from trialwatch.sources.pages import extract_missing
+from trialwatch.trials.pages import extract_missing
 from trialwatch.sources.registry import Adapter
 
 SOURCE = "manual"

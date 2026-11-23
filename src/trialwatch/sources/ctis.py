@@ -3,32 +3,26 @@
 Its list is CTIS's public search (the one on euclinicaltrials.eu), read page by page in EU CT number
 order with the criteria of the source's config; each listed trial is matched by its EU CT number.
 
-Transferring a trial's evidence: fetch its record, find the trial by all its identifiers (EU CT number, NCT, WHO
-UTN, EudraCT) or create it, store the record as a new version if it or our reading of it changed, and
-read out the registered information checks ask about (`registered`). Then download every listed
-document of the configured kinds (by default the result documents) that we don't have in that
-version, store it with the day CTIS says its results were submitted, and link it to the trial as
-listed by CTIS; a document of those kinds CTIS no longer lists is unlinked.
+A trial's record (/retrieve) is read into a SourceTrial: its identifiers (EU CT number, NCT, WHO UTN,
+EudraCT), the registered information checks ask about (`registered`), its sponsors, where it runs, its
+profile for patient search, and its documents with the day CTIS says their results were submitted.
+trialwatch.trials.ingest saves it, downloading the listed documents of the configured kinds (by default
+the result documents). This module never writes to the database.
 
 CTIS serves only the current file of each document, so each version is downloaded once and kept.
 """
 
-import hashlib
-import os
 import re
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
-from pathlib import Path
 
-import psycopg
-
-from trialwatch.sources.ctis_client import CT_NUMBER, SEARCH_LIMIT, CtisClient, DownloadedFile
-from trialwatch.hashing import json_hash, storable
 from trialwatch.db import core
 from trialwatch.db.core import Identifier, Listed
+from trialwatch.hashing import json_hash, storable
 from trialwatch.sources import profile
-from trialwatch.sources.registry import Adapter, Fetched, ListingPage
+from trialwatch.sources.ctis_client import CT_NUMBER, SEARCH_LIMIT, CtisClient
+from trialwatch.sources.registry import Adapter, DocumentRef, DownloadedFile, ListingPage, SourceTrial
 
 SOURCE = "ctis"
 # CTIS document types (its documents[].documentType) in our own kinds (core.document_kind); any other
@@ -59,50 +53,6 @@ VOLATILE_FIELDS = frozenset({"publishDate"})
 
 def content_hash(payload: dict) -> bytes:
     return json_hash(payload, VOLATILE_FIELDS)
-
-
-# --- files on disk (optional copies for reading by hand) ---------------------------------------
-
-def file_path(files_dir: Path, ct_number: str, entry: dict) -> Path:
-    """data/ctis/documents/<CT>/<type>_<title>_<uuid8>_v<version>.<ext>: readable, and unique per version."""
-    listed_title = entry.get("title")
-    if not listed_title:
-        listed_title = "document"
-    # Anything but letters, digits, dots and dashes becomes "_", so the title is safe in a file name
-    title = re.sub(r"[^\w.-]+", "_", str(listed_title))
-    title = title.strip("_")
-    title = title[:80]
-
-    listed_file_type = entry.get("fileType")
-    if not listed_file_type:
-        listed_file_type = "bin"
-    extension = re.sub(r"\W+", "", str(listed_file_type))
-    extension = extension.lower()
-    if not extension:
-        extension = "bin"
-
-    document_type = int(entry["documentType"])
-    short_uuid = re.sub(r"[^\w-]+", "_", str(entry["uuid"])[:8])
-    # The version comes from the API too: only word characters, dots and dashes, never a path
-    version = re.sub(r"[^\w.-]+", "_", str(entry["systemVersion"]))
-    version = version.strip(".")
-    name = f"{document_type}_{title}_{short_uuid}_v{version}.{extension}"
-    return files_dir / ct_number / name
-
-
-def write_file(path: Path, content: bytes) -> bool:
-    """Write once, atomically; an existing file is left alone. Returns True if it wrote one."""
-    if path.exists():
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Written under a temporary name and then renamed, so a half-written file never has the real name
-    temporary_path = path.with_name(f".{path.name}.tmp")
-    try:
-        temporary_path.write_bytes(content)
-        os.replace(temporary_path, path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
-    return True
 
 
 # --- reading a CTIS record ---------------------------------------------------------------------
@@ -748,6 +698,36 @@ def published_at(entry: dict, submitted: dict[str, datetime]) -> datetime | None
     return submitted[key]
 
 
+def documents(payload: dict) -> list[DocumentRef] | None:
+    """The documents the record lists; None when it has no list of documents (then it says nothing
+    about them)."""
+    entries = payload.get("documents")
+    if not isinstance(entries, list):
+        return None
+    submitted = submission_dates(payload)
+    found = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            found.append(document_ref(entry, submitted))
+    return found
+
+
+def document_ref(entry: dict, submitted: dict[str, datetime]) -> DocumentRef:
+    """One entry of a record's documents. An entry without its uuid or version can't be fetched: it is
+    kept with the problem, so the transfer reports it."""
+    problem = None
+    for needed in ("uuid", "systemVersion"):
+        if problem is None and needed not in entry:
+            problem = f"KeyError: {needed!r}"
+    version = ""
+    if "systemVersion" in entry:
+        version = str(entry["systemVersion"])
+    listed_as_pdf = str(entry.get("fileType", "")).upper() == "PDF"
+    return DocumentRef(key=str(entry.get("uuid")), version=version, kind=document_kind(entry),
+                       title=_text(entry.get("title")), language=document_language(entry),
+                       published_at=published_at(entry, submitted), listed_as_pdf=listed_as_pdf, problem=problem)
+
+
 def document_kind(entry: dict) -> str:
     try:
         code = int(entry.get("documentType"))
@@ -935,110 +915,34 @@ class CtisAdapter(Adapter):
             if total is None or total <= len(seen):
                 return
 
-    def locations(self, payload: dict) -> list[core.Location]:
-        return locations(payload)
-
-    def profile(self, payload: dict, listing: dict | None) -> profile.TrialProfile | None:
-        return trial_profile(payload, listing)
-
     def public_url(self, key: str) -> str | None:
         return f"https://euclinicaltrials.eu/search-for-clinical-trials/?lang=en&EUCT={key}"
 
-    def fetch(self, conn: psycopg.Connection, source: str, key: str, config: dict,
-              files_dir: Path | None = None) -> Fetched:
-        """The trial's record (a new version if it changed), its sponsors, and every listed document
-        of the configured kinds not stored in that version yet; documents of those kinds CTIS no longer
-        lists are unlinked."""
-        kinds = self.evidence_kinds(config)
+    def fetch(self, key: str) -> dict:
+        return self.client.retrieve(key)
+
+    def parse(self, payload: dict, listing: dict | None) -> SourceTrial:
+        """A record (cleaned of what Postgres can't store) as a SourceTrial. Its identifiers and
+        registered reading must be read, or the transfer fails; its sponsors, sites and profile are not
+        evidence, so a problem there is a warning."""
+        trial = SourceTrial(content_hash=content_hash(payload), identifiers=identifiers(payload),
+                            registered=registered(payload), sponsors=None, locations=None, profile=None,
+                            documents=documents(payload))
         try:
-            # text fields can hold characters Postgres can't store (a NUL): cleaned before anything else
-            payload = storable(self.client.retrieve(key))
-            saved = core.save_trial_record(
-                conn, source=source, source_key=key, identifiers=identifiers(payload), payload=payload,
-                registered=registered(payload), content_hash=content_hash(payload),
-            )
-        except Exception as exc:  # recorded on the trial's transfer
-            return Fetched(trial_id=None, errors={"record": f"{type(exc).__name__}: {exc}"})
-        fetched = Fetched(trial_id=saved.trial_id, new_trial=saved.new_trial, new_record=saved.new_version,
-                          possible_duplicates=len(saved.possible_duplicates))
+            trial.sponsors = sponsors(payload)
+        except Exception as exc:  # reported, the transfer can still complete
+            trial.warnings["sponsors"] = f"{type(exc).__name__}: {exc}"
         try:
-            core.set_trial_sponsors(conn, saved.trial_id, source, sponsors(payload))
-        except Exception as exc:  # the sponsors are not evidence: reported, the transfer can still complete
-            fetched.warnings["sponsors"] = f"{type(exc).__name__}: {exc}"
+            trial.locations = locations(payload)
+        except Exception as exc:
+            trial.warnings["locations"] = f"{type(exc).__name__}: {exc}"
         try:
-            core.set_trial_locations(conn, saved.trial_id, source, locations(payload))
-        except Exception as exc:  # where it runs is not evidence either
-            fetched.warnings["locations"] = f"{type(exc).__name__}: {exc}"
-        try:
-            listing = core.listing_summary(conn, source, key)
-            profile.store(conn, saved.trial_id, source, key, trial_profile(payload, listing))
-        except Exception as exc:  # nor is what patient search reads
-            fetched.warnings["profile"] = f"{type(exc).__name__}: {exc}"
-        entries = payload.get("documents")
-        if not isinstance(entries, list):
-            # a record without its list of documents says nothing about them: nothing is unlinked
-            fetched.errors["documents"] = "the record has no list of documents"
-            return fetched
-        submitted = submission_dates(payload)
-        listed = []
-        for entry in entries:
-            if not isinstance(entry, dict) or not _wanted(entry, kinds):
-                continue
-            fetched.documents += 1
-            listed.append(str(entry.get("uuid")))
-            try:
-                _fetch_document(conn, self.client.download_document, fetched, source, key, saved.trial_id, entry,
-                                published_at(entry, submitted), files_dir)
-            except Exception as exc:  # recorded per document, the others go on
-                fetched.errors[f"document {entry.get('uuid')}"] = f"{type(exc).__name__}: {exc}"
-        fetched.unlinked = core.unlink_documents_not_listed(
-            conn, trial_id=saved.trial_id, source=source, kinds=kinds, listed=core.document_ids(conn, source, listed),
-        )
-        return fetched
+            trial.profile = trial_profile(payload, listing)
+        except Exception as exc:
+            trial.warnings["profile"] = f"{type(exc).__name__}: {exc}"
+        return trial
 
-
-def _wanted(entry: dict, kinds: Sequence[str] | None) -> bool:
-    if kinds is None:
-        return True
-    return document_kind(entry) in kinds
-
-
-def _check_file(entry: dict, file: DownloadedFile) -> None:
-    if not file.content:
-        raise ValueError("empty file")
-    listed_as_pdf = str(entry.get("fileType", "")).upper() == "PDF"
-    if listed_as_pdf and not file.content.startswith(b"%PDF"):
-        raise ValueError(f"listed as PDF but is not one (starts {file.content[:20]!r})")
-
-
-def _fetch_document(conn: psycopg.Connection, download: Callable[[str, str], DownloadedFile], fetched: Fetched,
-                    source: str, ct_number: str, trial_id: int, entry: dict, published: datetime | None,
-                    files_dir: Path | None) -> None:
-    uuid = str(entry["uuid"])
-    version = str(entry["systemVersion"])
-    # Downloaded every time, even when we hold this version: CTIS could replace the file without
-    # raising its systemVersion, and only the bytes would show it
-    file = download(ct_number, uuid)
-    _check_file(entry, file)
-    sha256 = hashlib.sha256(file.content).digest()
-    saved = core.save_document_version(
-        conn, source=source, source_key=uuid, kind=document_kind(entry), title=_text(entry.get("title")),
-        language=document_language(entry), version=version, content=file.content,
-        media_type=file.media_type, sha256=sha256, published_at=published,
-    )
-    the_document = saved.document_id
-    content = file.content
-    if saved.new_version:
-        fetched.new_versions += 1
-    else:
-        fetched.unchanged += 1
-    core.link_document(conn, trial_id=trial_id, document_id=the_document, basis="listed-by-source", source=source)
-    if files_dir is not None:
-        path = file_path(files_dir, ct_number, entry)
-        if not path.exists():
-            try:
-                if write_file(path, content):
-                    fetched.written += 1
-            except OSError as exc:
-                # a copy to read by hand is not evidence: the document itself is stored
-                fetched.warnings[f"copy {uuid}"] = f"{type(exc).__name__}: {exc}"
+    def download(self, key: str, document: DocumentRef) -> DownloadedFile:
+        # Downloaded every time, even when we hold this version: CTIS could replace the file without
+        # raising its systemVersion, and only the bytes would show it
+        return self.client.download_document(key, document.key)

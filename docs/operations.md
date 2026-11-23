@@ -43,7 +43,7 @@ docker compose run --rm migrate
 On a server, `docker compose --profile server up -d` also runs the site:
 
 - `web` runs `trialwatch web --host 0.0.0.0 --no-worker` in the image `trialwatch:dev` (Python 3.13, non-root,
-  `ENTRYPOINT trialwatch`), with `data/` mounted read-only (and `data/ctis/` writable for `--files-dir`). Only
+  `ENTRYPOINT trialwatch`), with `data/` mounted read-only. Only
   `caddy` reaches it, so it trusts caddy's `X-Forwarded-*` headers (`FORWARDED_ALLOW_IPS`). Docker checks it with
   `/healthz` (the server is up; it asks nothing of the database); `/readyz` says whether the database answers and
   at which migration (503 when it doesn't).

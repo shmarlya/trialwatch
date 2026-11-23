@@ -44,7 +44,7 @@ from trialwatch.db import core
 from trialwatch.db.core import Page
 from trialwatch.llm import FALLBACK_BETA, CallResult, MessagesClient, uses_fallbacks
 from trialwatch.progress import Progress, report
-from trialwatch.sources import stages
+from trialwatch.trials import readiness
 
 CHECK_NAME = "evidence"
 # What its model calls are for, in core.api_call
@@ -807,7 +807,7 @@ class RunSummary:
 
 class NotReady(ValueError):
     """Some trials' evidence is not complete and current at every source that holds them (ADR-005,
-    sources/stages.py not_ready)."""
+    trials/readiness.py not_ready)."""
 
     def __init__(self, reasons: dict[str, str]) -> None:
         listed = []
@@ -819,7 +819,7 @@ class NotReady(ValueError):
 
 def refuse_unready(conn: psycopg.Connection, trial_ids: list[int], requirement_set: RequirementSet) -> None:
     """Raise NotReady when one of these trials may not be checked against the set yet."""
-    reasons = stages.not_ready(conn, trial_ids, requirement_set.document_kinds)
+    reasons = readiness.not_ready(conn, trial_ids, requirement_set.document_kinds)
     if not reasons:
         return
     names = core.trial_names(conn, list(reasons))
@@ -834,7 +834,7 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
         should_stop: Callable[[], bool] | None = None) -> RunSummary:
     """Judge each trial (core.trial ids, each once) in one run, as the session's actor, with a named
     setup's settings (checks/settings.py), against its requirement set (or the one given). Raises NotReady, before anything is sent, when a
-    trial's evidence is not complete and current (sources/stages.py not_ready). `should_stop` is asked
+    trial's evidence is not complete and current (trials/readiness.py not_ready). `should_stop` is asked
     between trials."""
     if requirement_set is None:
         requirement_set = requirements.load(settings.requirements)

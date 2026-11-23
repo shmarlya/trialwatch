@@ -75,9 +75,13 @@ class PagesResult:
     failed: dict[str, str] = field(default_factory=dict)
 
 
-def extract_missing(conn: psycopg.Connection, trial_ids: Sequence[int] | None = None,
-                    progress: Progress = None, kinds: Sequence[str] | None = None,
-                    extract: Callable[[bytes], list[str]] | None = None) -> PagesResult:
+def extract_missing(
+    conn: psycopg.Connection,
+    trial_ids: Sequence[int] | None = None,
+    progress: Progress = None,
+    kinds: Sequence[str] | None = None,
+    extract: Callable[[bytes], list[str]] | None = None,
+) -> PagesResult:
     """Read the page text of the files not read yet (of these trials, or all; of every document kind,
     or only these `kinds`). `extract` reads a file's pages (default extract_pages; tests give their own)."""
     if extract is None:

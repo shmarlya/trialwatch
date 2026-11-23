@@ -24,7 +24,8 @@ from trialwatch.db.jobs import Job
 from trialwatch.jobs import CAPPED_KINDS
 from trialwatch.jobs.retry import PermanentError, is_transient
 from trialwatch.search import annotate
-from trialwatch.sources import registry, stages
+from trialwatch.sources import registry
+from trialwatch.trials import ingest, readiness
 
 # Calls go to Anthropic's API itself, as from the CLI
 CAP_REACHED = "held: this month's spend reached the monthly cap (/admin/spend)"
@@ -126,8 +127,8 @@ def run_sync(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
     source = _source(conn, job.params["source"])
     with registry.open_adapter(source.adapter) as adapter:
         try:
-            result = stages.sync_list(conn, source, adapter, progress=ctx.add, should_stop=ctx.should_stop)
-        except stages.SourceBusy:
+            result = ingest.sync_list(conn, source, adapter, progress=ctx.add, should_stop=ctx.should_stop)
+        except ingest.SourceBusy:
             raise
         except ValueError as exc:
             # switched off, or its config is not valid: the same next time
@@ -172,9 +173,9 @@ def run_transfer(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
         return Outcome({"trials": 0})
     with registry.open_adapter(source.adapter) as adapter:
         try:
-            result = stages.transfer(conn, source, adapter, keys, why=why, progress=ctx.add,
+            result = ingest.transfer(conn, source, adapter, keys, why=why, progress=ctx.add,
                                      should_stop=ctx.should_stop)
-        except stages.SourceBusy:
+        except ingest.SourceBusy:
             raise
         except ValueError as exc:
             raise PermanentError(str(exc)) from exc
@@ -194,7 +195,7 @@ def _chosen_trials(conn: psycopg.Connection, job: Job, requirement_set) -> list[
     """The trials given, or every trial ready for a check of this set; on a retry, only those the job
     has not judged yet or whose call failed for a passing reason."""
     if job.params.get("every"):
-        chosen = stages.ready_trials(conn, requirement_set.document_kinds)
+        chosen = readiness.ready_trials(conn, requirement_set.document_kinds)
     else:
         chosen = []
         for trial_id in job.params["trial_ids"]:
@@ -215,7 +216,7 @@ def _chosen_trials(conn: psycopg.Connection, job: Job, requirement_set) -> list[
 def _without_unready(ctx: Context, conn: psycopg.Connection, trial_ids: list[int], requirement_set) -> list[int]:
     """An automatic check skips trials whose evidence changed or broke since they were chosen (the next
     refresh takes them); a person's check refuses them, as on the command line."""
-    reasons = stages.not_ready(conn, trial_ids, requirement_set.document_kinds)
+    reasons = readiness.not_ready(conn, trial_ids, requirement_set.document_kinds)
     if not reasons:
         return trial_ids
     if not ctx.job.automatic:

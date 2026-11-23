@@ -12,6 +12,13 @@ names the adapter that reads it (`src/trialwatch/sources/registry.py`) and holds
 the adapter: what its list holds and which evidence a transfer brings. It can be switched off. Every stored record
 carries (source, the source's own key), unique, so fetching it again adds a version instead of a duplicate.
 
+An adapter only reads its source and never writes to the database: its list page by page, and per trial `fetch`
+(the record as the source gives it), `parse` (the record read into a `SourceTrial`: identifiers, the registered
+information checks ask about, sponsors, sites, the profile for patient search, and the documents it lists) and
+`download` (a document's file). Saving is the same for every source (`src/trialwatch/trials/ingest.py`), so adding a
+registry such as ClinicalTrials.gov means writing one adapter. `parse` also reads stored records, so readings are
+rebuilt without fetching anything.
+
 Trials come in in two stages:
 
 1. **Sync the list** (`source sync CODE`, or Sync list on the source's page): read every trial the source lists,
@@ -22,7 +29,7 @@ Trials come in in two stages:
    was read). A trial is marked no longer listed (kept) only when two complete syncs in a row missed it. A sync
    also marks the trials the list calls recruiting.
 2. **Transfer evidence** (`source transfer CODE`, Transfer on a source's or trial's page;
-   `src/trialwatch/sources/stages.py`): a trial's full record, the documents of the kinds the source's config
+   `src/trialwatch/trials/ingest.py`): a trial's full record, the documents of the kinds the source's config
    names and their page text, its profile and its sites. For CTIS, `evidence.document_kinds` is by default the
    summary of results and the clinical study report; lay summaries only if the config asks (they are often one per
    language, and no check reads them). A document the source no longer lists is unlinked from the trial (kept).
@@ -44,7 +51,7 @@ stale until a transfer on a later day. Every transfer also downloads each listed
 bytes, so a file replaced without a new version number is caught too.
 
 A check reads a trial only when every source that holds it is complete and current, and its transfer brought
-every document kind the check reads that the source can give (`not_ready` in `sources/stages.py`). A trial entered
+every document kind the check reads that the source can give (`not_ready` in `trials/readiness.py`). A trial entered
 by hand is complete once its uploaded documents are read.
 
 ### One transfer, step by step
@@ -53,21 +60,23 @@ by hand is complete once its uploaded documents are read.
 sequenceDiagram
     participant you as Terminal or worker
     participant cli as cli.py / jobs
-    participant stages as sources/stages.py + ctis.py
-    participant client as sources/ctis_client.py
+    participant ingest as trials/ingest.py
+    participant adapter as sources/ctis.py (adapter)
     participant ctis as CTIS public API
     participant db as Postgres (db/)
     you->>cli: source transfer ctis CT…
-    cli->>stages: transfer(keys)
-    stages->>client: retrieve(ct)
-    client->>ctis: GET /retrieve/{ct}
-    ctis-->>client: the record (~60 kB JSON)
-    stages->>client: download_document(ct, uuid)
-    client->>ctis: GET /documents/{ct}/{uuid}/download
-    ctis-->>client: presigned S3 link, then the PDF
-    stages->>db: record version, documents, files, page text
-    stages->>db: profile, sites, search document
-    stages->>db: evidence_transfer: complete or failed
+    cli->>ingest: transfer(keys)
+    ingest->>adapter: fetch(ct)
+    adapter->>ctis: GET /retrieve/{ct}
+    ctis-->>adapter: the record (~60 kB JSON)
+    ingest->>adapter: parse(record, list row)
+    adapter-->>ingest: SourceTrial (identifiers, registered, sponsors, sites, profile, documents)
+    ingest->>adapter: download(ct, document)
+    adapter->>ctis: GET /documents/{ct}/{uuid}/download
+    ctis-->>adapter: presigned S3 link, then the PDF
+    ingest->>db: record version, documents, files, page text
+    ingest->>db: profile, sites, search document
+    ingest->>db: evidence_transfer: complete or failed
 ```
 
 `CtisClient` waits at least 1 s between requests and tries 5 times, backing off on 429 and 5xx; an empty `{}`
@@ -97,7 +106,7 @@ answer means the trial doesn't exist (`TrialNotFound`).
   fingerprint to spot the same text in other bytes); `core.document` is the document as its source identifies it;
   `core.document_version` says which file it had from when, keeping replaced ones (CTIS serves only the current
   version, so every version we download is kept). `core.trial_document` links documents to trials with basis and
-  confidence. Each file's page text is extracted once with pypdf (`core.page`, `sources/pages.py`); only PDFs are
+  confidence. Each file's page text is extracted once with pypdf (`core.page`, `trials/pages.py`); only PDFs are
   read.
 - **Manual source.** Trials and documents a person enters (`sources/manual.py`): the "Add a trial" form and
   "Upload a document" on a trial page. Identifiers are matched first, so a known trial is never added twice; a
@@ -121,8 +130,7 @@ uv run trialwatch source sync ctis
 uv run trialwatch source transfer ctis --which pending --limit 20
 ```
 
-`source transfer ctis 2025-522750-39-00 …` takes EU CT numbers instead, and `--files-dir` also writes each document
-to disk (never overwritten or removed). `source config ctis --config <file>` replaces a source's config (CTIS:
+`source transfer ctis 2025-522750-39-00 …` takes EU CT numbers instead. `source config ctis --config <file>` replaces a source's config (CTIS:
 `listing.criteria` are the fields of its search, e.g. `{"status": [8], "hasStudyResults": true}`;
 `evidence.document_kinds` the kinds to transfer), `--disable` switches a source off, `source register` adds a
 source read by another adapter, and `source locations ctis` reads again where each stored trial runs without
@@ -130,12 +138,13 @@ fetching anything.
 
 | Where | What |
 |---|---|
-| `sources/registry.py` | registered sources and their adapters |
-| `sources/stages.py` | sync, transfer, `not_ready` (may a check read it?) |
-| `sources/ctis.py`, `ctis_client.py` | the CTIS adapter and its HTTP client |
+| `sources/registry.py` | registered sources, the adapter interface, `SourceTrial` |
+| `sources/ctis.py`, `ctis_client.py` | the CTIS adapter (reads only) and its HTTP client |
 | `sources/manual.py` | trials and documents added by hand |
-| `sources/pages.py` | page text |
-| `sources/snapshot.py` | the frozen snapshot for gold evaluations |
+| `sources/snapshot.py` | the frozen snapshot for gold evaluations, for any adapter |
+| `trials/ingest.py` | sync, transfer, saving what an adapter read |
+| `trials/readiness.py` | `not_ready`: may a check read it? |
+| `trials/pages.py` | page text |
 | `db/core.py` | the central model's SQL |
 
 ## Central model tables
@@ -393,10 +402,8 @@ stop with that message. The snapshot is today's CTIS, not the reviewers' 2025-11
 were posted after that day are still set aside.
 
 `trialwatch gold snapshot --dataset bruckner/2026-03-16 --out FILE --release TAG` makes a snapshot locally (it
-writes the lock too). With `--files-from data/ctis/documents --copied-on DATE` it takes each document's file from
-an earlier `source transfer --files-dir` copy when that copy holds the same document and version, and asks CTIS
-only for the others; the records always come from CTIS at that moment, and the snapshot's index says where each
-file came from.
+writes the lock too). Recording and replaying wrap the source's adapter at `fetch` and `download`, so they work
+for any source.
 
 | Where | What |
 |---|---|

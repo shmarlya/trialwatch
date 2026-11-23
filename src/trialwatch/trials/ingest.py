@@ -1,40 +1,44 @@
-"""The two stages of bringing trials in from a registered source (ADR-005), the same for every
-adapter, and the rule for which trials a check may read:
+"""Bringing trials in from a registered source (ADR-005), the same for every adapter. An adapter
+reads its source and says what it read (trialwatch.sources.registry); everything here saves it.
 
 1. sync_list: every trial the source lists becomes a core.trial (matched by its source key and
    identifiers, or created), with what the list says about it in core.source_listing. A complete
    pass also marks the trials the source no longer lists. Nothing but the list is fetched.
-2. transfer: for chosen trials, the adapter fetches the full record and the configured documents
-   (unlinking the ones the source no longer lists); then their page text is read. The trial's
+2. transfer: for chosen trials, the adapter fetches the full record and reads it (a SourceTrial);
+   `save` stores the record as a new version if it changed (the trial matched by all its identifiers
+   or created), its sponsors, sites and profile, and every listed document of the configured kinds
+   (downloaded each time, a new version when its bytes changed), and unlinks the ones the source no
+   longer lists; then their page text is read. The trial's
    core.evidence_transfer row says 'complete' only when the record, every configured document and
    every page came in, else 'failed' and why. While a trial is being transferred its row says
    failed, so an interrupted transfer never leaves half-new evidence looking complete. Each trial is
    then indexed for patient search (ADR-008: its new sites geocoded, its search document built from
    the profile the adapter stored), so it is findable the moment it arrives; a failure there is
    reported but leaves the evidence complete.
-3. not_ready: a check reads a trial only when every source that holds the trial gave its evidence
-   completely and it is still current (a stale transfer is transferred again first), including the
-   document kinds the check reads that the source can give at all.
+
+Which trials a check may then read is trialwatch.trials.readiness.
 
 Each stage is one core.ingest_run (kind 'list' or 'transfer') with the config it used, its counts and
 errors. Both can be stopped between trials (or list pages): what was done so far is kept. One process
 at a time reads a source (an advisory lock), and a run whose process died is closed by the next one.
 """
 
+import hashlib
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import psycopg
 
 from trialwatch.db import core
 from trialwatch.db import search as search_db
-from trialwatch.db.core import EvidenceRow, RegisteredSource
+from trialwatch.db.core import RegisteredSource
 from trialwatch.geo import load as geo_load
-from trialwatch.search import index as search_index
+from trialwatch.hashing import storable
 from trialwatch.progress import Progress, report
-from trialwatch.sources.pages import extract_missing
-from trialwatch.sources.registry import Adapter, Fetched, adapter_class
+from trialwatch.search import index as search_index
+from trialwatch.sources import profile
+from trialwatch.sources.registry import Adapter, DocumentRef, DownloadedFile
+from trialwatch.trials.pages import extract_missing
 
 ShouldStop = Callable[[], bool] | None
 
@@ -62,11 +66,14 @@ def _hold_source(conn: psycopg.Connection, source: RegisteredSource) -> None:
     is reading the source."""
     core.close_abandoned_ingest_runs(conn)
     if not core.try_lock(conn, core.LOCK_SOURCE, source.id):
-        raise SourceBusy(f"another process is reading source {source.code} (its ingest run is still running); "
-                         "try again when it has finished")
+        raise SourceBusy(
+            f"another process is reading source {source.code} (its ingest run is still running); "
+            "try again when it has finished"
+        )
 
 
 # --- 1. the list -------------------------------------------------------------------------------
+
 
 @dataclass
 class ListResult:
@@ -84,9 +91,16 @@ class ListResult:
     failed: dict[str, str] = field(default_factory=dict)
 
     def counts(self) -> dict:
-        return {"listed": self.listed, "new_trials": self.new_trials, "total": self.total,
-                "possible_duplicates": self.possible_duplicates, "delisted": self.delisted,
-                "complete": self.complete, "stopped": self.stopped, "failed": len(self.failed)}
+        return {
+            "listed": self.listed,
+            "new_trials": self.new_trials,
+            "total": self.total,
+            "possible_duplicates": self.possible_duplicates,
+            "delisted": self.delisted,
+            "complete": self.complete,
+            "stopped": self.stopped,
+            "failed": len(self.failed),
+        }
 
     def summary(self) -> str:
         state = "complete"
@@ -94,12 +108,19 @@ class ListResult:
             state = "stopped part-way"
         elif not self.complete:
             state = "not complete"
-        return (f"list run {self.run_id} ({state}): {self.listed:,} listed, {self.new_trials:,} new trials, "
-                f"{self.delisted:,} no longer listed, possible duplicates {self.possible_duplicates}")
+        return (
+            f"list run {self.run_id} ({state}): {self.listed:,} listed, {self.new_trials:,} new trials, "
+            f"{self.delisted:,} no longer listed, possible duplicates {self.possible_duplicates}"
+        )
 
 
-def sync_list(conn: psycopg.Connection, source: RegisteredSource, adapter: Adapter, progress: Progress = None,
-              should_stop: ShouldStop = None) -> ListResult:
+def sync_list(
+    conn: psycopg.Connection,
+    source: RegisteredSource,
+    adapter: Adapter,
+    progress: Progress = None,
+    should_stop: ShouldStop = None,
+) -> ListResult:
     """Bring the source's whole list in (see the module's docstring)."""
     if not adapter.lists:
         raise ValueError(f"source {source.code} has no list to sync")
@@ -126,8 +147,14 @@ def sync_list(conn: psycopg.Connection, source: RegisteredSource, adapter: Adapt
     return result
 
 
-def _read_list(conn: psycopg.Connection, source: RegisteredSource, adapter: Adapter, result: ListResult,
-               progress: Progress, should_stop: ShouldStop) -> None:
+def _read_list(
+    conn: psycopg.Connection,
+    source: RegisteredSource,
+    adapter: Adapter,
+    result: ListResult,
+    progress: Progress,
+    should_stop: ShouldStop,
+) -> None:
     page_number = 0
     for page in adapter.list_pages(source.config):
         page_number += 1
@@ -157,12 +184,15 @@ def _read_list(conn: psycopg.Connection, source: RegisteredSource, adapter: Adap
     if result.complete and result.total is not None and result.listed + len(result.failed) < result.total:
         # e.g. a source that answers only so many rows per query: what came is kept, nothing is delisted
         result.complete = False
-        result.failed["list"] = (f"read {result.listed:,} of the {result.total:,} trials the source lists: "
-                                 "not complete, so no trial is marked as no longer listed")
+        result.failed["list"] = (
+            f"read {result.listed:,} of the {result.total:,} trials the source lists: "
+            "not complete, so no trial is marked as no longer listed"
+        )
         report(progress, f"failed: {result.failed['list']}")
 
 
 # --- 2. evidence -------------------------------------------------------------------------------
+
 
 @dataclass
 class TransferResult:
@@ -185,21 +215,39 @@ class TransferResult:
     failed: dict[str, str] = field(default_factory=dict)
 
     def counts(self) -> dict:
-        return {"trials": self.trials, "complete": self.complete, "new_trials": self.new_trials,
-                "documents": self.documents, "new_versions": self.new_versions,
-                "unchanged": self.unchanged, "unlinked": self.unlinked, "pages": self.pages,
-                "possible_duplicates": self.possible_duplicates, "stopped": self.stopped,
-                "failed": len(self.failed)}
+        return {
+            "trials": self.trials,
+            "complete": self.complete,
+            "new_trials": self.new_trials,
+            "documents": self.documents,
+            "new_versions": self.new_versions,
+            "unchanged": self.unchanged,
+            "unlinked": self.unlinked,
+            "pages": self.pages,
+            "possible_duplicates": self.possible_duplicates,
+            "stopped": self.stopped,
+            "failed": len(self.failed),
+        }
 
     def summary(self) -> str:
-        return (f"transfer run {self.run_id}: {self.complete} of {self.trials} complete, {self.new_trials} new trials, "
-                f"documents {self.documents} ({self.new_versions} new versions, {self.unchanged} unchanged, "
-                f"{self.unlinked} no longer listed), {self.pages} pages read")
+        return (
+            f"transfer run {self.run_id}: {self.complete} of {self.trials} complete, {self.new_trials} new trials, "
+            f"documents {self.documents} ({self.new_versions} new versions, {self.unchanged} unchanged, "
+            f"{self.unlinked} no longer listed), {self.pages} pages read"
+        )
 
 
-def transfer(conn: psycopg.Connection, source: RegisteredSource, adapter: Adapter, keys: Iterable[str], *,
-             why: str = "chosen", files_dir: Path | None = None, progress: Progress = None,
-             should_stop: ShouldStop = None, extract: Callable[[bytes], list[str]] | None = None) -> TransferResult:
+def transfer(
+    conn: psycopg.Connection,
+    source: RegisteredSource,
+    adapter: Adapter,
+    keys: Iterable[str],
+    *,
+    why: str = "chosen",
+    progress: Progress = None,
+    should_stop: ShouldStop = None,
+    extract: Callable[[bytes], list[str]] | None = None,
+) -> TransferResult:
     """Transfer the evidence of these trials (the source's keys), each once (see the module's
     docstring). `why` says how they were chosen, for the run's record."""
     if not adapter.transfers:
@@ -214,8 +262,6 @@ def transfer(conn: psycopg.Connection, source: RegisteredSource, adapter: Adapte
             wanted.append(key)
     kinds = adapter.evidence_kinds(source.config)
     run_args = {"keys": wanted, "why": why, "config": source.config}
-    if files_dir is not None:
-        run_args["files_dir"] = str(files_dir)
     _hold_source(conn, source)
     try:
         result = TransferResult(run_id=core.start_ingest(conn, source.code, run_args, kind="transfer"))
@@ -225,7 +271,7 @@ def transfer(conn: psycopg.Connection, source: RegisteredSource, adapter: Adapte
                     result.stopped = True
                     report(progress, "stopped: the trials transferred so far are kept")
                     break
-                status = _transfer_one(conn, source, adapter, key, kinds, files_dir, extract, result)
+                status = _transfer_one(conn, source, adapter, key, kinds, extract, result)
                 result.statuses[key] = status
                 report(progress, f"{number}/{len(wanted)} {key}: {status}")
             if result.trial_ids:
@@ -242,17 +288,23 @@ def transfer(conn: psycopg.Connection, source: RegisteredSource, adapter: Adapte
     return result
 
 
-def _transfer_one(conn: psycopg.Connection, source: RegisteredSource, adapter: Adapter, key: str,
-                  kinds: Sequence[str] | None, files_dir: Path | None, extract: Callable[[bytes], list[str]] | None,
-                  result: TransferResult) -> str:
+def _transfer_one(
+    conn: psycopg.Connection,
+    source: RegisteredSource,
+    adapter: Adapter,
+    key: str,
+    kinds: Sequence[str] | None,
+    extract: Callable[[bytes], list[str]] | None,
+    result: TransferResult,
+) -> str:
     result.trials += 1
     known = core.source_key_known(conn, source.code, key)
     if known:
         core.mark_transfer_started(conn, source=source.code, source_key=key, run_id=result.run_id)
     try:
-        fetched = adapter.fetch(conn, source.code, key, source.config, files_dir)
-    except Exception as exc:  # an adapter should report errors itself; this keeps the run going if not
-        fetched = Fetched(trial_id=None, errors={"record": f"{type(exc).__name__}: {exc}"})
+        fetched = save(conn, source.code, key, adapter, kinds)
+    except Exception as exc:  # save reports errors itself; this keeps the run going if not
+        fetched = Saved(trial_id=None, errors={"record": f"{type(exc).__name__}: {exc}"})
     errors = {}
     for where, message in fetched.errors.items():
         errors[where] = message
@@ -260,8 +312,16 @@ def _transfer_one(conn: psycopg.Connection, source: RegisteredSource, adapter: A
         for where, message in errors.items():
             result.failed[f"{key}/{where}"] = message
         if known:
-            core.save_transfer(conn, source=source.code, source_key=key, run_id=result.run_id, documents=0, pages=0,
-                               errors=errors, document_kinds=kinds)
+            core.save_transfer(
+                conn,
+                source=source.code,
+                source_key=key,
+                run_id=result.run_id,
+                documents=0,
+                pages=0,
+                errors=errors,
+                document_kinds=kinds,
+            )
         # else: neither listed nor fetched before, so there is no trial to record the failed transfer on
         return "failed"
     for where, message in fetched.warnings.items():
@@ -287,8 +347,16 @@ def _transfer_one(conn: psycopg.Connection, source: RegisteredSource, adapter: A
         # what search reads is not evidence: reported, the transfer can still complete
         result.failed[f"{key}/search"] = problem
     documents, page_count = core.evidence_counts(conn, fetched.trial_id, kinds)
-    status = core.save_transfer(conn, source=source.code, source_key=key, run_id=result.run_id,
-                                documents=documents, pages=page_count, errors=errors, document_kinds=kinds)
+    status = core.save_transfer(
+        conn,
+        source=source.code,
+        source_key=key,
+        run_id=result.run_id,
+        documents=documents,
+        pages=page_count,
+        errors=errors,
+        document_kinds=kinds,
+    )
     for where, message in errors.items():
         result.failed[f"{key}/{where}"] = message
     if status == "complete":
@@ -317,76 +385,136 @@ def _refresh_search_words(conn: psycopg.Connection, result: TransferResult) -> N
         result.failed["search words"] = f"{type(exc).__name__}: {exc}"
 
 
-# --- 3. which trials a check may read ----------------------------------------------------------
+# --- saving one trial --------------------------------------------------------------------------
 
-def _kinds_provided(adapter: str) -> tuple[str, ...] | None:
-    """The document kinds a source read by this adapter can give (None: any kind, or unknown)."""
+
+@dataclass
+class Saved:
+    """What saving one trial did."""
+
+    # None when even the record could not be fetched or read
+    trial_id: int | None
+    new_trial: bool = False
+    new_record: bool = False
+    possible_duplicates: int = 0
+    # documents of the wanted kinds the record lists
+    documents: int = 0
+    new_versions: int = 0
+    # documents whose current file we already held, byte for byte
+    unchanged: int = 0
+    # links to documents the source no longer lists, now removed
+    unlinked: int = 0
+    # "record", or a document's key -> what went wrong: the evidence is not complete
+    errors: dict[str, str] = field(default_factory=dict)
+    # what went wrong besides the evidence (e.g. reading the sponsors): reported, not blocking
+    warnings: dict[str, str] = field(default_factory=dict)
+
+
+def save(conn: psycopg.Connection, source: str, key: str, adapter: Adapter, kinds: Sequence[str] | None) -> Saved:
+    """Fetch one trial from its source and save what its record says: the record (a new version if it
+    changed), its sponsors, sites and profile, and every listed document of these kinds (None: every
+    kind); documents of these kinds the source no longer lists are unlinked."""
     try:
-        return adapter_class(adapter).document_kinds
-    except ValueError:
-        return None
-
-
-def _kinds_missing(row: EvidenceRow, kinds: Sequence[str]) -> list[str]:
-    """The kinds a check reads that this source can give but its last transfer did not bring."""
-    if row.document_kinds is None:
-        return []
-    provided = _kinds_provided(row.adapter)
-    missing = []
-    for kind in kinds:
-        if provided is not None and kind not in provided:
+        # text fields can hold characters Postgres can't store (a NUL): cleaned before anything else
+        payload = storable(adapter.fetch(key))
+        listing = core.listing_summary(conn, source, key)
+        trial = adapter.parse(payload, listing)
+        record = core.save_trial_record(
+            conn,
+            source=source,
+            source_key=key,
+            identifiers=trial.identifiers,
+            payload=payload,
+            registered=trial.registered,
+            content_hash=trial.content_hash,
+        )
+    except Exception as exc:  # recorded on the trial's transfer
+        return Saved(trial_id=None, errors={"record": f"{type(exc).__name__}: {exc}"})
+    saved = Saved(
+        trial_id=record.trial_id,
+        new_trial=record.new_trial,
+        new_record=record.new_version,
+        possible_duplicates=len(record.possible_duplicates),
+    )
+    for where, message in trial.warnings.items():
+        saved.warnings[where] = message
+    # sponsors, sites and profile are not evidence: a problem is reported, the transfer can still complete
+    if trial.sponsors is not None:
+        try:
+            core.set_trial_sponsors(conn, record.trial_id, source, trial.sponsors)
+        except Exception as exc:
+            saved.warnings["sponsors"] = f"{type(exc).__name__}: {exc}"
+    if trial.locations is not None:
+        try:
+            core.set_trial_locations(conn, record.trial_id, source, trial.locations)
+        except Exception as exc:
+            saved.warnings["locations"] = f"{type(exc).__name__}: {exc}"
+    if trial.profile is not None:
+        try:
+            profile.store(conn, record.trial_id, source, key, trial.profile)
+        except Exception as exc:
+            saved.warnings["profile"] = f"{type(exc).__name__}: {exc}"
+    if trial.documents is None:
+        # a record without its list of documents says nothing about them: nothing is unlinked
+        saved.errors["documents"] = "the record has no list of documents"
+        return saved
+    listed = []
+    for document in trial.documents:
+        if kinds is not None and document.kind not in kinds:
             continue
-        if kind not in row.document_kinds:
-            missing.append(kind)
-    return missing
+        saved.documents += 1
+        listed.append(document.key)
+        if document.problem is not None:
+            saved.errors[f"document {document.key}"] = document.problem
+            continue
+        try:
+            _save_document(conn, adapter, source, key, record.trial_id, document, saved)
+        except Exception as exc:  # recorded per document, the others go on
+            saved.errors[f"document {document.key}"] = f"{type(exc).__name__}: {exc}"
+    saved.unlinked = core.unlink_documents_not_listed(
+        conn,
+        trial_id=record.trial_id,
+        source=source,
+        kinds=kinds,
+        listed=core.document_ids(conn, source, listed),
+    )
+    return saved
 
 
-def _why_not_ready(rows: list[EvidenceRow], kinds: Sequence[str]) -> str | None:
-    if not rows:
-        return "no source has given its evidence"
-    problems = []
-    for row in rows:
-        if row.status == "not transferred":
-            problems.append(f"{row.source}: evidence not transferred")
-        elif row.status == "failed":
-            problems.append(f"{row.source}: its last transfer failed")
-        elif row.status == "stale":
-            problems.append(f"{row.source}: changed since its transfer, transfer it again")
-        else:
-            missing = _kinds_missing(row, kinds)
-            if missing:
-                problems.append(f"{row.source}: its transfer did not bring {', '.join(missing)}")
-    if problems:
-        return "; ".join(problems)
-    return None
+def _check_file(document: DocumentRef, file: DownloadedFile) -> None:
+    if not file.content:
+        raise ValueError("empty file")
+    if document.listed_as_pdf and not file.content.startswith(b"%PDF"):
+        raise ValueError(f"listed as PDF but is not one (starts {file.content[:20]!r})")
 
 
-def not_ready(conn: psycopg.Connection, trial_ids: Sequence[int], kinds: Sequence[str]) -> dict[int, str]:
-    """Why each of these trials may not be checked yet by a check that reads these document kinds;
-    the trials not named may be (see the module's docstring)."""
-    rows_by_trial: dict[int, list[EvidenceRow]] = {}
-    for row in core.evidence_rows(conn, trial_ids):
-        if row.trial_id not in rows_by_trial:
-            rows_by_trial[row.trial_id] = []
-        rows_by_trial[row.trial_id].append(row)
-    reasons = {}
-    for trial_id in trial_ids:
-        rows = []
-        if trial_id in rows_by_trial:
-            rows = rows_by_trial[trial_id]
-        reason = _why_not_ready(rows, kinds)
-        if reason is not None:
-            reasons[trial_id] = reason
-    return reasons
-
-
-def ready_trials(conn: psycopg.Connection, kinds: Sequence[str]) -> list[int]:
-    """Every trial a check reading these document kinds may read now: one with page text in linked
-    documents of those kinds, and nothing in not_ready."""
-    candidates = core.trials_with_pages(conn, kinds)
-    blocked = not_ready(conn, candidates, kinds)
-    ready = []
-    for trial_id in candidates:
-        if trial_id not in blocked:
-            ready.append(trial_id)
-    return ready
+def _save_document(
+    conn: psycopg.Connection,
+    adapter: Adapter,
+    source: str,
+    key: str,
+    trial_id: int,
+    document: DocumentRef,
+    saved: Saved,
+) -> None:
+    file = adapter.download(key, document)
+    _check_file(document, file)
+    sha256 = hashlib.sha256(file.content).digest()
+    stored = core.save_document_version(
+        conn,
+        source=source,
+        source_key=document.key,
+        kind=document.kind,
+        title=document.title,
+        language=document.language,
+        version=document.version,
+        content=file.content,
+        media_type=file.media_type,
+        sha256=sha256,
+        published_at=document.published_at,
+    )
+    if stored.new_version:
+        saved.new_versions += 1
+    else:
+        saved.unchanged += 1
+    core.link_document(conn, trial_id=trial_id, document_id=stored.document_id, basis="listed-by-source", source=source)

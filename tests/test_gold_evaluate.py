@@ -18,7 +18,8 @@ from trialwatch import cli
 from trialwatch.checks import evidence as ev
 from trialwatch.db import core
 from trialwatch.gold import compare, datasets, evaluate
-from trialwatch.sources import ctis, registry, stages
+from trialwatch.sources import ctis, registry
+from trialwatch.trials import ingest
 
 BRUCKNER = "bruckner/2026-03-16"
 
@@ -89,13 +90,13 @@ def fake_workflow(conn, monkeypatch, tmp_path, label):
     def fake_adapter(name):
         yield ctis.CtisAdapter(FakeCtis(payload(CT)))
 
-    real_transfer = stages.transfer
+    real_transfer = ingest.transfer
 
     def transfer_with_page_text(*args, **kwargs):
         return real_transfer(*args, extract=PageTexts(PAGES), **kwargs)
 
     monkeypatch.setattr(registry, "open_adapter", fake_adapter)
-    monkeypatch.setattr(stages, "transfer", transfer_with_page_text)
+    monkeypatch.setattr(ingest, "transfer", transfer_with_page_text)
     monkeypatch.setattr(anthropic, "Anthropic", lambda **settings: FakeClient(GOOD))
     gates = tmp_path / "gates.json"
     gates.write_text(json.dumps({"min_label_agreement": 0.9, "max_false_accusations": 0, "min_decided": 0.8,
@@ -149,20 +150,9 @@ def test_the_report_counts_a_quote_the_search_missed(conn):
     assert measured.search_hit_rate is None
 
 
-class FakeCtisClient(FakeCtis):
-    """The real client's place in `gold snapshot`: a context manager answering for CT."""
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
 def test_gold_eval_reads_a_frozen_snapshot_and_nothing_from_the_network(app_conn, tmp_path, monkeypatch):
     gates = fake_workflow(app_conn, monkeypatch, tmp_path, "not full")
-    # recorded once from "CTIS"
-    monkeypatch.setattr(cli, "CtisClient", lambda: FakeCtisClient(payload(CT)))
+    # recorded once from "CTIS" (the faked adapter fake_workflow opens)
     lock = tmp_path / "lock.json"
     archive = tmp_path / "snap.tar.gz"
     made = CliRunner().invoke(cli.app, ["gold", "snapshot", "--dataset", "test/v1", "--out", str(archive),

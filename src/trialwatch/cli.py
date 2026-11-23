@@ -36,9 +36,9 @@ from trialwatch.search import index as search_index
 from trialwatch.vocab import load as vocab_loading
 from trialwatch.gold import compare as gold_compare
 from trialwatch.gold import evaluate as gold_evaluate
-from trialwatch.sources import ctis, profile, registry, snapshot, stages
-from trialwatch.sources.ctis_client import CtisClient
+from trialwatch.sources import profile, registry, snapshot
 from trialwatch.sources.ctis_client import CT_NUMBER
+from trialwatch.trials import ingest, readiness
 
 app = typer.Typer(no_args_is_help=True, help="TrialWatch: EU clinical-trial results watchdog.")
 source_app = typer.Typer(no_args_is_help=True, help="Data sources (ADR-005): the registry, syncing lists, transferring evidence.")
@@ -306,7 +306,7 @@ def source_sync(code: Annotated[str, typer.Argument(help="The source, e.g. ctis"
         source = _registered(conn, code)
         with registry.open_adapter(source.adapter) as adapter:
             try:
-                result = stages.sync_list(conn, source, adapter, progress=typer.echo)
+                result = ingest.sync_list(conn, source, adapter, progress=typer.echo)
             except ValueError as exc:
                 raise typer.BadParameter(str(exc)) from exc
     typer.echo(result.summary())
@@ -324,9 +324,6 @@ def source_transfer(
     ] = None,
     which: Annotated[str | None, typer.Option(help="Instead of keys: pending | failed | stale | recruiting | listed")] = None,
     limit: Annotated[int | None, typer.Option(min=1, help="Transfer at most this many trials")] = None,
-    files_dir: Annotated[
-        Path | None, typer.Option(help="Also write each file here, to read by hand (never overwritten or removed)")
-    ] = None,
 ) -> None:
     """Transfer trials' evidence from a source: the full record and the documents its config names,
     with their page text read. Only trials whose evidence is complete and current can be checked."""
@@ -355,8 +352,7 @@ def source_transfer(
         typer.echo(f"{len(given)} trials to transfer from {code} ({why})")
         with registry.open_adapter(source.adapter) as adapter:
             try:
-                result = stages.transfer(conn, source, adapter, given, why=why, files_dir=files_dir,
-                                         progress=typer.echo)
+                result = ingest.transfer(conn, source, adapter, given, why=why, progress=typer.echo)
             except ValueError as exc:
                 raise typer.BadParameter(str(exc)) from exc
     typer.echo(result.summary())
@@ -381,7 +377,9 @@ def source_locations(code: Annotated[str, typer.Argument(help="The source, e.g. 
             if not page:
                 break
             for stored in page:
-                places += core_db.set_trial_locations(conn, stored.trial_id, code, adapter.locations(stored.payload))
+                read = adapter.parse(stored.payload, stored.listing)
+                if read.locations is not None:
+                    places += core_db.set_trial_locations(conn, stored.trial_id, code, read.locations)
                 trials += 1
                 after = stored.trial_id
     typer.echo(f"{code}: read the locations of {trials:,} trial{"s" if trials != 1 else ""} ({places:,} sites and countries)")
@@ -408,7 +406,7 @@ def source_profiles(code: Annotated[str, typer.Argument(help="The source, e.g. c
                 break
             for stored in page:
                 after = stored.trial_id
-                read = adapter.profile(stored.payload, stored.listing)
+                read = adapter.parse(stored.payload, stored.listing).profile
                 if read is None:
                     continue
                 trials += 1
@@ -655,7 +653,7 @@ def _trials_to_judge(conn, ct_numbers: list[str] | None, from_file: Path | None,
     """core.trial ids: every trial a check of this requirement set may read now (--all), or the trials
     with these EU CT numbers."""
     if all_trials:
-        return stages.ready_trials(conn, requirement_set.document_kinds)
+        return readiness.ready_trials(conn, requirement_set.document_kinds)
     wanted = _ct_numbers_given(ct_numbers, from_file)
     found = core_db.trials_with_scheme(conn, "eu-ct", wanted)
     missing = []
@@ -835,12 +833,6 @@ def gold_snapshot(
     out: Annotated[Path, typer.Option(help="Write the snapshot here (.tar.gz)")],
     release: Annotated[str, typer.Option(help="The GitHub release the snapshot will be uploaded to")],
     lock: Annotated[Path, typer.Option(help="Write the lock that names it here")] = snapshot.LOCK_FILE,
-    files_from: Annotated[
-        Path | None, typer.Option(exists=True, file_okay=False,
-                                  help="Take each document's file from this earlier --files-dir copy when it holds "
-                                       "that document and version (records still come from CTIS)")
-    ] = None,
-    copied_on: Annotated[str, typer.Option(help="When the --files-from copy was made, for the index")] = "an earlier day",
 ) -> None:
     """Freeze what CTIS answers now for every labelled trial of a gold dataset: transfer them from CTIS
     (into this database) while recording each record and document file, then pack the recording
@@ -853,16 +845,12 @@ def gold_snapshot(
     import tempfile
 
     with tempfile.TemporaryDirectory() as folder:
-        with CtisClient() as live:
-            client = live
-            description = f"CTIS's answers for the labelled trials of {chosen.ref}"
-            if files_from is not None:
-                client = snapshot.LocalCopyFirst(live, files_from, copied_on)
-                description += f"; document files from a copy of {copied_on} where it holds the same version"
-            recording = snapshot.RecordingClient(client, Path(folder), description, dataset=chosen.ref)
-            with db.connect_system() as conn:
-                result = stages.transfer(conn, _registered(conn, "ctis"), ctis.CtisAdapter(recording), ct_numbers,
-                                         why="gold snapshot", progress=typer.echo)
+        with db.connect_system() as conn:
+            source = _registered(conn, "ctis")
+            with registry.open_adapter(source.adapter) as live:
+                description = f"CTIS's answers for the labelled trials of {chosen.ref}"
+                recording = snapshot.Recording(live, Path(folder), description, dataset=chosen.ref)
+                result = ingest.transfer(conn, source, recording, ct_numbers, why="gold snapshot", progress=typer.echo)
             index = recording.finish()
         packed = snapshot.pack(Path(folder), out)
     typer.echo(result.summary())
@@ -928,12 +916,12 @@ def gold_eval(
         with db.connect_system() as conn:
             source = _registered(conn, "ctis")
             if frozen is not None:
-                # the CTIS adapter as always, answered by the snapshot: everything after the network runs as usual
-                transferred = stages.transfer(conn, source, ctis.CtisAdapter(snapshot.ReplayClient(Path(folder))),
-                                              ct_numbers, why="gold eval", progress=typer.echo)
+                # the source's adapter as always, answered by the snapshot: everything after the network runs as usual
+                replay = snapshot.Replay(registry.adapter_class(source.adapter)(), Path(folder))
+                transferred = ingest.transfer(conn, source, replay, ct_numbers, why="gold eval", progress=typer.echo)
             else:
                 with registry.open_adapter(source.adapter) as adapter:
-                    transferred = stages.transfer(conn, source, adapter, ct_numbers, why="gold eval",
+                    transferred = ingest.transfer(conn, source, adapter, ct_numbers, why="gold eval",
                                                   progress=typer.echo)
     typer.echo(transferred.summary())
     _echo_failures(transferred.failed)
@@ -945,7 +933,7 @@ def gold_eval(
             if ct_number in found:
                 trial_ids.append(found[ct_number])
         # a trial whose evidence did not come in completely is not checked: it counts as missing
-        blocked = stages.not_ready(conn, trial_ids, requirement_set.document_kinds)
+        blocked = readiness.not_ready(conn, trial_ids, requirement_set.document_kinds)
         ready = []
         for trial_id in trial_ids:
             if trial_id not in blocked:

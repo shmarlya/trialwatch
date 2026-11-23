@@ -259,13 +259,15 @@ def judgement_kinds_of_run(conn: psycopg.Connection, run_id: int) -> list[Judgem
                            (run_id,)).fetchall()
 
 
-def judgement_kinds_of_trials(conn: psycopg.Connection, trial_ids: list[int], requirements: str) -> list[JudgementKind]:
+def judgement_kinds_of_trials(conn: psycopg.Connection, trial_ids: list[int], requirements: str,
+                              before_run: int | None = None) -> list[JudgementKind]:
     """The kind of every finished judgement without an error of these trials under the requirement
-    set, newest run first."""
+    set, newest run first; with `before_run`, only of runs started before that one."""
     with conn.cursor(row_factory=class_row(JudgementKind)) as cur:
-        return cur.execute(_KINDS + " AND j.trial_id = ANY(%s) AND r.requirements = %s "
-                           "GROUP BY j.run_id, j.trial_id, r.id ORDER BY j.run_id DESC",
-                           (trial_ids, requirements)).fetchall()
+        return cur.execute(_KINDS + " AND j.trial_id = ANY(%(trials)s) AND r.requirements = %(requirements)s"
+                           " AND (%(before_run)s::bigint IS NULL OR r.id < %(before_run)s)"
+                           " GROUP BY j.run_id, j.trial_id, r.id ORDER BY j.run_id DESC",
+                           {"trials": trial_ids, "requirements": requirements, "before_run": before_run}).fetchall()
 
 
 def judgement_kind(conn: psycopg.Connection, run_id: int, trial_id: int) -> JudgementKind | None:

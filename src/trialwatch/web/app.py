@@ -23,29 +23,35 @@ page elsewhere can't submit a form to it).
 """
 
 import json
+import logging
 import os
 import re
+import secrets
 import threading
 import time
+import traceback
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from functools import cache
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import psycopg
 
 from trialwatch import db
 from trialwatch.auth import accounts, actions, passwords, sessions
-from trialwatch.checks import evidence, model, publishing
+from trialwatch.checks import evidence, model
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
 from trialwatch.db import auth as auth_db
@@ -114,9 +120,10 @@ LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1", "testserver")
 CHANGING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 
+@cache
 def default_settings() -> check_settings.Settings:
     """The check's default setup (checks/configs/default.json); pages show labels judged against its
-    requirement set."""
+    requirement set. Read once: a changed file takes effect when the server restarts."""
     return check_settings.load(check_settings.DEFAULT)
 
 
@@ -167,9 +174,11 @@ async def only_this_machine_and_own_pages(request: Request, call_next):
     if reason is not None:
         return PlainTextResponse(f"refused: {reason}", status_code=403)
     response = await call_next(request)
-    # a link out (e.g. to CTIS) never tells the other site the page it came from: a search's address
-    # holds what someone looked for, which can be about their health (ADR-008)
-    response.headers["Referrer-Policy"] = "no-referrer"
+    # A Referer never carries a page's address, only this site's origin: a search's address holds what
+    # someone looked for, which can be about their health (ADR-008). Not "no-referrer": under that
+    # policy browsers send "Origin: null" when one of our own pages posts a form, which refusal()
+    # rightly treats as another site, so sign-in and every form would be refused.
+    response.headers["Referrer-Policy"] = "strict-origin"
     return response
 
 
@@ -298,6 +307,52 @@ def sign_in_needed(request: Request, exc: SignInNeeded) -> Response:
         if request.url.query:
             target = f"{target}?{request.url.query}"
     return RedirectResponse(f"/login?next={url_quote(target)}", status_code=303)
+
+
+# Error pages: rendered without auth_context, so they need no database (it may be what failed)
+ERROR_TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
+ERROR_TITLES = {403: "Not allowed", 404: "Not found", 405: "Not allowed", 500: "Something went wrong"}
+# Pages whose address can hold what someone searched for, which can be about their health (ADR-008)
+PRIVATE_PATHS = ("/find",)
+log = logging.getLogger("trialwatch.web")
+
+
+def error_page(request: Request, status_code: int, message: str, reference: str | None = None) -> Response:
+    title = "Error"
+    if status_code in ERROR_TITLES:
+        title = ERROR_TITLES[status_code]
+    context = {"title": title, "message": message, "reference": reference}
+    return ERROR_TEMPLATES.TemplateResponse(request, "error.html", context, status_code=status_code)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+    """A browser gets a page saying what went wrong; anything else gets FastAPI's JSON as before."""
+    if not wants_page(request):
+        return await http_exception_handler(request, exc)
+    message = str(exc.detail)
+    if exc.status_code == 404 and message == "Not Found":
+        message = "There is no page at this address."
+    return error_page(request, exc.status_code, message)
+
+
+@app.exception_handler(Exception)
+async def server_error(request: Request, exc: Exception) -> Response:
+    """An error nobody handled: logged with a reference the page shows, so the two can be matched.
+    The log names the path only: a search's query string can be about someone's health (ADR-008)."""
+    reference = secrets.token_hex(4)
+    if request.url.path in PRIVATE_PATHS:
+        # where it was raised, but not its message: the message may quote what someone searched for
+        frames = "".join(traceback.format_tb(exc.__traceback__))
+        log.error("unhandled error, reference %s, on %s %s: %s\n%s", reference, request.method, request.url.path,
+                  type(exc).__name__, frames)
+    else:
+        log.error("unhandled error, reference %s, on %s %s", reference, request.method, request.url.path,
+                  exc_info=(type(exc), exc, exc.__traceback__))
+    message = "TrialWatch could not answer this request. It has been logged."
+    if not wants_page(request):
+        return PlainTextResponse(f"{message} Reference {reference}.", status_code=500)
+    return error_page(request, 500, message, reference)
 
 
 class LoginThrottle:
@@ -1208,15 +1263,10 @@ def trial_page(request: Request, trial_id: int, run: int | None = None, error: s
         steps = []
         prompt_text = None
         prompt_params = {}
-        agreement = None
         if chosen is not None:
             questions = overview.run_questions(conn, chosen.run_id, trial_id)
             steps = overview.run_steps(conn, chosen.run_id, trial_id)
             prompt_text, prompt_params = overview.run_prompt(conn, chosen.run_id)
-            # how judgements of its kind agree with gold labels now: shown to everyone
-            kind = checks_db.judgement_kind(conn, chosen.run_id, trial_id)
-            if kind is not None:
-                agreement = publishing.measure(kind, publishing.calibrate(conn, kind.requirements))
     calls = {}
     for step in steps:
         if step.name == "call":
@@ -1232,7 +1282,7 @@ def trial_page(request: Request, trial_id: int, run: int | None = None, error: s
         "defaults": default_settings(), "running": _running(), "error": error, "transfers": transfers,
         "ready": trial_id not in blocked, "not_ready": blocked.get(trial_id), "transferable": _transferable(transfers),
         "kinds": kinds, "configs": check_settings.load_all(), "judgement_config": judgement_config,
-        "gold_items": gold_items, "sponsors": sponsors, "locations": locations, "agreement": agreement,
+        "gold_items": gold_items, "sponsors": sponsors, "locations": locations,
         "patient": patient,
     }
     return TEMPLATES.TemplateResponse(request, "trial.html", context)
@@ -1290,7 +1340,7 @@ def find(request: Request, q: str = "", what: str = "", where: str = "", km: str
          hv: str = "", phase: str = "", cat: str = "", page: int = 1,
          user: auth_db.User | None = Depends(Requires("view.recruiting"))) -> HTMLResponse:
     """Search the trials that recruit now: a condition, a place, who can join. Nothing about a search is
-    stored; the address it is at is never sent on to another site (Referrer-Policy), kept by the
+    stored; the address it is at is never sent on in a Referer (Referrer-Policy), kept by the
     browser's cache, or indexed by search engines."""
     params = web_search.params_from(q, what, where, km, age, sex, hv, phase, cat, page)
     result = None

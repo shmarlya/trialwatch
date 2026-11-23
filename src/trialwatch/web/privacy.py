@@ -1,7 +1,8 @@
 """Keeping searches private (ADR-008): what someone searches for can be about their health, and it is in
 the address of the search page (/find?q=…). Nothing about a search is stored; the server's access log
-records each request without its query string; links out never tell the other site where they came
-from (Referrer-Policy, set for every page in app.py); and the search page is neither cached nor indexed.
+records each request without its query string; no request carries a page's address in its Referer,
+only the site's origin (Referrer-Policy: strict-origin, set for every page in app.py), and links to a
+registry send no Referer at all (rel="noreferrer"); and the search page is neither cached nor indexed.
 A reverse proxy in front of the site must leave query strings out of its own logs too (README)."""
 
 import copy

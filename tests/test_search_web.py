@@ -12,6 +12,7 @@ from test_sources_ctis import transfer
 from vocabulary import load_mesh
 
 from trialwatch.db import core
+from trialwatch.db import search as search_db
 from trialwatch.sources import ctis, stages
 from trialwatch.web import app as web
 from trialwatch.web import privacy
@@ -100,13 +101,14 @@ def test_searches_are_private(trials, app_conn):
     public = TestClient(web.app)
     before = app_conn.execute("SELECT count(*) FROM core.audit_log").fetchone()[0]
     response = public.get("/find", params={"q": "diabetes Paris"})
-    assert response.headers["referrer-policy"] == "no-referrer"
+    # a Referer carries only the site's origin, never the search's address
+    assert response.headers["referrer-policy"] == "strict-origin"
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["x-robots-tag"] == "noindex"
     # nothing about a search is written
     assert app_conn.execute("SELECT count(*) FROM core.audit_log").fetchone()[0] == before
-    # every page sends no referrer
-    assert public.get("/").headers["referrer-policy"] == "no-referrer"
+    # every page has the same policy
+    assert public.get("/").headers["referrer-policy"] == "strict-origin"
     record_args = ("127.0.0.1:5000", "GET", "/find?q=diabetes+Paris", "1.1", 200)
     import logging
 
@@ -126,3 +128,37 @@ def test_the_home_page_offers_the_search_and_the_page_explains_itself(trials):
     assert "diabetes Paris" in empty and "not medical advice" in empty and "GeoNames" in empty
     nothing = public.get("/find", params={"q": "zzzz Paris"}).text
     assert "No recruiting trial matches" in nothing
+
+
+# Paris, as GeoNames places it (tests/places.py)
+PARIS_POINT = (48.85341, 2.3488)
+NICE = ("Nice", "06000", "Hôpital Pasteur", "France")
+GENT = ("Gent", "9000", "UZ Gent", "Belgium")
+FRANCE_AND_BELGIUM = "2026-500015-11-00"
+
+
+def test_a_page_past_the_last_still_counts_only_trials_near_the_place(trials, app_conn):
+    near_paris = search_db.SearchFilter(latitude=PARIS_POINT[0], longitude=PARIS_POINT[1], radius_km=50.0)
+    hits, total = search_db.search_hits(app_conn, near_paris, 0, 10)
+    assert (len(hits), total) == (1, 1)
+    # the trials in Lyon and Madrid recruit too, but not within 50 km of Paris
+    past_the_end, total_past_the_end = search_db.search_hits(app_conn, near_paris, 10, 10)
+    assert (past_the_end, total_past_the_end) == ([], 1)
+
+
+def test_a_whole_country_search_shows_the_nearest_site_in_that_country(trials, app_conn):
+    # Gent, in Belgium, is about 230 km from Paris; Nice, in France, about 690 km
+    records = {FRANCE_AND_BELGIUM: record(FRANCE_AND_BELGIUM, sites=(NICE, GENT), title="A two-country trial")}
+    fake = ManyCtis(records, [listing(FRANCE_AND_BELGIUM, countries={"France": 4, "Belgium": 4})])
+    stages.sync_list(app_conn, core.registered_source(app_conn, "ctis"), ctis.CtisAdapter(fake))
+    result = transfer(app_conn, fake, keys=list(records))
+    assert result.failed == {}, result.failed
+    in_france = search_db.SearchFilter(latitude=PARIS_POINT[0], longitude=PARIS_POINT[1], radius_km=None,
+                                       country="FR", country_name="France")
+    hits, total = search_db.search_hits(app_conn, in_france, 0, 10)
+    by_key = {}
+    for hit in hits:
+        by_key[hit.source_key] = hit
+    two_countries = by_key[FRANCE_AND_BELGIUM]
+    assert (two_countries.site_city, two_countries.site_country) == ("Nice", "France")
+    assert two_countries.sites_near == 1

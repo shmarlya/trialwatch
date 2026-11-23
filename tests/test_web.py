@@ -132,6 +132,13 @@ def test_form_posts_are_taken_only_from_the_interfaces_own_pages(admin_client):
     other_port = client.post("/jobs/999/stop", headers={"host": "localhost:8010", "origin": "http://localhost:9999"},
                              follow_redirects=False)
     assert other_port.status_code == 403
+    # an opaque origin (a sandboxed frame, or a page whose policy hides its origin) could be any site
+    opaque = client.post("/jobs/999/stop", headers={"origin": "null"}, follow_redirects=False)
+    assert opaque.status_code == 403
+    # so our own pages must not hide theirs: under "no-referrer" a browser sends "Origin: null" with a
+    # form post, and every form here (sign-in first) would be refused
+    policy = client.get("/login").headers["referrer-policy"]
+    assert policy not in ("no-referrer", "")
     # its own pages; and a client that is not a browser page (no Origin, no Referer)
     # (taken, and answered: there is no job 999)
     own = client.post("/jobs/999/stop", headers={"origin": "http://testserver"}, follow_redirects=False)
@@ -255,3 +262,29 @@ def test_job_requests_are_checked_before_anything_runs(monkeypatch):
 def test_the_trace_names_files_by_their_document():
     steps = [web.overview.StepRow(1, "pages", None, None, {"documents": [{"doc": 1, "file": "ab", "title": "T"}]})]
     assert web._files_by_hex(steps) == {"ab": {"doc": 1, "file": "ab", "title": "T"}}
+
+
+def test_a_browser_gets_an_error_page_and_a_script_the_same_answer_as_before(admin_client):
+    page = admin_client.get("/no-such-page", headers={"accept": "text/html"})
+    assert page.status_code == 404 and "text/html" in page.headers["content-type"]
+    assert "Not found" in page.text and "There is no page at this address." in page.text
+    script = admin_client.get("/no-such-page")
+    assert (script.status_code, script.json()) == (404, {"detail": "Not Found"})
+
+
+def fails_quoting_the_search(*args):
+    # the first argument is the search box (q); the error's message quotes it, as a real one might
+    raise RuntimeError(f"could not read {args[0]!r}")
+
+
+def test_an_unhandled_error_is_logged_with_the_reference_the_page_shows(app_conn, monkeypatch, caplog):
+    monkeypatch.setattr(web.web_search, "params_from", fails_quoting_the_search)
+    client = TestClient(web.app, raise_server_exceptions=False)
+    with caplog.at_level("ERROR", logger="trialwatch.web"):
+        page = client.get("/find", params={"q": "private-marker"}, headers={"accept": "text/html"})
+    assert page.status_code == 500 and "Something went wrong" in page.text
+    reference = re.search(r"<code>([0-9a-f]{8})</code>", page.text).group(1)
+    logged = caplog.text
+    assert reference in logged and "RuntimeError" in logged and "/find" in logged
+    # neither the search nor the error's message (which quotes it) reaches the log or the page
+    assert "private-marker" not in logged and "private-marker" not in page.text

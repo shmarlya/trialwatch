@@ -122,8 +122,7 @@
       {% if judgement.duration_ms %} · {{ "%.1f" | format(judgement.duration_ms / 1000) }} s{% endif %}</p>
     {% if judgement.withdrawn_at %}<div class="alert">Withdrawn {{ when(judgement.withdrawn_at) }} by {{ who(judgement.withdrawn_by) }}: {{ judgement.withdrawn_note }}. It stays here as it was published, so nothing disappears without a trace.</div>{% endif %}
     <p class="small muted">{% if judgement.published %}Published by its run as it finished, as every check is, whatever it found.{% elif judgement.error %}Not published: the check failed on this trial.{% else %}Not published yet: its run is still going.{% endif %}
-      {% if agreement %}Agreement with experts' hand-checked results for checks of this kind: {% if agreement.confidence is not none %}<b>{{ "%.0f" | format(agreement.confidence * 100) }}%</b>, {% endif %}{{ agreement.reason }}.{% endif %}
-      {% if judgement.published_basis %}<br>When published: {{ judgement.published_basis }}{% endif %}</p>
+      {% if judgement.published_basis %}<br>Agreement with experts' hand-checked results for checks of this kind, measured when it was published: {% if judgement.published_confidence is not none %}<b>{{ "%.0f" | format(judgement.published_confidence * 100) }}%</b>, {% endif %}{{ judgement.published_basis }}.{% endif %}</p>
     {% if can("judgement.withdraw") and judgement.published and not judgement.withdrawn_at %}
     <form class="inline" method="post" action="/trials/{{ row.id }}/judgements/{{ judgement.run_id }}/withdraw">
       <input type="text" name="note" placeholder="why withdraw: the public sees this" required> <button class="secondary small">Withdraw</button>

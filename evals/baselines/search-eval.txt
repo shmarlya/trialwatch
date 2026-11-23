@@ -1,0 +1,94 @@
+ok 'diabetes Paris'                           en condition-place near 32   country    38 anywhere   164 baseline    13
+     read: diabetes · near Paris, France · within 50 km
+ok 'breast cancer near Lyon'                  en condition-place near 92   country   139 anywhere   328 baseline    88
+     read: breast cancer · near Lyon, France · within 50 km
+ok 'lung cancer Berlin'                       en condition-place near 53   country   109 anywhere   308 baseline   101
+     read: lung cancer · near Berlin, Germany · within 50 km
+ok 'heart attack Madrid'                      en lay             near 9    country     9 anywhere    36 baseline     0
+     read: heart attack · near Madrid, Spain · within 50 km
+ok 'high blood pressure Rome'                 en lay             near 11   country    14 anywhere    51 baseline     1
+     read: high blood pressure · near Rome, Italy · within 50 km
+ok 'multiple sclerosis Warsaw'                en condition-place near 11   country    12 anywhere    51 baseline    18
+     read: multiple sclerosis · near Warsaw, Poland · within 50 km
+ok 'COPD Amsterdam'                           en abbreviation    near 3    country     8 anywhere    31 baseline     0
+     read: copd · near Amsterdam, The Netherlands · within 50 km
+ok 'type 1 diabetes child Dublin'             en child           near 8    country     0 anywhere    12 baseline     1
+     read: type 1 diabetes · near Dublin, Ireland · within 50 km · children (0–17)
+ok 'healthy volunteers Berlin'                en healthy         near 17   country    51 anywhere   301 baseline  1526
+     read: any condition · near Berlin, Germany · within 50 km · healthy volunteers
+ok 'psoriasis 75013'                          en postcode        near 3    country     7 anywhere    44 baseline     7
+     read: psoriasis · near 75013 Paris, France · within 50 km
+ok 'asthma Germany'                           en country         near -    country    13 anywhere    52 baseline    12
+     read: asthma · in Germany
+ok 'leukaemia children Vienna'                en child           near 4    country     4 anywhere    15 baseline     5
+     read: leukaemia · near Vienna, Austria · within 50 km · children (0–17)
+ok 'migraine women Barcelona'                 en condition-place near 9    country     9 anywhere    19 baseline     8
+     read: migraine · near Barcelona, Spain · within 50 km · female
+ok 'obesity'                                  en condition-place near -    country     - anywhere    83 baseline    72
+     read: obesity · anywhere in the EU/EEA
+ok 'parkinson near Copenhagen'                en condition-place near 5    country     2 anywhere    43 baseline     2
+     read: parkinson · near Copenhagen, Denmark · within 50 km
+ok 'rheumatoid arthritis 70 years Milan'      en age             near 13   country    14 anywhere    55 baseline    11
+     read: rheumatoid arthritis · near Milan, Italy · within 50 km · age 70
+ok 'sickle cell disease Paris'                en rare            near 12   country    13 anywhere    21 baseline    13
+     read: sickle cell disease · near Paris, France · within 50 km
+ok 'cystic fibrosis Gent'                     en rare            near 7    country     1 anywhere    11 baseline     3
+     read: cystic fibrosis · near Gent, Belgium · within 50 km
+ok 'melanoma phase 3 Stockholm'               en condition-place near 6    country     9 anywhere    19 baseline    14
+     read: melanoma · near Stockholm, Sweden · within 50 km · phase 3
+ok 'semaglutide'                              en drug            near -    country     - anywhere    39 baseline    25
+     read: semaglutide · anywhere in the EU/EEA
+ok 'pembrolizumab Brussels'                   en drug            near 46   country    46 anywhere   191 baseline    48
+     read: pembrolizumab · near Brussels, Belgium · within 50 km
+ok 'diabtes Paris'                            en misspelling     near 32   country    38 anywhere   164 baseline    13
+     read: diabtes · near Paris, France · within 50 km
+     corrected: diabtes -> diabetes
+ok 'alzeimer Madrid'                          en misspelling     near 15   country    24 anywhere    60 baseline    25
+     read: alzeimer · near Madrid, Spain · within 50 km
+     corrected: alzeimer -> alzheimer
+ok 'Marburg'                                  en ambiguous       near 174  country  1212 anywhere  4747 baseline  1526
+     read: any condition · near Marburg an der Lahn, Germany · within 50 km
+ok 'asthma Nice'                              en ambiguous       near 5    country    11 anywhere    52 baseline    10
+     read: asthma · near Nice, France · within 50 km
+ok 'diabète Paris'                            fr condition-place near 30   country    36 anywhere   155 baseline     0
+     read: diabète · near Paris, France · within 50 km
+ok 'cancer du sein Lyon'                      fr condition-place near 77   country   111 anywhere   150 baseline     0
+     read: cancer sein · near Lyon, France · within 50 km
+ok 'mucoviscidose enfant'                     fr child           near -    country     - anywhere     2 baseline     0
+     read: mucoviscidose · anywhere in the EU/EEA · children (0–17)
+ok 'maladie de Parkinson Marseille'           fr condition-place near 1    country     4 anywhere     8 baseline     0
+     read: maladie parkinson · near Marseille, France · within 50 km
+ok 'sclérose en plaques Toulouse'             fr condition-place near 8    country    14 anywhere    18 baseline     0
+     read: sclérose plaques · near Toulouse, France · within 50 km
+ok 'volontaires sains Paris'                  fr healthy         near 24   country    37 anywhere   301 baseline  1914
+     read: any condition · near Paris, France · within 50 km · healthy volunteers
+ok 'Brustkrebs Hamburg'                       de condition-place near 12   country    18 anywhere    23 baseline     0
+     read: brustkrebs · near Hamburg, Germany · within 50 km
+ok 'Diabetes Typ 2 Köln'                      de condition-place near 4    country     7 anywhere     9 baseline    30
+     read: diabetes typ 2 · near Köln, Germany · within 50 km
+ok 'Alzheimer München'                        de condition-place near 5    country     8 anywhere    60 baseline    11
+     read: alzheimer · near Munich, Germany · within 50 km
+ok 'gesunde Probanden Berlin'                 de healthy         near 17   country    51 anywhere   301 baseline  1526
+     read: any condition · near Berlin, Germany · within 50 km · healthy volunteers
+ok 'Schuppenflechte Frankfurt'                de lay             near 1    country     1 anywhere     1 baseline     0
+     read: schuppenflechte · near Frankfurt am Main, Germany · within 50 km
+ok 'cáncer de pulmón Madrid'                  es condition-place near 152  country   163 anywhere   245 baseline     0
+     read: cáncer pulmón · near Madrid, Spain · within 50 km
+ok 'diabetes niños Barcelona'                 es child           near 5    country     6 anywhere    14 baseline    23
+     read: diabetes · near Barcelona, Spain · within 50 km · children (0–17)
+ok 'esclerosis múltiple Sevilla'              es condition-place near 7    country     9 anywhere    15 baseline     0
+     read: esclerosis múltiple · near Sevilla, Spain · within 50 km
+ok 'tumore al seno Milano'                    it condition-place near 10   country    10 anywhere    13 baseline     0
+     read: tumore al seno · near Milan, Italy · within 50 km
+ok 'diabete Roma'                             it condition-place near 26   country    40 anywhere   155 baseline    19
+     read: diabete · near Rome, Italy · within 50 km
+ok 'cukrzyca Warszawa'                        pl condition-place near 25   country    30 anywhere    35 baseline     0
+     read: cukrzyca · near Warsaw, Poland · within 50 km
+ok 'rak piersi Kraków'                        pl condition-place near 26   country    47 anywhere    60 baseline     0
+     read: rak piersi · near Kraków, Poland · within 50 km
+ok 'borstkanker Amsterdam'                    nl condition-place near 23   country    28 anywhere    37 baseline     0
+     read: borstkanker · near Amsterdam, The Netherlands · within 50 km
+ok 'cancro da mama Lisboa'                    pt condition-place near 17   country    17 anywhere   102 baseline     0
+     read: cancro mama · near Lisbon, Portugal · within 50 km
+read right: 45 of 45
+no trial found where asked: 0 of 45 (plain text matching on CTIS's list: 16 of 45 found none in the country, or anywhere)

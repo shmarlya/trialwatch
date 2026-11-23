@@ -101,3 +101,17 @@ def test_another_prompt_is_another_kind(app_conn, gold):
     trial_id = core.trials_with_scheme(app_conn, "eu-ct", [ct(50)])[ct(50)]
     assert publishing.publish_run(app_conn, run_id) == [trial_id]
     assert publication(app_conn, run_id, trial_id)[0] is None
+
+
+def test_a_run_never_counts_its_own_judgements_towards_its_agreement(app_conn, gold):
+    # a run that checks gold trials is measured only by runs started before it: here there are none
+    run_id = a_gold_run(app_conn, gold, agreeing=9, disagreeing=1)
+    trial_id = core.trials_with_scheme(app_conn, "eu-ct", [ct(0)])[ct(0)]
+    assert trial_id in publishing.publish_run(app_conn, run_id)
+    confidence, basis = publication(app_conn, run_id, trial_id)
+    assert confidence is None and "0 of 0 gold items agreed" in basis
+    # the next run of the same check is measured by it
+    later = a_new_run(app_conn, [(50, "full", FULL)])
+    publishing.publish_run(app_conn, later)
+    later_trial = core.trials_with_scheme(app_conn, "eu-ct", [ct(50)])[ct(50)]
+    assert publication(app_conn, later, later_trial)[0] == pytest.approx(0.9)

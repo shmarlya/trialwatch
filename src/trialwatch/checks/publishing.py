@@ -13,7 +13,8 @@ MIN_GOLD_ITEMS were compared; the basis (how many agreed, of how many, from whic
 
 Gold items are counted once per trial and check (the newest judgement of that trial by that model and
 prompt), and set aside when our judgement read a document posted on or after the day the dataset's
-reviewers read theirs (as gold/compare.py does).
+reviewers read theirs (as gold/compare.py does). A run is measured only by runs started before it, so
+a run that checks gold trials never counts its own judgements towards its own agreement.
 """
 
 from dataclasses import dataclass
@@ -83,8 +84,9 @@ def _newest_versions(requirements: str) -> list[datasets.Dataset]:
     return list(newest.values())
 
 
-def calibrate(conn: psycopg.Connection, requirements: str) -> Calibration:
-    """How often each kind of judgement under the requirement set agreed with gold labels."""
+def calibrate(conn: psycopg.Connection, requirements: str, before_run: int | None = None) -> Calibration:
+    """How often each kind of judgement under the requirement set agreed with gold labels; with
+    `before_run`, only by judgements of runs started before that one."""
     tallies: dict[Kind, Tally] = {}
     used = []
     for dataset in _newest_versions(requirements):
@@ -101,7 +103,7 @@ def calibrate(conn: psycopg.Connection, requirements: str) -> Calibration:
         for _item, trial_id in trial_by_item.values():
             trial_ids.append(trial_id)
         by_trial: dict[int, list[JudgementKind]] = {}
-        for judgement in checks_db.judgement_kinds_of_trials(conn, trial_ids, requirements):
+        for judgement in checks_db.judgement_kinds_of_trials(conn, trial_ids, requirements, before_run):
             by_trial.setdefault(judgement.trial_id, []).append(judgement)
         for item, trial_id in trial_by_item.values():
             seen_checks = set()
@@ -160,7 +162,7 @@ def publish_run(conn: psycopg.Connection, run_id: int) -> list[int]:
     judgements = checks_db.judgement_kinds_of_run(conn, run_id)
     if not judgements:
         return []
-    calibration = calibrate(conn, judgements[0].requirements)
+    calibration = calibrate(conn, judgements[0].requirements, before_run=run_id)
     published = []
     for judgement in judgements:
         agreement = measure(judgement, calibration)

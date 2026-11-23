@@ -217,16 +217,21 @@ def age_group_of(age: int) -> str:
     return "65+"
 
 
+def _in_country(column: str) -> str:
+    """The country named in `column` (as the source spells it) is the filter's country: by its name, or
+    by any name GeoNames gives the country's code."""
+    return (f"(geo.name_key({column}) = geo.name_key(%(country_name)s)"
+            f" OR EXISTS (SELECT FROM geo.country_name n WHERE n.name_key = geo.name_key({column})"
+            " AND n.iso2 = %(country)s))")
+
+
 def _conditions(f: SearchFilter, params: dict) -> list[str]:
     """The WHERE conditions of the filter on search.document d (q.query is the tsquery)."""
     conditions = ["d.recruiting", _STILL_RECRUITING]
     if f.tsquery is not None:
         conditions.append("d.tsv @@ q.query")
     if f.country is not None:
-        conditions.append(
-            "EXISTS (SELECT FROM unnest(d.recruiting_countries) AS c WHERE geo.name_key(c) = geo.name_key(%(country_name)s)"
-            " OR EXISTS (SELECT FROM geo.country_name n WHERE n.name_key = geo.name_key(c) AND n.iso2 = %(country)s))"
-        )
+        conditions.append(f"EXISTS (SELECT FROM unnest(d.recruiting_countries) AS c WHERE {_in_country('c')})")
         params["country"] = f.country
         params["country_name"] = f.country_name
     age_group = f.age_group
@@ -327,11 +332,15 @@ def search_hits(conn: psycopg.Connection, f: SearchFilter, offset: int, limit: i
             radius = 5000.0
         sql, params = _query_parts(f, radius)
         params["radius"] = radius
+        site_conditions = ["km <= %(radius)s"]
+        if f.country is not None:
+            # the nearest site in that country, not one across a border that happens to be closer
+            site_conditions.append(_in_country("country"))
         sql += f""",
         nearest AS (
             SELECT DISTINCT ON (trial_id) trial_id, site, city, country, precision, km,
                    count(*) OVER (PARTITION BY trial_id) AS sites_near
-            FROM sites WHERE km <= %(radius)s
+            FROM sites WHERE {' AND '.join(site_conditions)}
             ORDER BY trial_id, km
         )
         SELECT {_HIT_COLUMNS}, n.km AS distance_km, n.site, n.city AS site_city, n.country AS site_country,
@@ -339,16 +348,24 @@ def search_hits(conn: psycopg.Connection, f: SearchFilter, offset: int, limit: i
         FROM matched m JOIN nearest n ON n.trial_id = m.trial_id JOIN core.source s ON s.id = m.source_id
         ORDER BY m.rank DESC, n.km, m.trial_id
         OFFSET %(offset)s LIMIT %(limit)s"""
-    params["offset"] = offset
-    params["limit"] = limit
-    with conn.cursor(row_factory=class_row(SearchHit)) as cur:
-        hits = cur.execute(sql, params).fetchall()
+    hits = _page_of_hits(conn, sql, params, offset, limit)
     total = 0
     if hits:
         total = hits[0].total
     elif offset > 0:
-        total = count_matching(conn, f)
+        # past the last page: the same search's first row still says how many it finds in all
+        first = _page_of_hits(conn, sql, params, 0, 1)
+        if first:
+            total = first[0].total
     return hits, total
+
+
+def _page_of_hits(conn: psycopg.Connection, sql: str, params: dict, offset: int, limit: int) -> list[SearchHit]:
+    page_params = dict(params)
+    page_params["offset"] = offset
+    page_params["limit"] = limit
+    with conn.cursor(row_factory=class_row(SearchHit)) as cur:
+        return cur.execute(sql, page_params).fetchall()
 
 
 # the distances a search offers, in km; their counts tell a person how far to go

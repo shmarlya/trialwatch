@@ -3,6 +3,8 @@
 **/__pycache__
 **/.DS_Store
 data
+# ...except the gold datasets, which the image carries (publishing.py reads them)
+!data/gold
 docs
 db
 scripts

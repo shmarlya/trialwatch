@@ -1,0 +1,4 @@
+# What ops/images/Dockerfile may read from the repository: the migrations and ops/ only
+*
+!db/migrations
+!ops

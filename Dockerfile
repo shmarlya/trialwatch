@@ -21,7 +21,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:3.13-slim
 RUN useradd --create-home --uid 1000 app
 COPY --from=build --chown=app:app /app/.venv /app/.venv
-ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
+# The gold datasets (agreement published with each judgement); compose's ./data mount may replace them
+COPY --chown=app:app data/gold /app/data/gold
+ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 TRIALWATCH_GOLD_DIR=/app/data/gold
 USER app
 WORKDIR /app
 ENTRYPOINT ["trialwatch"]

@@ -1,0 +1,47 @@
+# TrialWatch behind Coolify (compose.coolify.yaml): Coolify's proxy holds the certificate for the domain and
+# sends plain HTTP to this Caddy on port 80, which sends everything to web and /grafana/ to Grafana for
+# TrialWatch's admins, as ops/caddy/Caddyfile does on a server of our own. Baked into the proxy image
+# (ops/images/Dockerfile). No access log, for the same reason (ADR-008).
+{
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>uri delete
+				request>remote_ip delete
+				request>remote_port delete
+				request>client_ip delete
+				request>headers delete
+			}
+		}
+	}
+	# Coolify's proxy (Traefik) ends HTTPS and sends plain HTTP here; believe its X-Forwarded-* headers
+	# (the visitor's https and address), and only from the private network it comes from
+	servers {
+		trusted_proxies static private_ranges
+	}
+	auto_https off
+}
+
+:80 {
+	encode zstd gzip
+
+	# Grafana (compose's lgtm), signed in through TrialWatch: before each request TrialWatch says who is
+	# signed in (/auth/grafana: an admin's email, else the sign-in page or a refusal), and Grafana believes
+	# that header (auth.proxy). One a browser sends itself is dropped first. `route` keeps these steps in
+	# the order written: Caddy's own order would run forward_auth first and then drop the header it set.
+	handle /grafana* {
+		route {
+			request_header -X-WEBAUTH-USER
+			forward_auth web:8010 {
+				uri /auth/grafana
+				copy_headers X-WEBAUTH-USER
+			}
+			reverse_proxy lgtm:3000
+		}
+	}
+
+	handle {
+		reverse_proxy web:8010
+	}
+}

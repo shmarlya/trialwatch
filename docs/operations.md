@@ -9,7 +9,7 @@ flowchart TB
     people["People on the internet<br>https://TRIALWATCH_DOMAIN"]
     admins["Admins<br>/grafana/ (signed in through /auth/grafana)"]
     actions["GitHub Actions: image.yml (by hand)<br>tests → build → push"]
-    ghcr[("ghcr.io/shmarlya/trialwatch<br>:latest · :sha-&lt;commit&gt;")]
+    ghcr[("ghcr.io/shmarlya/trialwatch (+ -migrate, -proxy, -grafana, -dbtools)<br>:latest · :sha-&lt;commit&gt;")]
     subgraph compose["Docker Compose (compose.yaml)"]
         subgraph server["profile server"]
             caddy["caddy<br>HTTPS, no access log"]
@@ -86,6 +86,33 @@ To update: run the **Image** workflow on `main` (Actions → Image → Run workf
 instead.
 
 One-off commands run in the same image: `docker compose run --rm web source list`.
+
+## Coolify
+
+[compose.coolify.yaml](https://github.com/shmarlya/trialwatch/blob/main/compose.coolify.yaml) is the same stack
+for a host that has nothing of the repository, such as Coolify: every service runs a published image with its
+files inside (the migrations in `trialwatch-migrate`, the Caddyfile in `trialwatch-proxy`, Grafana's settings,
+dashboards and alerts in `trialwatch-grafana`, the backup and Grafana-role scripts in `trialwatch-dbtools`; all
+from `ops/images/Dockerfile`), there are no profiles, and no port is published: Coolify's own proxy holds the
+certificate and sends plain HTTP to the `proxy` service, which sends `/grafana/` to Grafana and the rest to `web`.
+
+1. Run the **Image** workflow on `main`: it pushes all five images with the same tags.
+2. In Coolify: **New resource → Docker Compose Empty**, and paste `compose.coolify.yaml`.
+3. **Environment variables** (Coolify lists the ones the file uses):
+   - required: `TRIALWATCH_DOMAIN` (e.g. `trialwatch.app`), `POSTGRES_PASSWORD`;
+   - for sign-in: `TRIALWATCH_ADMIN_EMAIL`, `TRIALWATCH_ADMIN_PASSWORD` (the first admin, 12+ characters);
+   - for checks and AI tags: `ANTHROPIC_API_KEY`;
+   - for Grafana's database dashboards: `GRAFANA_DB_PASSWORD`;
+   - optional: `TRIALWATCH_TAG` (default `latest`; `sha-<commit>` pins one), `BACKUP_KEEP_DAYS` (14),
+     `POSTGRES_USER` and `POSTGRES_DB` (both `trialwatch`).
+4. Give the **proxy** service the domain, `https://trialwatch.app` (it listens on port 80). Leave the other
+   services without one. DNS: an `A` record for the domain to the server.
+5. Deploy. `migrate` and `grafana-role` run once and exit; the rest stay up.
+
+To update: run the Image workflow, then **Redeploy** in Coolify (it pulls `latest`). To roll back, set
+`TRIALWATCH_TAG=sha-<commit>` and redeploy. Backups go to the volume `backups`; copy them off the server (Coolify's
+own S3 backups, or a scheduled copy). One-off commands: Coolify's terminal on the `web` container, e.g.
+`trialwatch geo load`.
 
 ## Web interface
 
@@ -356,8 +383,8 @@ GitHub Actions:
   the whole test suite, against a Postgres service of its own.
 - `.github/workflows/docs.yml`, on every push and pull request: a strict build of this site; pushes to `main` also
   publish it to GitHub Pages.
-- `.github/workflows/image.yml`, started by hand: the tests, then the image to `ghcr.io/shmarlya/trialwatch`
-  (`sha-<commit>`, and `latest` from `main`).
+- `.github/workflows/image.yml`, started by hand: the tests, then the images to `ghcr.io/shmarlya/trialwatch` and
+  its helpers `trialwatch-migrate`, `-proxy`, `-grafana`, `-dbtools` (`sha-<commit>`, and `latest` from `main`).
 - Started by hand, calling CTIS or the model: `eval-short.yml` and `eval-full.yml` (gold evaluations, sharing
   `eval-shared.yml`) and `gold-snapshot.yml` (records the frozen snapshot); see
   [gold evaluations](sources-and-gold.md#gold-evaluations-ci).

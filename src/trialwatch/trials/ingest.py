@@ -190,6 +190,12 @@ def _read_list(
             "not complete, so no trial is marked as no longer listed"
         )
         report(progress, f"failed: {result.failed['list']}")
+    if result.complete and result.listed == 0 and not result.failed:
+        # an empty answer (an outage, a query that no longer matches) is never taken as "the source lists
+        # nothing": that would mark every trial as no longer listed
+        result.complete = False
+        result.failed["list"] = "the source listed no trials: not taken as complete, so no trial is delisted"
+        report(progress, f"failed: {result.failed['list']}")
 
 
 # --- 2. evidence -------------------------------------------------------------------------------

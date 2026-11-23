@@ -19,6 +19,8 @@ from trialwatch.web.deps import TEMPLATES, default_settings, running, staff_view
 
 router = APIRouter()
 TRIALS_PER_PAGE = 100
+# A page further than any list goes (an address someone typed): its offset must still fit the database
+LAST_PAGE = 10_000
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -52,7 +54,11 @@ def public_home(
 ) -> HTMLResponse:
     """The public's front page: the trials with a published result (ADR-007), nothing of the workflow."""
     defaults = default_settings()
-    page = max(page, 1)
+    # an address someone typed may ask for any page: its offset must still fit the database
+    page = min(max(page, 1), LAST_PAGE)
+    # NUL characters can't be in any text the database holds, and it refuses them in a query
+    q = q.replace("\x00", "")
+    city = city.replace("\x00", "")
     with db.connect_system() as conn:
         statuses = overview.published_trial_statuses(conn, defaults.requirements)
         countries = overview.published_trial_countries(conn, defaults.requirements)

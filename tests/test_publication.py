@@ -140,6 +140,18 @@ def test_a_judgement_with_an_error_is_not_published(app_conn, trial):
     assert TestClient(web.app).get(f"/trials/{trial}").status_code == 404
 
 
+def test_a_run_that_ended_without_publishing_is_found_so_the_next_run_records_its_agreement(app_conn, trial):
+    run_id = judged(app_conn, trial, finished=False)
+    assert checks_db.runs_without_agreement(app_conn) == []  # still going: not public yet
+    # its process died, or its publishing failed, after the run was closed
+    checks_db.finish_run(app_conn, run_id, status="failed", error="abandoned", trials=1, errors=0)
+    assert checks_db.runs_without_agreement(app_conn) == [run_id]
+    publishing.publish_run(app_conn, run_id)
+    assert checks_db.runs_without_agreement(app_conn) == []
+    basis = app_conn.execute("SELECT agreement->>'basis' FROM checks.judgement WHERE run_id = %s", (run_id,)).fetchone()
+    assert "gold items agreed" in basis[0]
+
+
 def test_nobody_publishes_by_hand_and_withdrawing_needs_staff(app_conn, trial):
     run_id = judged(app_conn, trial)
     public = TestClient(web.app)

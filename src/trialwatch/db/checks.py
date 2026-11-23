@@ -82,6 +82,19 @@ def close_abandoned_runs(conn: psycopg.Connection) -> list[int]:
     return closed
 
 
+def runs_without_agreement(conn: psycopg.Connection) -> list[int]:
+    """Finished runs with a public judgement whose gold agreement was never recorded: a run whose
+    process died (close_abandoned_runs), or whose publishing failed after it finished."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT r.id FROM checks.run r JOIN checks.judgement j ON j.run_id = r.id
+         WHERE r.status <> 'running' AND j.error IS NULL AND j.agreement IS NULL
+         ORDER BY r.id
+        """
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
 def run_config(conn: psycopg.Connection, run_id: int) -> RunConfig | None:
     with conn.cursor(row_factory=class_row(RunConfig)) as cur:
         return cur.execute(
@@ -327,4 +340,38 @@ def trials_needing_check(conn: psycopg.Connection, trial_ids: list[int], require
     found = []
     for row in rows:
         found.append(row[0])
+    return found
+
+
+def failed_on_unchanged_evidence(conn: psycopg.Connection, trial_ids: list[int], requirements: str) -> dict[int, str]:
+    """The trials among these whose newest judgement against the requirement set ended in an error and
+    read the evidence that is still current (nothing it read changed since, as in
+    checks.judgement_current), each with its error."""
+    rows = conn.execute(
+        """
+        SELECT trial_id, error FROM (
+            SELECT DISTINCT ON (j.trial_id) j.trial_id, j.error,
+                   (EXISTS (SELECT FROM core.document_version v
+                            JOIN core.trial_document l ON l.document_id = v.document_id AND l.trial_id = j.trial_id
+                            WHERE v.id = ANY (j.document_versions)
+                              AND (v.replaced_at IS NOT NULL OR l.removed_at IS NOT NULL))
+                    OR EXISTS (SELECT FROM core.trial_document l JOIN core.document_current d ON d.id = l.document_id
+                               WHERE l.trial_id = j.trial_id AND l.removed_at IS NULL
+                                 AND NOT (d.version_id = ANY (j.document_versions))
+                                 AND d.kind IN (SELECT jsonb_array_elements_text(r.requirements_text::jsonb
+                                                                                 -> 'document_kinds')))
+                    OR EXISTS (SELECT FROM core.trial_record_current c
+                               WHERE c.trial_id = j.trial_id AND c.id IS DISTINCT FROM j.trial_record_id
+                                 AND c.fetched_at > r.started_at)) AS outdated
+              FROM checks.judgement j JOIN checks.run r ON r.id = j.run_id
+             WHERE j.trial_id = ANY(%(ids)s) AND r.requirements = %(requirements)s AND r.status <> 'running'
+             ORDER BY j.trial_id, j.run_id DESC
+        ) newest
+        WHERE error IS NOT NULL AND NOT outdated
+        """,
+        {"ids": trial_ids, "requirements": requirements},
+    ).fetchall()
+    found = {}
+    for row in rows:
+        found[row[0]] = row[1]
     return found

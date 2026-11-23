@@ -209,3 +209,15 @@ def test_a_site_whose_source_gives_its_point_is_found_without_geonames(trials, a
     by_key = {hit.source_key: hit for hit in hits}
     found = by_key[IN_LYON]
     assert (found.site, found.precision, round(found.distance_km)) == ("Hôpital du test", "source", 0)
+
+
+def test_an_address_someone_typed_never_breaks_the_search_or_the_home_page(trials):
+    client = TestClient(web.app)
+    # digits isdigit() takes and int() refuses, a NUL character, a page far past the last, a word the
+    # index keeps only as a MeSH code
+    for params in ({"q": "diabetes Paris", "age": "²"}, {"q": "diabetes Paris", "km": "①"},
+                   {"q": "diabetes\x00 Paris"}, {"what": "diabetes", "where": "Par\x00is"},
+                   {"q": "diabetes", "page": "1000000000000000000"}, {"q": "zmesh"}):
+        assert client.get("/find", params=params).status_code == 200, params
+    for params in ({"q": "\x00"}, {"city": "Pa\x00ris"}, {"page": "1000000000000000000"}):
+        assert client.get("/", params=params).status_code == 200, params

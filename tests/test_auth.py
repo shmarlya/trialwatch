@@ -2,6 +2,7 @@
 interface checked for anyone not signed in, a moderator and an admin."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -341,3 +342,27 @@ def test_grafana_reads_the_report_views_and_nothing_else(conn):
     finally:
         conn.execute("RESET ROLE")
 
+
+
+def test_the_login_throttle_counts_tries_before_checking_them_and_forgets_quiet_names():
+    throttle = auth_routes.LoginThrottle()
+    keys = ["user:mona@test.example", "address:203.0.113.7"]
+    # tries sent at once each count before any password is checked: the sixth is refused
+    for attempt in range(auth_routes.LoginThrottle.FAILURES):
+        assert throttle.try_counted(keys)
+    assert not throttle.try_counted(keys)
+    # a refused try adds nothing, and a name with no recent try is not kept
+    assert not throttle.try_counted(["user:someone@else.example", "address:203.0.113.7"])
+    assert "user:someone@else.example" not in throttle._failures
+    throttle.succeeded(keys)
+    assert throttle.try_counted(keys)
+
+
+def test_a_huge_or_nul_email_is_refused_quietly(app_conn, monkeypatch):
+    monkeypatch.setattr(auth_routes, "login_throttle", auth_routes.LoginThrottle())
+    client = TestClient(web.app)
+    for email in ("a\x00b@test.example", "x" * 100_000):
+        refused = client.post("/login", data={"email": email, "password": "wrong-password-x"}, follow_redirects=False)
+        assert refused.status_code == 303 and "wrong email or password" in refused.headers["location"].replace("%20", " ")
+    longest = auth_routes.throttle_keys(SimpleNamespace(client=None), "x" * 100_000)[0]
+    assert len(longest) <= len("user:") + accounts.LONGEST_EMAIL + 1

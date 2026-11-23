@@ -84,11 +84,15 @@ def _reasons(trial_id: int, asked: list[query.Term], found: dict, own_concepts: 
     return reasons
 
 
-def _where_a_word_is(match: search_db.TermFound) -> str:
+def _where_a_word_is(match: search_db.TermFound) -> str | None:
+    """Where the word was found; None when no one section holds all of it (its parts sit in different
+    sections, or it matched only words the index keeps without a section, such as MeSH codes)."""
     if match.weight == "a" and match.conditions:
         return f"in its condition “{_short(match.conditions[0])}”"
     if match.weight == "a":
         return "in another name of its condition (a translation or a synonym)"
+    if match.weight not in WHERE_A_WORD_IS:
+        return None
     return WHERE_A_WORD_IS[match.weight]
 
 

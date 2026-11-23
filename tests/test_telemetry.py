@@ -5,6 +5,7 @@ set up once for the whole test session (OpenTelemetry's providers are set once p
 
 import json
 import logging
+import sys
 
 import pytest
 from conftest import signed_in_client
@@ -20,6 +21,7 @@ from trialwatch.jobs import tasks, worker
 from trialwatch.jobs.steps import Outcome
 from trialwatch.search import find as finding
 from trialwatch.web import app as web
+from trialwatch.web import privacy
 
 SPANS = InMemorySpanExporter()
 METRICS = InMemoryMetricReader()
@@ -43,6 +45,7 @@ def everything_recorded() -> str:
     for span in SPANS.get_finished_spans():
         recorded.append(span.name)
         recorded.append(json.dumps(dict(span.attributes), default=str))
+        recorded.append(str(span.status.description))
         for event in span.events:
             recorded.append(json.dumps({"event": event.name, **dict(event.attributes)}, default=str))
     for log in LOGS.get_finished_logs():
@@ -70,11 +73,11 @@ def test_a_search_leaves_no_trace_of_what_was_searched_for(traced_app, app_conn,
     assert client.get("/find", params={"q": f"{SECRET} Paris"}).status_code == 200
     assert client.get("/find", params={"what": SECRET, "where": "Lyon", "km": "25"}).status_code == 200
 
-    # an error while searching, whose message quotes the search
+    # an error while searching, inside search.find's span, whose message quotes the search
     def fails_quoting_the_search(*args, **kwargs):
         raise ValueError(f"could not read {SECRET}")
 
-    monkeypatch.setattr(finding, "find", fails_quoting_the_search)
+    monkeypatch.setattr(finding, "search", fails_quoting_the_search)
     assert client.get("/find", params={"q": SECRET}).status_code == 500
 
     names = [span.name for span in SPANS.get_finished_spans()]
@@ -83,9 +86,11 @@ def test_a_search_leaves_no_trace_of_what_was_searched_for(traced_app, app_conn,
     assert any(span.attributes.get("db.statement") for span in SPANS.get_finished_spans())
     recorded = everything_recorded()
     assert SECRET not in recorded and SECRET not in caplog.text
-    # the error is recorded by its type only
-    failed = [span for span in SPANS.get_finished_spans() if span.name == "GET /find" and span.events]
-    assert failed and failed[-1].events[0].attributes == {"exception.type": "ValueError"}
+    # the error is recorded by its type only, on the request's span and on the search's inside it
+    for name in ("GET /find", "search.find"):
+        failed = [span for span in SPANS.get_finished_spans() if span.name == name and span.events]
+        assert failed and failed[-1].events[0].attributes == {"exception.type": "ValueError"}
+        assert failed[-1].status.description in (None, "ValueError")
     # no query string and no visitor's address anywhere; the route is kept
     for span in SPANS.get_finished_spans():
         assert not set(span.attributes) & set(telemetry.PRIVATE_ATTRIBUTES)
@@ -142,3 +147,16 @@ def test_the_worker_says_it_is_alive(traced_app, tmp_path, monkeypatch):
     assert (tmp_path / "alive").exists()
     beats = metric_points("trialwatch.worker.heartbeat")
     assert beats and beats[0].value > 0
+
+
+def test_uvicorn_logs_an_unhandled_error_by_its_type_only():
+    try:
+        raise ValueError(f"could not read {SECRET}")
+    except ValueError:
+        record = logging.LogRecord(
+            "uvicorn.error", logging.ERROR, __file__, 1, "Exception in ASGI application\n", None, sys.exc_info()
+        )
+    assert privacy.ErrorTypeOnlyFilter().filter(record)
+    line = telemetry.JsonFormatter().format(record)
+    assert SECRET not in line
+    assert "Exception in ASGI application ValueError" in line and "test_telemetry.py" in line

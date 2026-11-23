@@ -279,6 +279,26 @@ def test_a_transfer_retry_takes_only_the_keys_not_transferred_yet(app_conn, fake
     assert job.attempts == 1
 
 
+def test_a_transfer_retry_by_kind_redoes_the_trials_its_first_attempt_chose(app_conn, fake_world, monkeypatch):
+    fake, model = fake_world
+    sync = queue(app_conn, "sync", {"source": "ctis"})
+    work(app_conn, monkeypatch)
+    assert jobs_db.job(app_conn, sync).status == "succeeded"
+    fake.retrieve_error = RuntimeError("CTIS is down")
+    job_id = queue(app_conn, "transfer", {"source": "ctis", "which": "pending", "limit": 1})
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "queued" and job.result["chosen"] == [CT]
+    # the next attempt takes the trial that failed, not the next pending one
+    fake.retrieve_error = None
+    due_now(app_conn, job_id)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "succeeded", job.last_error
+    assert "1 trials to transfer from ctis (pending" in "\n".join(line_texts(app_conn, job_id))
+    assert core.keys_to_transfer(app_conn, "ctis", "pending") == [CT_2]
+
+
 def job_count(conn):
     return sum(jobs_db.status_counts(conn).values())
 
@@ -350,6 +370,24 @@ def test_the_refresh_syncs_transfers_and_checks_what_is_new(app_conn, fake_world
     assert job.status == "succeeded", job.last_error
     assert job.result["transfer ctis"]["trials"] == 1 and job.result["check"]["trials"] == 1
     assert checked_trials(model) == 3
+
+
+def test_the_refresh_does_not_pay_again_for_a_check_that_failed_for_a_lasting_reason(app_conn, fake_world,
+                                                                                    monkeypatch):
+    fake, model = fake_world
+    # every answer is cut short: a lasting failure, left to a person
+    model.client.stop_reason = "max_tokens"
+    first = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    assert jobs_db.job(app_conn, first).result["check"]["trials"] == 2
+    asked = checked_trials(model)
+    model.client.stop_reason = "end_turn"
+    # nothing changed since: the next refresh sends neither trial again
+    second = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, second)
+    assert job.result["check"]["trials"] == 0, line_texts(app_conn, second)
+    assert checked_trials(model) == asked
 
 
 def test_a_failed_transfer_fails_the_attempt_and_the_next_carries_on(app_conn, fake_world, monkeypatch):

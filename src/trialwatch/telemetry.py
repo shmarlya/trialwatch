@@ -24,6 +24,7 @@ from opentelemetry import metrics, trace
 from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
+from opentelemetry.trace import Status
 
 tracer = trace.get_tracer("trialwatch")
 meter = metrics.get_meter("trialwatch")
@@ -63,7 +64,8 @@ PRIVATE_ATTRIBUTES = (
     "net.sock.peer.addr",
     "net.sock.peer.port",
 )
-# Pages whose errors may quote what someone searched for: a span keeps only the error's type
+# Pages whose errors may quote what someone searched for: their error log line keeps only the error's
+# type (web/app.py; every span keeps only an error's type anyway)
 PRIVATE_PATHS = ("/find",)
 # Not traced: the health checks Docker and the proxy make every few seconds
 UNTRACED_PATHS = "healthz,readyz"
@@ -132,12 +134,17 @@ def log_config() -> dict:
     config = {
         "version": 1,
         "disable_existing_loggers": False,
-        "filters": {"strip_query": {"()": "trialwatch.web.privacy.StripQueryFilter"}},
+        "filters": {
+            "strip_query": {"()": "trialwatch.web.privacy.StripQueryFilter"},
+            "error_type_only": {"()": "trialwatch.web.privacy.ErrorTypeOnlyFilter"},
+        },
         "formatters": {"json": {"()": "trialwatch.telemetry.JsonFormatter"}},
         "handlers": {"stderr": {"class": "logging.StreamHandler", "formatter": "json", "stream": "ext://sys.stderr"}},
         "loggers": {
             "uvicorn": {"handlers": ["stderr"], "level": "INFO", "propagate": False},
-            "uvicorn.error": {"level": "INFO"},
+            # uvicorn logs an unhandled error again after our error page did (web/app.py): by its type and
+            # where it was raised, as ours does on /find, since its message may quote a search
+            "uvicorn.error": {"level": "INFO", "filters": ["error_type_only"]},
             # on the logger, so every handler gets the line without its query string, OpenTelemetry's too
             "uvicorn.access": {"handlers": ["stderr"], "level": "INFO", "propagate": False, "filters": ["strip_query"]},
         },
@@ -160,22 +167,29 @@ def _error_type_only(event: Event) -> Event:
     return Event(event.name, kept, event.timestamp)
 
 
+def _status_type_only(status: Status) -> Status:
+    """An error status with the error's type only: the SDK writes "Type: message" into it."""
+    if status.description is None:
+        return status
+    error_type = status.description.split(":", 1)[0]
+    return Status(status.status_code, error_type)
+
+
 def redacted(span: ReadableSpan) -> ReadableSpan:
     """A copy of a finished span without what may say what someone searched for or who they are: query
-    strings and visitors' addresses everywhere, and on /find an error's message and traceback."""
+    strings and visitors' addresses, and an error's message and traceback (in its events and its
+    status). On every span, not only /find's: a span inside a search (search.find, its queries) does not
+    carry the page's path, and its errors may quote the search as well."""
     attributes = {}
     for name, value in span.attributes.items():
         if name not in PRIVATE_ATTRIBUTES:
             attributes[name] = value
-    path = span.attributes.get("url.path") or span.attributes.get("http.route")
-    events = list(span.events)
-    if path in PRIVATE_PATHS:
-        events = []
-        for event in span.events:
-            if event.name == "exception":
-                events.append(_error_type_only(event))
-            else:
-                events.append(event)
+    events = []
+    for event in span.events:
+        if event.name == "exception":
+            events.append(_error_type_only(event))
+        else:
+            events.append(event)
     return ReadableSpan(
         name=span.name,
         context=span.context,
@@ -185,7 +199,7 @@ def redacted(span: ReadableSpan) -> ReadableSpan:
         events=events,
         links=span.links,
         kind=span.kind,
-        status=span.status,
+        status=_status_type_only(span.status),
         start_time=span.start_time,
         end_time=span.end_time,
         instrumentation_scope=span.instrumentation_scope,

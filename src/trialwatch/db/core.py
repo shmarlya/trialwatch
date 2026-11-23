@@ -1017,15 +1017,16 @@ def save_transfer(conn: psycopg.Connection, *, source: str, source_key: str, run
 # Which of a source's trials a transfer takes, by their state in core.evidence_status
 TRANSFER_CHOICES = {
     "pending": "listed, evidence not transferred yet",
-    "failed": "the last transfer failed",
-    "stale": "transferred, but the source changed the trial since",
+    "failed": "the last transfer failed (and the source has not delisted it)",
+    "stale": "transferred, but the source changed the trial since (and has not delisted it)",
     "recruiting": "listed as recruiting now, and not transferred since it last changed",
     "listed": "every trial the source lists",
 }
 _TRANSFER_CONDITIONS = {
     "pending": "e.listed AND e.delisted_at IS NULL AND e.status = 'not transferred'",
-    "failed": "e.status = 'failed'",
-    "stale": "e.status = 'stale'",
+    # a trial the source no longer lists is not asked for again: it would fail at every refresh
+    "failed": "e.delisted_at IS NULL AND e.status = 'failed'",
+    "stale": "e.delisted_at IS NULL AND e.status = 'stale'",
     "recruiting": "e.listed AND e.delisted_at IS NULL AND e.recruiting AND e.status <> 'complete'",
     "listed": "e.listed AND e.delisted_at IS NULL",
 }

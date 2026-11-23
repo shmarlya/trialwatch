@@ -40,9 +40,14 @@ class SearchParams:
         return bool(self.q.strip() or self.what.strip() or self.where.strip() or self.category)
 
 
+# A page further than any search goes (an address someone typed): its offset must still fit the database
+LAST_PAGE = 10_000
+
+
 def _number(text: str, least: int, most: int) -> int | None:
     text = text.strip()
-    if not text.isdigit():
+    # isdigit() alone also takes "²" or "①", which int() refuses
+    if not (text.isascii() and text.isdigit()):
         return None
     number = int(text)
     if number < least or number > most:
@@ -53,9 +58,7 @@ def _number(text: str, least: int, most: int) -> int | None:
 def params_from(
     q: str, what: str, where: str, km: str, age: str, sex: str, hv: str, phase: str, cat: str, page: int
 ) -> SearchParams:
-    params = SearchParams(
-        q=q[: query.MAX_CHARACTERS], what=what[: query.MAX_CHARACTERS], where=where[: query.MAX_CHARACTERS]
-    )
+    params = SearchParams(q=_text(q), what=_text(what), where=_text(where))
     distance = _number(km, 0, 200)
     if distance is not None and distance in DISTANCES:
         params.km = distance
@@ -71,8 +74,14 @@ def params_from(
     if categories.by_slug(cat) is not None:
         params.category = cat
     if page > 1:
-        params.page = page
+        params.page = min(page, LAST_PAGE)
     return params
+
+
+def _text(text: str) -> str:
+    """A search box's text as it is read: at most MAX_CHARACTERS, without NUL characters, which the
+    database refuses."""
+    return text.replace("\x00", "")[: query.MAX_CHARACTERS]
 
 
 def find(conn: psycopg.Connection, params: SearchParams) -> "SearchPage":

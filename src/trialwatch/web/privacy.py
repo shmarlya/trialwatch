@@ -6,6 +6,7 @@ registry send no Referer at all (rel="noreferrer"); and the search page is neith
 A reverse proxy in front of the site must leave query strings out of its own logs too (README)."""
 
 import logging
+import traceback
 
 
 class StripQueryFilter(logging.Filter):
@@ -21,4 +22,22 @@ class StripQueryFilter(logging.Filter):
             changed[0] = "-"
             changed[2] = args[2].split("?", 1)[0]
             record.args = tuple(changed)
+        return True
+
+
+class ErrorTypeOnlyFilter(logging.Filter):
+    """Logs an exception by its type and where it was raised, without its message, which may quote what
+    someone searched for: uvicorn logs every unhandled error ("Exception in ASGI application") after the
+    error page has already logged it with its reference (web/app.py)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not record.exc_info:
+            return True
+        message = record.getMessage().strip()
+        error = record.exc_info[1]
+        frames = "".join(traceback.format_tb(record.exc_info[2]))
+        record.msg = "%s %s\n%s"
+        record.args = (message, type(error).__name__, frames)
+        record.exc_info = None
+        record.exc_text = None
         return True

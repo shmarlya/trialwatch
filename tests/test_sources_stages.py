@@ -155,6 +155,17 @@ def test_a_trial_two_complete_lists_missed_is_marked_no_longer_listed(conn):
     assert status_of(conn, OTHERS[0]) == ("not transferred", False)
 
 
+def test_an_empty_list_is_never_complete_and_marks_nothing_as_gone(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    sync_list(conn, FakeCtis(RECORD, listing_rows([CT, OTHERS[0]])))
+    # the source answers with no trials, twice (an outage, a query that matches nothing now)
+    for attempt in range(2):
+        empty = sync_list(conn, FakeCtis(RECORD, []))
+        assert (empty.listed, empty.complete, empty.delisted) == (0, False, 0)
+        assert "listed no trials" in empty.failed["list"]
+    assert status_of(conn, CT) == ("not transferred", False)
+
+
 def test_a_stopped_list_keeps_what_it_read_and_counts_as_no_miss(conn):
     core.act_as(conn, "ctis-adapter", "process")
     every_trial = listing_rows([CT, OTHERS[0], OTHERS[1]])

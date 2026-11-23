@@ -15,7 +15,10 @@ JITTER = 0.10
 # A trial's check error that says the API call failed for a reason that passes (an outage, a rate limit,
 # a timeout): the trial is tried again. Other errors (a scanned PDF, a refusal) stay for a person.
 TRANSIENT_ERRORS = ("APIConnectionError", "APITimeoutError", "RateLimitError", "InternalServerError",
-                    "OverloadedError", "ServiceUnavailableError", "DeadlineExceededError")
+                    "OverloadedError", "ServiceUnavailableError", "DeadlineExceededError",
+                    # the SDK names a 504 GatewayTimeoutError (DeadlineExceededError is its alias) and a 408
+                    # RequestTimeoutError
+                    "GatewayTimeoutError", "RequestTimeoutError")
 
 
 class PermanentError(Exception):

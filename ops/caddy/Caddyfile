@@ -2,7 +2,24 @@
 # Caddy's own), then everything to the web service, and /grafana/ to Grafana for TrialWatch's admins.
 #
 # No access log here on purpose: a search's address holds what someone looked for, which can be about
-# their health (ADR-008). The web service logs each request without its query string.
+# their health (ADR-008). The web service logs each request without its query string. Caddy still logs a
+# request it could not serve (a 502 while web restarts) in its error log: that entry keeps its method,
+# host and status, never its address, the visitor's address or the headers.
+{
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>uri delete
+				request>remote_ip delete
+				request>remote_port delete
+				request>client_ip delete
+				request>headers delete
+			}
+		}
+	}
+}
+
 {$TRIALWATCH_DOMAIN} {
 	encode zstd gzip
 

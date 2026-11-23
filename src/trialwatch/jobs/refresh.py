@@ -27,7 +27,7 @@ from trialwatch.checks import settings as check_settings
 from trialwatch.db import checks as checks_db
 from trialwatch.db import core
 from trialwatch.jobs import steps
-from trialwatch.jobs.retry import PermanentError
+from trialwatch.jobs.retry import PermanentError, is_transient
 from trialwatch.jobs.steps import Context, Outcome
 from trialwatch.sources import registry
 from trialwatch.trials import readiness
@@ -63,8 +63,18 @@ def _check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
     settings = check_settings.load(config)
     requirement_set = requirement_sets.load(settings.requirements)
     ready = readiness.ready_trials(conn, requirement_set.document_kinds)
-    changed = checks_db.trials_needing_check(conn, ready, requirement_set.name)
-    ctx.add(f"{len(changed)} of {len(ready)} trials ready for a check are new or changed")
+    needing = checks_db.trials_needing_check(conn, ready, requirement_set.name)
+    # a check that failed for a lasting reason (a refusal, an answer cut short) on evidence that has not
+    # changed since would fail the same way and be paid for again: it stays for a person
+    failed_before = checks_db.failed_on_unchanged_evidence(conn, needing, requirement_set.name)
+    changed = []
+    for trial_id in needing:
+        if trial_id in failed_before and not is_transient(failed_before[trial_id]):
+            continue
+        changed.append(trial_id)
+    left = len(needing) - len(changed)
+    ctx.add(f"{len(changed)} of {len(ready)} trials ready for a check are new or changed"
+            f" ({left} left to a person: their last check failed on the same evidence)")
     outcome = steps.run_check(ctx, conn, {"trial_ids": changed, "config": config})
     outcome.result["ready"] = len(ready)
     return outcome

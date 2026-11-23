@@ -125,7 +125,14 @@ def run_sync(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
 def transfer_keys(conn: psycopg.Connection, ctx: Context, params: dict) -> list[str]:
     """The keys to transfer: those given, or the source's trials of a kind (pending, failed, ...);
     on a retry, without those transferred since the job was created."""
-    if params.get("which"):
+    earlier = {}
+    if ctx.attempt > 1 and ctx.job is not None and ctx.job.result:
+        earlier = ctx.job.result
+    if params.get("which") and "chosen" in earlier:
+        # a retry redoes what its first attempt chose: the trials it transferred no longer count as
+        # `which` (pending, stale, ...), so choosing again would take other trials and skip the failures
+        keys = list(earlier["chosen"])
+    elif params.get("which"):
         try:
             keys = core.keys_to_transfer(conn, params["source"], params["which"])
         except ValueError as exc:
@@ -164,8 +171,18 @@ def run_transfer(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcom
         except ValueError as exc:
             raise PermanentError(str(exc)) from exc
     ctx.add(result.summary())
-    return Outcome({"ingest_run": result.run_id, "summary": result.summary(), "trials": result.trials,
-                    "complete": result.complete, "new_versions": result.new_versions}, dict(result.failed))
+    outcome = {"ingest_run": result.run_id, "summary": result.summary(), "trials": result.trials,
+               "complete": result.complete, "new_versions": result.new_versions}
+    if params.get("which"):
+        outcome["chosen"] = _chosen_keys(ctx, keys)
+    return Outcome(outcome, dict(result.failed))
+
+
+def _chosen_keys(ctx: Context, keys: list[str]) -> list[str]:
+    """The keys a transfer by `which` chose on its first attempt (kept in its result for a retry)."""
+    if ctx.attempt > 1 and ctx.job is not None and ctx.job.result and "chosen" in ctx.job.result:
+        return list(ctx.job.result["chosen"])
+    return keys
 
 
 # --- check ---------------------------------------------------------------------------------------
@@ -265,7 +282,15 @@ def _trials_to_tag(conn: psycopg.Connection, ctx: Context, params: dict, setting
         prompt_sha = load_prompt(settings.prompt).sha256
     waiting = None
     if params.get("every") or ctx.attempt > 1:
-        waiting = search_db.trials_to_annotate(conn, prompt_sha)
+        untagged = search_db.trials_to_annotate(conn, prompt_sha)
+        # a trial whose tagging of this profile failed for a lasting reason (a refusal, an invalid answer)
+        # would fail the same way and be paid for again: it waits for its profile to change
+        failed_before = search_db.annotation_errors(conn, untagged)
+        waiting = []
+        for trial_id in untagged:
+            if trial_id in failed_before and not is_transient(failed_before[trial_id]):
+                continue
+            waiting.append(trial_id)
     if params.get("every"):
         chosen = waiting
     else:
@@ -313,9 +338,13 @@ def run_annotate(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcom
                                should_stop=ctx.should_stop)
     except llm.BAD_CREDENTIALS as exc:
         raise PermanentError(f"{type(exc).__name__}: {exc}") from exc
+    # only a failure that passes (an outage, a rate limit) is worth another attempt
     passing = {}
     for trial_id, error in summary.failed.items():
-        passing[f"trial {trial_id}"] = error
+        if is_transient(error):
+            passing[f"trial {trial_id}"] = error
+        else:
+            ctx.add(f"  left to a person, trial {trial_id}: {error}")
     ctx.add(f"annotation run {summary.run_id}: {summary.tagged} of {summary.trials} tagged, {summary.kept} tags kept, "
             f"{summary.dropped} dropped, {llm.dollars(summary.cost_usd)}")
     return Outcome({"annotation_run": summary.run_id, "trials": summary.trials, "tagged": summary.tagged,

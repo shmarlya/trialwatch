@@ -667,7 +667,10 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
     names = core.trial_names(conn, wanted)
     # runs whose process died are closed first, so they never look as if they were still going
     checks_db.close_abandoned_runs(conn)
-    run_id = checks_db.start_run(
+    # their judgements are public now, and like every public judgement they show their gold agreement
+    for earlier_run in checks_db.runs_without_agreement(conn):
+        publishing.publish_run(conn, earlier_run)
+    run_id =checks_db.start_run(
         conn, model=settings.model, effort=settings.effort, prompt=prompt.name,
         prompt_sha256=prompt.sha256, prompt_text=prompt.text, requirements=requirement_set.name,
         requirements_sha256=requirement_set.sha256, requirements_text=requirement_set.text, params=settings.params(),

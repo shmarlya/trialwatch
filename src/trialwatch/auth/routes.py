@@ -29,11 +29,15 @@ router = APIRouter()
 
 
 class LoginThrottle:
-    """Slows down password guessing: after FAILURES wrong tries for a name or from an address within
-    WINDOW seconds, sign-in for it is refused until the window has passed. Kept in memory, per process."""
+    """Slows down password guessing: after FAILURES tries for a name or from an address within WINDOW
+    seconds that did not sign in, sign-in for it is refused until the window has passed. Kept in memory,
+    per process. A try counts before its password is checked, so tries sent at the same moment can't all
+    get past the limit; one that signs in is forgotten again."""
 
     FAILURES = 5
     WINDOW = 15 * 60
+    # past this many names and addresses, the ones without a recent try are forgotten
+    SWEEP_AFTER = 10_000
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -44,22 +48,30 @@ class LoginThrottle:
         for moment in self._failures.get(key, []):
             if now - moment < self.WINDOW:
                 kept.append(moment)
-        self._failures[key] = kept
+        if kept:
+            self._failures[key] = kept
+        elif key in self._failures:
+            del self._failures[key]
         return kept
 
-    def blocked(self, keys: list[str]) -> bool:
+    def _sweep(self, now: float) -> None:
+        for key in list(self._failures):
+            self._recent(key, now)
+
+    def try_counted(self, keys: list[str]) -> bool:
+        """Count a try for each key; False (and nothing counted) when one of them has had too many."""
         now = time.monotonic()
         with self._lock:
+            if len(self._failures) > self.SWEEP_AFTER:
+                self._sweep(now)
             for key in keys:
                 if len(self._recent(key, now)) >= self.FAILURES:
-                    return True
-        return False
-
-    def failed(self, keys: list[str]) -> None:
-        now = time.monotonic()
-        with self._lock:
+                    return False
             for key in keys:
-                self._recent(key, now).append(now)
+                tries = self._recent(key, now)
+                tries.append(now)
+                self._failures[key] = tries
+        return True
 
     def succeeded(self, keys: list[str]) -> None:
         with self._lock:
@@ -75,7 +87,9 @@ def throttle_keys(request: Request, email: str) -> list[str]:
     address = "unknown"
     if request.client is not None:
         address = request.client.host
-    return [f"user:{accounts.normalised_email(email)}", f"address:{address}"]
+    # an email longer than any allowed one is cut: a key must not keep whatever size was sent
+    name = accounts.normalised_email(email[: accounts.LONGEST_EMAIL + 1])
+    return [f"user:{name}", f"address:{address}"]
 
 
 def secure_cookie(request: Request) -> bool:
@@ -99,12 +113,14 @@ def login(
 ) -> Response:
     keys = throttle_keys(request, email)
     target = safe_next(next)
-    if login_throttle.blocked(keys):
+    if not login_throttle.try_counted(keys):
         return with_error(f"/login?next={url_quote(target)}", "too many wrong tries: wait a few minutes")
-    with db.connect_system() as conn:
-        token = sessions.sign_in(conn, email, password)
+    token = None
+    # a NUL can't be in any stored email, and the database refuses it in a query
+    if "\x00" not in email:
+        with db.connect_system() as conn:
+            token = sessions.sign_in(conn, email, password)
     if token is None:
-        login_throttle.failed(keys)
         return with_error(f"/login?next={url_quote(target)}", "wrong email or password")
     login_throttle.succeeded(keys)
     response = RedirectResponse(target, status_code=303)

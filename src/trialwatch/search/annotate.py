@@ -377,9 +377,10 @@ def annotate_trial(conn: psycopg.Connection, client: MessagesClient, settings: S
         except ValueError as exc:
             error = f"invalid answer: {exc}"
     cost = total_cost(call.costs)
+    # what was billed is recorded at once, whatever happens to saving the tags next
+    llm.record(conn, call, request_as_sent(request), operation=OPERATION, trial_id=trial_id, call_number=1,
+               annotation_run_id=run_id)
     with conn.transaction():
-        llm.record(conn, call, request_as_sent(request), operation=OPERATION, trial_id=trial_id, call_number=1,
-                   annotation_run_id=run_id)
         search_db.save_annotation(conn, run_id=run_id, trial_id=trial_id, profile_hash=bytes(stored.profile_hash),
                                   facts=checked.facts, dropped=checked.dropped, error=error)
         if error is None:

@@ -611,6 +611,27 @@ def trials_to_annotate(conn: psycopg.Connection, prompt_sha256: bytes | None = N
     return found
 
 
+def annotation_errors(conn: psycopg.Connection, trial_ids: list[int]) -> dict[int, str]:
+    """The trials among these whose newest annotation of their current profile ended in an error, each
+    with its error."""
+    rows = conn.execute(
+        """
+        SELECT trial_id, error FROM (
+            SELECT DISTINCT ON (a.trial_id) a.trial_id, a.error
+              FROM search.annotation a JOIN search.document d ON d.trial_id = a.trial_id
+             WHERE a.trial_id = ANY(%s) AND a.profile_hash = d.profile_hash
+             ORDER BY a.trial_id, a.run_id DESC
+        ) newest
+        WHERE error IS NOT NULL
+        """,
+        (trial_ids,),
+    ).fetchall()
+    found = {}
+    for row in rows:
+        found[row[0]] = row[1]
+    return found
+
+
 def naive_count(conn: psycopg.Connection, words: Sequence[str], country: str | None) -> int:
     """What plain text matching finds among the trials CTIS's list calls recruiting: each word in the
     listed conditions or title (anywhere in them), the country among its listed countries. The

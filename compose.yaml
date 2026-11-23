@@ -4,9 +4,11 @@
 # /grafana/), and the nightly backups (`backup`). docs/operations.md says how to run and watch it.
 
 # What the TrialWatch services share: the image, the database and the settings from .env
+# The image is published by .github/workflows/image.yml; `docker compose pull` fetches it. TRIALWATCH_TAG
+# pins one (sha-<commit>) to roll back. `--build` builds it from this checkout instead.
 x-trialwatch: &trialwatch
   build: .
-  image: trialwatch:dev
+  image: ghcr.io/shmarlya/trialwatch:${TRIALWATCH_TAG:-latest}
   environment: &trialwatch-environment
     DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
     TZ: UTC

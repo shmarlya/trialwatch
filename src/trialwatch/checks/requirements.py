@@ -45,6 +45,34 @@ class Requirement:
     search_from: str | None = None
 
 
+# What a label means next to a gold label (gold/datasets.py): the results are not reported in full (an
+# accusation), they are (clears the trial), or nothing is decided (open: left to a person, not counted)
+LABEL_MEANINGS = ("accusation", "clears", "open")
+
+
+@dataclass(frozen=True)
+class LabelRule:
+    """A label a judgement can get. The set's labels are tried in order: the first whose condition
+    holds is the judgement's; the last has no condition."""
+
+    name: str
+    # one of LABEL_MEANINGS
+    means: str
+    # "any": a part named under `false` is False or one under `true` is True; "all": every one is so;
+    # None: always (the last label)
+    when: str | None = None
+    true: tuple[str, ...] = ()
+    false: tuple[str, ...] = ()
+
+
+def meaning_of(labels: tuple[LabelRule, ...], name: str | None) -> str | None:
+    """What a label means (LABEL_MEANINGS), or None for no label or one the set doesn't have."""
+    for rule in labels:
+        if rule.name == name:
+            return rule.means
+    return None
+
+
 @dataclass(frozen=True)
 class RequirementSet:
     name: str
@@ -55,7 +83,7 @@ class RequirementSet:
     requirements: tuple[Requirement, ...]
     parts: dict
     inferences: tuple[dict, ...]
-    label: dict
+    labels: tuple[LabelRule, ...]
     # the file as read, and its sha256: stored with every run that uses it
     text: str
     sha256: bytes
@@ -113,10 +141,22 @@ def load(name: str) -> RequirementSet:
     kinds = []
     for kind in data["document_kinds"]:
         kinds.append(kind)
+    labels = []
+    for entry in data["labels"]:
+        when = None
+        condition = {}
+        if "when_any" in entry:
+            when = "any"
+            condition = entry["when_any"]
+        if "when_all" in entry:
+            when = "all"
+            condition = entry["when_all"]
+        labels.append(LabelRule(name=entry["name"], means=entry["means"], when=when,
+                                true=tuple(condition.get("true", [])), false=tuple(condition.get("false", []))))
     return RequirementSet(
         name=data["name"], title=data["title"], description=data["description"], document_kinds=tuple(kinds),
         not_reported_kinds=frozenset(data["not_reported_kinds"]), requirements=tuple(requirements),
-        parts=data["parts"], inferences=tuple(inferences), label=data["label"], text=text,
+        parts=data["parts"], inferences=tuple(inferences), labels=tuple(labels), text=text,
         sha256=hashlib.sha256(text.encode()).digest(),
     )
 
@@ -132,11 +172,7 @@ def _check_set(name: str, data: dict, requirements: list[Requirement]) -> None:
         combine = settings.get("combine", "all")
         if combine != "all":
             raise ValueError(f"{name}: part {part!r} combines its questions by {combine!r}; only 'all' is supported")
-    for condition in ("not_full_when", "full_when"):
-        for value in ("true", "false"):
-            for part in data["label"][condition].get(value, []):
-                if part not in data["parts"]:
-                    raise ValueError(f"{name}: label.{condition} names an unknown part {part!r}")
+    _check_labels(name, data)
     fixed_keys = []
     for requirement in requirements:
         if requirement.for_each is None:
@@ -318,26 +354,65 @@ def _combined(values: list[bool | None], empty_rule: str) -> tuple[bool | None, 
     return True, "every requirement reported"
 
 
-def _matches(parts: dict[str, bool | None], condition: dict) -> bool:
-    """Any part named under "false" is False, or any named under "true" is True."""
-    for part in condition.get("false", []):
+def _check_labels(name: str, data: dict) -> None:
+    """ValueError unless the labels are ordered conditions on known parts, each with a meaning, names
+    once, and a last label with no condition (so every judgement gets one)."""
+    labels = data.get("labels", [])
+    if not labels:
+        raise ValueError(f"{name}: no labels")
+    names = []
+    for position, entry in enumerate(labels, start=1):
+        if entry.get("means") not in LABEL_MEANINGS:
+            raise ValueError(f"{name}: label {entry.get('name')!r} means {entry.get('means')!r}; "
+                             f"a label means one of {', '.join(LABEL_MEANINGS)}")
+        if entry["name"] in names:
+            raise ValueError(f"{name}: label {entry['name']!r} is named twice")
+        names.append(entry["name"])
+        conditions = [key for key in ("when_any", "when_all") if key in entry]
+        last = position == len(labels)
+        if last and conditions:
+            raise ValueError(f"{name}: the last label, {entry['name']!r}, must have no condition (it is the default)")
+        if not last and len(conditions) != 1:
+            raise ValueError(f"{name}: label {entry['name']!r} needs one condition, when_any or when_all")
+        for key in conditions:
+            for value in ("true", "false"):
+                for part in entry[key].get(value, []):
+                    if part not in data["parts"]:
+                        raise ValueError(f"{name}: label {entry['name']!r} names an unknown part {part!r}")
+
+
+def _any_holds(parts: dict[str, bool | None], rule: LabelRule) -> bool:
+    """Any part named under `false` is False, or any named under `true` is True."""
+    for part in rule.false:
         if parts.get(part) is False:
             return True
-    for part in condition.get("true", []):
+    for part in rule.true:
         if parts.get(part) is True:
             return True
     return False
 
 
-def _all_hold(parts: dict[str, bool | None], condition: dict) -> bool:
-    """Every part named under "true" is True and every one named under "false" is False."""
-    for part in condition.get("true", []):
+def _all_hold(parts: dict[str, bool | None], rule: LabelRule) -> bool:
+    """Every part named under `true` is True and every one named under `false` is False."""
+    for part in rule.true:
         if parts.get(part) is not True:
             return False
-    for part in condition.get("false", []):
+    for part in rule.false:
         if parts.get(part) is not False:
             return False
     return True
+
+
+def label_for(requirement_set: RequirementSet, parts: dict[str, bool | None]) -> str:
+    """The first of the set's labels whose condition the parts meet (the last one has none)."""
+    for rule in requirement_set.labels:
+        if rule.when is None:
+            return rule.name
+        if rule.when == "any" and _any_holds(parts, rule):
+            return rule.name
+        if rule.when == "all" and _all_hold(parts, rule):
+            return rule.name
+    raise ValueError(f"{requirement_set.name}: no label applies (its last label must have no condition)")
 
 
 def judge(requirement_set: RequirementSet, questions: list[Question], evidence: dict[str, Any]
@@ -363,12 +438,7 @@ def judge(requirement_set: RequirementSet, questions: list[Question], evidence: 
     for inference in requirement_set.inferences:
         if inference["type"] == "nobody_enrolled_contradicted_by_count":
             _nobody_enrolled_contradicted(inference, parts, evidence, trace, questions)
-    if _matches(parts, requirement_set.label["not_full_when"]):
-        label = "not full"
-    elif _all_hold(parts, requirement_set.label["full_when"]):
-        label = "full"
-    else:
-        label = "undecided"
+    label = label_for(requirement_set, parts)
     return {"parts": parts, "label": label}, trace
 
 

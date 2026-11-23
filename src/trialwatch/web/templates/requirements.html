@@ -27,9 +27,8 @@
   <ul class="small">
     {% for part, settings in set.parts.items() %}<li><b>{{ part }}</b>: {{ settings.combine }} of its questions (none: {{ settings.empty }})</li>{% endfor %}
     {% for inference in set.inferences %}<li>inference <code>{{ inference.type }}</code>: {{ inference }}</li>{% endfor %}
-    <li><b>not full</b> when {% for part in set.label.not_full_when.false %}{{ part }} is no, {% endfor %}{% for part in set.label.not_full_when.true %}or {{ part }} is yes{% endfor %}</li>
-    <li><b>full</b> when {% for part in set.label.full_when.true %}{{ part }} is yes, {% endfor %}{% for part in set.label.full_when.false %}and {{ part }} is no{% endfor %}</li>
-    <li>otherwise <b>undecided</b>: a person decides</li>
+    {% for rule in set.labels %}<li><b>{{ rule.name }}</b> ({{ rule.means }}){% if rule.when == "any" %} when any of: {% for part in rule.false %}{{ part }} is no{% if not loop.last or rule.true %}, {% endif %}{% endfor %}{% for part in rule.true %}{{ part }} is yes{% if not loop.last %}, {% endif %}{% endfor %}{% elif rule.when == "all" %} when all of: {% for part in rule.true %}{{ part }} is yes{% if not loop.last or rule.false %}, {% endif %}{% endfor %}{% for part in rule.false %}{{ part }} is no{% if not loop.last %}, {% endif %}{% endfor %}{% else %} otherwise{% endif %}</li>
+    {% endfor %}
   </ul>
   <details class="sent"><summary><b>The file</b></summary><pre class="json">{{ set.text }}</pre></details>
 </details>

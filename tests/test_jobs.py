@@ -341,7 +341,7 @@ def test_an_automatic_check_over_the_cap_is_held_and_a_persons_still_runs(app_co
 
 # --- automatic publishing is TrialWatch's --------------------------------------------------------
 
-def test_a_run_publishes_by_itself_as_trialwatch(conn, monkeypatch):
+def test_a_finished_runs_judgements_are_public_with_their_agreement(conn, monkeypatch):
     from trialwatch.checks import publishing
     from test_evidence import start_a_run
 
@@ -352,8 +352,9 @@ def test_a_run_publishes_by_itself_as_trialwatch(conn, monkeypatch):
     conn.execute("UPDATE checks.run SET status = 'succeeded', finished_at = now() WHERE id = %s", (run_id,))
     person = core.current_actor(conn)
     assert publishing.publish_run(conn, run_id) == [trial]
-    published_by = conn.execute("SELECT published_by FROM checks.publication WHERE run_id = %s", (run_id,)).fetchone()
-    assert published_by == (db.SYSTEM_ACTOR_ID,)
+    # nobody publishes: the run's finishing does; it records how its kind agreed with gold labels
+    agreement = conn.execute("SELECT agreement->>'basis' FROM checks.judgement WHERE run_id = %s", (run_id,)).fetchone()
+    assert "gold items agreed" in agreement[0]
     # the session writes as before afterwards
     assert core.current_actor(conn) == person
     name = conn.execute("SELECT kind, name FROM core.actor WHERE id = 1").fetchone()

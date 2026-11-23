@@ -38,7 +38,7 @@ How it works: all pages stay open; unreviewed judgements carry a "draft" badge.
 
 ### B. Publish step and a staff view
 
-How it works: checks.publication records what is public; a withdrawn one stays public, marked.
+How it works: a judgement is public once its run has finished; its agreement with gold labels and its withdrawal (with the reason shown to all) are columns of `checks.judgement`; a withdrawn one stays public, marked.
 Revised 2026-11-22: a run publishes every judgement it made without an error, any label, with how often judgements of its kind agreed with gold labels (the share once ≥ 20 items, the basis always). The public sees each published judgement with its whole trace; staff also see sources, gold, run tallies, costs and names.
 
 - **+** everything we decide is open, with its method

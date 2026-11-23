@@ -6,5 +6,5 @@ Not written yet: the Excalidraw page held only the title and the empty template.
 are in the [roadmap](roadmap.md#s2-workflow-or-agent-per-step) (session S2) and on the
 [AI decision map](ai-decision-map.md#02-workflow-or-agent) (card 02).
 
-What is built answers it in practice: due dates are plain code (`checks/due_date.py`); the evidence check is a
+What is built answers it in practice: due dates are plain code (`gold/converters/due_date.py`); the evidence check is a
 fixed workflow of single model calls whose answers code verifies and rules decide (ADR-004); no step is an agent.

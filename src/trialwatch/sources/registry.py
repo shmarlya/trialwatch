@@ -109,6 +109,9 @@ class Adapter:
     listing_columns: tuple[tuple[str, str], ...] = ()
     # what one key looks like, for forms: e.g. an EU CT number
     key_label = "key"
+    # the identifier scheme of the source's own keys (core.identifier_scheme), e.g. eu-ct: a gold dataset's
+    # items are read through the source whose keys they name
+    key_scheme: str | None = None
 
     @classmethod
     @contextmanager

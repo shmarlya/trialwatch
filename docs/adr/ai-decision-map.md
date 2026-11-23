@@ -244,7 +244,7 @@ Measure it, handle failure, keep a person where it matters.
 - **Practice:** Route by impact, not only confidence. Show the reviewer the source quote and page, not just the claim. Store decision, reason, reviewer, time.
 - **Pitfall:** Rubber-stamping; never sampling auto-approved items; reviews that never reach the eval set.
 - **TrialWatch:** Built: every judgement published with its gold agreement; staff only withdraw (ADR-007).
-- **Lab:** Measure how often moderators overrule an automatic publication; withdraw is kept as history (checks.publication).
+- **Lab:** Measure how often moderators overrule an automatic publication; withdraw is kept as history (the judgement's withdrawal, audited).
 
 ### Eval flywheel (cards 11–13)
 

@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from trialwatch.checks.due_date import (
+from trialwatch.gold.converters.due_date import (
     completion_date, is_due, is_paediatric, months_before, parse_date, verdict,
 )
-from trialwatch.gold import bruckner
+from trialwatch.gold.converters import bruckner
 
 AS_OF = date(2025, 11, 10)
 BRUCKNER = Path(__file__).parent.parent / "data" / "bruckner"

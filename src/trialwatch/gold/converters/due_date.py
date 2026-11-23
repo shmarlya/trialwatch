@@ -75,8 +75,9 @@ def is_due(completion: date | None, paediatric: bool, as_of: date) -> bool:
     return completion < deadline_start
 
 
-def verdict(*, cancelled: bool, extended: bool, reported_fully: bool, days_to_results: int | None,
-            paediatric: bool) -> str:
+def verdict(
+    *, cancelled: bool, extended: bool, reported_fully: bool, days_to_results: int | None, paediatric: bool
+) -> str:
     """Bruckner et al.'s legal_compliance_assessment for a due trial, in their order of precedence.
 
     `reported_fully` means a full scientific results document and a layperson summary; for now it

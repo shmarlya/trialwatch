@@ -69,11 +69,8 @@ _LISTED_TITLE = """(SELECT l.title FROM core.source_listing l JOIN core.trial_so
 
 
 def judgement_view(published_only: bool) -> str:
-    """The view of one judgement per trial and requirement set: the newest one (staff), or the newest
-    one published (the public, ADR-007; a withdrawn one too, marked). Both have the columns the
-    trial rows read."""
-    if published_only:
-        return "checks.judgement_published"
+    """The view of one judgement per trial and requirement set: the newest of a finished run, which is
+    public (ADR-007; a withdrawn one too, marked), for staff and the public alike."""
     return "checks.judgement_current"
 
 
@@ -445,19 +442,16 @@ _JUDGEMENT_ROWS = f"""
            r.started_at, j.trial_record_id, j.document_versions, r.status AS run_status,
            (SELECT max(v.published_at) FROM core.document_version v WHERE v.id = ANY(j.document_versions))
                AS latest_published_at,
-           pub.id IS NOT NULL AS published,
-           pub.confidence AS published_confidence, pub.basis AS published_basis,
-           pub.withdrawn_at, wa.name AS withdrawn_by, pub.note AS withdrawn_note
+           (j.error IS NULL AND r.status <> 'running') AS published,
+           (j.agreement->>'confidence')::real AS published_confidence, j.agreement->>'basis' AS published_basis,
+           j.withdrawn_at, wa.name AS withdrawn_by, j.withdrawn_reason AS withdrawn_note
     FROM checks.judgement j
-    -- its newest publication, withdrawn or not
-    LEFT JOIN LATERAL (SELECT p.* FROM checks.publication p WHERE p.run_id = j.run_id AND p.trial_id = j.trial_id
-                       ORDER BY p.id DESC LIMIT 1) pub ON true
-    LEFT JOIN core.actor wa ON wa.id = pub.withdrawn_by
+    LEFT JOIN core.actor wa ON wa.id = j.withdrawn_by
     JOIN checks.run r ON r.id = j.run_id JOIN core.trial t ON t.id = j.trial_id
 """
 # Keeps only published judgements (withdrawn ones too: they stay public, marked) when %(published_only)s
 _PUBLISHED_FILTER = """
-      AND (NOT %(published_only)s OR pub.id IS NOT NULL)
+      AND (NOT %(published_only)s OR (j.error IS NULL AND r.status <> 'running'))
 """
 
 
@@ -495,12 +489,11 @@ def run_questions(conn: psycopg.Connection, run_id: int, trial_id: int) -> list[
     with conn.cursor(row_factory=class_row(QuestionRow)) as cur:
         return cur.execute(
             """
-            SELECT q.key, q.item_text, q.pages, q.widened, e.id AS evidence_id, e.found, e.kind, e.quote,
-                   e.file_sha256, e.page_no, e.note, e.verified
-            FROM checks.question q
-            LEFT JOIN checks.evidence e ON e.run_id = q.run_id AND e.trial_id = q.trial_id AND e.key = q.key
-            WHERE q.run_id = %s AND q.trial_id = %s
-            ORDER BY q.key = 'participants' DESC, q.key = 'cancelled' DESC, q.key
+            SELECT a.key, a.item_text, a.pages, a.widened, a.evidence_id, a.found, a.kind, a.quote,
+                   a.file_sha256, a.page_no, a.note, a.verified
+            FROM checks.answer a
+            WHERE a.run_id = %s AND a.trial_id = %s
+            ORDER BY a.key = 'participants' DESC, a.key = 'cancelled' DESC, a.key
             """,
             (run_id, trial_id),
         ).fetchall()
@@ -579,7 +572,7 @@ class PublishedTrialRow:
 
 _PUBLISHED_TRIALS = f"""
     FROM core.trial t
-    JOIN checks.judgement_published jc ON jc.trial_id = t.id AND jc.requirements = %(requirements)s
+    JOIN checks.judgement_current jc ON jc.trial_id = t.id AND jc.requirements = %(requirements)s
     LEFT JOIN LATERAL (SELECT {_LATEST_REGISTERED} AS r) reg ON true
 """ + _trial_filter() + """
               AND (%(label)s::text IS NULL OR jc.label = %(label)s)
@@ -628,7 +621,8 @@ def published_trial_rows(conn: psycopg.Connection, requirements: str, found: Pub
                           FROM core.trial_sponsor s JOIN core.organisation o ON o.id = s.organisation_id
                          WHERE s.trial_id = t.id AND s.removed_at IS NULL) AS sponsor,
                        reg.r->>'status' AS status, jc.label, jc.run_id, jc.model,
-                       jc.started_at AS checked_at, jc.published_at, jc.outdated, jc.withdrawn_at, jc.withdrawn_note,
+                       jc.started_at AS checked_at, jc.published_at, jc.outdated, jc.withdrawn_at,
+                       jc.withdrawn_reason AS withdrawn_note,
                        coalesce((SELECT array_agg(DISTINCT l.country ORDER BY l.country) FROM core.trial_location l
                                   WHERE l.trial_id = t.id), '{{}}') AS countries,
                        coalesce((SELECT array_agg(DISTINCT l.city ORDER BY l.city) FROM core.trial_location l
@@ -650,7 +644,7 @@ def published_trial_countries(conn: psycopg.Connection, requirements: str) -> li
     """The countries the trials with a published judgement run in, for the home page's filter."""
     rows = conn.execute(
         "SELECT DISTINCT l.country FROM core.trial_location l JOIN core.trial t ON t.id = l.trial_id"
-        " JOIN checks.judgement_published jc ON jc.trial_id = t.id AND jc.requirements = %(requirements)s"
+        " JOIN checks.judgement_current jc ON jc.trial_id = t.id AND jc.requirements = %(requirements)s"
         " WHERE t.merged_into IS NULL ORDER BY 1",
         {"requirements": requirements},
     ).fetchall()
@@ -713,7 +707,7 @@ def published_trial_statuses(conn: psycopg.Connection, requirements: str) -> lis
     """The registry statuses of the trials with a published judgement, for the home page's filter."""
     rows = conn.execute(
         "SELECT DISTINCT reg.r->>'status' AS status FROM core.trial t"
-        " JOIN checks.judgement_published jc ON jc.trial_id = t.id AND jc.requirements = %(requirements)s"
+        " JOIN checks.judgement_current jc ON jc.trial_id = t.id AND jc.requirements = %(requirements)s"
         " LEFT JOIN LATERAL (SELECT " + _LATEST_REGISTERED + " AS r) reg ON true"
         " WHERE t.merged_into IS NULL AND reg.r->>'status' IS NOT NULL ORDER BY 1",
         {"requirements": requirements},
@@ -740,9 +734,10 @@ def file_is_public(conn: psycopg.Connection, sha256: bytes) -> bool:
         SELECT EXISTS (SELECT FROM core.document_version v JOIN core.document d ON d.id = v.document_id
                          JOIN core.source s ON s.id = d.source_id
                         WHERE v.file_sha256 = %(sha)s AND s.kind <> 'manual')
-            OR EXISTS (SELECT FROM checks.evidence e JOIN checks.publication p
-                         ON p.run_id = e.run_id AND p.trial_id = e.trial_id
-                        WHERE e.file_sha256 = %(sha)s)
+            OR EXISTS (SELECT FROM checks.answer a
+                         JOIN checks.judgement j ON j.run_id = a.run_id AND j.trial_id = a.trial_id AND j.error IS NULL
+                         JOIN checks.run r ON r.id = a.run_id AND r.status <> 'running'
+                        WHERE a.file_sha256 = %(sha)s)
         """,
         {"sha": sha256},
     ).fetchone()

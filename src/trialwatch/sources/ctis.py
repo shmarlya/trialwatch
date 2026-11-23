@@ -812,6 +812,7 @@ class CtisAdapter(Adapter):
     document_kinds = ("lay-summary", "other", "protocol", "results-summary", "study-report")
     listing_columns = (("Sponsor", "sponsor"), ("Phase", "trialPhase"), ("Results received", "resultsFirstReceived"))
     key_label = "EU CT number"
+    key_scheme = "eu-ct"
 
     def __init__(self, client=None) -> None:
         # a CtisClient, or a fake with the same search / retrieve / download_document methods

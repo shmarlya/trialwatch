@@ -97,21 +97,38 @@ def run_config(conn: psycopg.Connection, run_id: int) -> RunConfig | None:
         ).fetchone()
 
 
-def save_question(conn: psycopg.Connection, run_id: int, trial_id: int, key: str, item_text: str | None,
-                  pages: list[dict], widened: bool) -> None:
-    conn.execute(
-        "INSERT INTO checks.question (run_id, trial_id, key, item_text, pages, widened) VALUES (%s, %s, %s, %s, %s, %s)",
-        (run_id, trial_id, key, item_text, Jsonb(pages), widened),
-    )
+@dataclass(frozen=True)
+class Answer:
+    """The answer the model gave to one question, its quote checked against its page."""
+
+    # True: found; False: not found; None: the model said it doesn't know
+    found: bool | None
+    kind: str | None
+    quote: str | None
+    document_version_id: int | None
+    file_sha256: bytes | None
+    page_no: int | None
+    note: str | None
+    verified: bool
 
 
-def save_evidence(conn: psycopg.Connection, run_id: int, trial_id: int, key: str, *, found: bool | None,
-                  kind: str | None, quote: str | None, document_version_id: int | None, file_sha256: bytes | None,
-                  page_no: int | None, note: str | None, verified: bool) -> int:
+def save_answer(conn: psycopg.Connection, run_id: int, trial_id: int, key: str, item_text: str | None,
+                pages: list[dict], widened: bool, answer: Answer | None) -> int | None:
+    """One question asked about a trial, with the model's answer (None: it gave none). Returns the
+    answer's evidence id, which the rules trace names, or None."""
+    if answer is None:
+        conn.execute(
+            "INSERT INTO checks.answer (run_id, trial_id, key, item_text, pages, widened) VALUES (%s, %s, %s, %s, %s, %s)",
+            (run_id, trial_id, key, item_text, Jsonb(pages), widened),
+        )
+        return None
     cursor = conn.execute(
-        "INSERT INTO checks.evidence (run_id, trial_id, key, found, kind, quote, document_version_id, file_sha256, "
-        "page_no, note, verified) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-        (run_id, trial_id, key, found, kind, quote, document_version_id, file_sha256, page_no, note, verified),
+        "INSERT INTO checks.answer (run_id, trial_id, key, item_text, pages, widened, evidence_id, found, kind, quote, "
+        "document_version_id, file_sha256, page_no, note, verified) "
+        "VALUES (%s, %s, %s, %s, %s, %s, nextval('checks.answer_evidence_id_seq'), %s, %s, %s, %s, %s, %s, %s, %s) "
+        "RETURNING evidence_id",
+        (run_id, trial_id, key, item_text, Jsonb(pages), widened, answer.found, answer.kind, answer.quote,
+         answer.document_version_id, answer.file_sha256, answer.page_no, answer.note, answer.verified),
     )
     row = cursor.fetchone()
     return row[0]
@@ -179,39 +196,32 @@ def judgements(conn: psycopg.Connection, run_id: int) -> dict[int, RunJudgement]
     return by_trial
 
 
-# --- publication (ADR-007): which judgements the public sees ---------------------------------------
+# --- publication (ADR-007): every judgement without an error of a finished run is public -------------
 
-def publish_judgement(conn: psycopg.Connection, run_id: int, trial_id: int, confidence: float | None = None,
-                      basis: str | None = None) -> bool:
-    """Make the judgement public, as the session's actor: reviewed by a person (no confidence), or
-    published by a run with the measured confidence and its basis (checks/publishing.py). False if it
-    is published already; the database refuses one with an error or of a run still running
-    (checks.publishable)."""
-    with conn.transaction():
-        cursor = conn.execute(
-            """
-            INSERT INTO checks.publication (run_id, trial_id, published_by, confidence, basis)
-            SELECT %(run)s, %(trial)s, current_setting('trialwatch.actor')::bigint, %(confidence)s, %(basis)s
-            WHERE NOT EXISTS (SELECT FROM checks.publication
-                              WHERE run_id = %(run)s AND trial_id = %(trial)s AND withdrawn_at IS NULL)
-            """,
-            {"run": run_id, "trial": trial_id, "confidence": confidence, "basis": basis},
-        )
+def set_agreement(conn: psycopg.Connection, run_id: int, trial_id: int, confidence: float | None, basis: str) -> bool:
+    """Record how judgements of this one's kind agreed with gold labels when its run finished
+    (checks/publishing.py). False if the judgement has an error (it is not public)."""
+    cursor = conn.execute(
+        "UPDATE checks.judgement SET agreement = %s WHERE run_id = %s AND trial_id = %s AND error IS NULL",
+        (Jsonb({"confidence": confidence, "basis": basis}), run_id, trial_id),
+    )
     return cursor.rowcount == 1
 
 
-def withdraw_publication(conn: psycopg.Connection, run_id: int, trial_id: int, note: str | None) -> bool:
-    """Take the judgement back from the public, as the session's actor (the publication is kept, marked
-    withdrawn). False if it was not published."""
+def withdraw_judgement(conn: psycopg.Connection, run_id: int, trial_id: int, reason: str) -> bool:
+    """Withdraw a public judgement, as the session's actor, with the reason the public sees: it stays
+    public, marked withdrawn (audited). False if it is not public or was withdrawn already."""
     with conn.transaction():
         cursor = conn.execute(
             """
-            UPDATE checks.publication
+            UPDATE checks.judgement j
                SET withdrawn_at = clock_timestamp(), withdrawn_by = current_setting('trialwatch.actor')::bigint,
-                   note = coalesce(%s, note)
-             WHERE run_id = %s AND trial_id = %s AND withdrawn_at IS NULL
+                   withdrawn_reason = %s
+              FROM checks.run r
+             WHERE r.id = j.run_id AND j.run_id = %s AND j.trial_id = %s
+               AND j.error IS NULL AND r.status <> 'running' AND j.withdrawn_at IS NULL
             """,
-            (note, run_id, trial_id),
+            (reason, run_id, trial_id),
         )
     return cursor.rowcount == 1
 
@@ -239,15 +249,14 @@ class JudgementKind:
 
 _KINDS = """
     SELECT j.run_id, j.trial_id, j.label, r.model, r.prompt_sha256, r.requirements,
-           coalesce(bool_and(e.verified) FILTER (WHERE e.found), true) AS quotes_verified,
-           coalesce(bool_or(q.widened), false) AS widened,
-           coalesce(bool_or(q.key IS NOT NULL AND (e.id IS NULL OR e.found IS NULL)), false) AS unanswered,
+           coalesce(bool_and(a.verified) FILTER (WHERE a.found), true) AS quotes_verified,
+           coalesce(bool_or(a.widened), false) AS widened,
+           coalesce(bool_or(a.key IS NOT NULL AND (a.evidence_id IS NULL OR a.found IS NULL)), false) AS unanswered,
            (SELECT max(v.published_at) FROM core.document_version v WHERE v.id = ANY(j.document_versions))
                AS latest_published_at
     FROM checks.judgement j
     JOIN checks.run r ON r.id = j.run_id
-    LEFT JOIN checks.question q ON q.run_id = j.run_id AND q.trial_id = j.trial_id
-    LEFT JOIN checks.evidence e ON e.run_id = q.run_id AND e.trial_id = q.trial_id AND e.key = q.key
+    LEFT JOIN checks.answer a ON a.run_id = j.run_id AND a.trial_id = j.trial_id
     WHERE j.error IS NULL AND r.status <> 'running'
 """
 
@@ -298,18 +307,17 @@ def retrieval_rows(conn: psycopg.Connection, run_id: int) -> list[RetrievalRow]:
     with conn.cursor(row_factory=class_row(RetrievalRow)) as cur:
         return cur.execute(
             """
-            SELECT q.trial_id, q.key, q.widened, e.found, e.verified, e.file_sha256, e.page_no,
+            SELECT a.trial_id, a.key, a.widened, a.found, a.verified, a.file_sha256, a.page_no,
                    (SELECT (s.data->>'whole')::boolean FROM checks.step s
-                     WHERE s.run_id = q.run_id AND s.trial_id = q.trial_id AND s.name = 'retrieval'
+                     WHERE s.run_id = a.run_id AND s.trial_id = a.trial_id AND s.name = 'retrieval'
                      ORDER BY s.seq LIMIT 1) AS whole,
                    (SELECT s.data->'pages' FROM checks.step s
-                     WHERE s.run_id = q.run_id AND s.trial_id = q.trial_id AND s.name = 'call'
+                     WHERE s.run_id = a.run_id AND s.trial_id = a.trial_id AND s.name = 'call'
                      ORDER BY s.seq LIMIT 1) AS first_pages
-            FROM checks.question q
-            JOIN checks.judgement j ON j.run_id = q.run_id AND j.trial_id = q.trial_id AND j.error IS NULL
-            LEFT JOIN checks.evidence e ON e.run_id = q.run_id AND e.trial_id = q.trial_id AND e.key = q.key
-            WHERE q.run_id = %s
-            ORDER BY q.trial_id, q.key
+            FROM checks.answer a
+            JOIN checks.judgement j ON j.run_id = a.run_id AND j.trial_id = a.trial_id AND j.error IS NULL
+            WHERE a.run_id = %s
+            ORDER BY a.trial_id, a.key
             """,
             (run_id,),
         ).fetchall()

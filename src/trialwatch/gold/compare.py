@@ -15,6 +15,7 @@ from decimal import Decimal
 
 import psycopg
 
+from trialwatch.checks import requirements
 from trialwatch.llm import dollars
 from trialwatch.db import checks as checks_db
 from trialwatch.db import costs as costs_db
@@ -54,6 +55,8 @@ class Scored:
     parts_open: dict[str, int] = field(default_factory=dict)
     # (ours, theirs) -> items, ours being full, not full or undecided (left to a person)
     labels: dict[tuple[str, str], int] = field(default_factory=dict)
+    # the requirement set's labels, which say what each one means (checks/requirements.py)
+    label_rules: tuple[requirements.LabelRule, ...] = ()
     false_accusations: list[str] = field(default_factory=list)
     missed: list[str] = field(default_factory=list)
     disagreements: list[Disagreement] = field(default_factory=list)
@@ -95,7 +98,7 @@ def compare_run(conn: psycopg.Connection, run_id: int, dataset: Dataset) -> Scor
         raise ValueError(f"run {run_id} judged against {run.requirements}, but {dataset.ref} answers "
                          f"{dataset.requirements}")
     scored = Scored(dataset=dataset.ref, run_id=run_id, model=run.model, effort=run.effort, prompt=run.prompt,
-                    requirements=run.requirements)
+                    requirements=run.requirements, label_rules=requirements.load(dataset.requirements).labels)
     for part in dataset.parts:
         scored.parts[part] = [0, 0]
         scored.parts_open[part] = 0
@@ -126,7 +129,7 @@ def compare_run(conn: psycopg.Connection, run_id: int, dataset: Dataset) -> Scor
             scored.set_aside.append(item.key)
             continue
         scored.compared += 1
-        comparison = datasets.compare(item, dataset.parts, judgement.parts, judgement.label)
+        comparison = datasets.compare(item, dataset.parts, judgement.parts, judgement.label, scored.label_rules)
         for part, outcome in comparison.parts.items():
             if outcome == datasets.AGREE:
                 scored.parts[part][0] += 1
@@ -141,7 +144,8 @@ def compare_run(conn: psycopg.Connection, run_id: int, dataset: Dataset) -> Scor
         scored.labels[pair] += 1
         if comparison.false_accusation:
             scored.false_accusations.append(item.key)
-        if judgement.label == "full" and item.expected_label != "full":
+        ours_clears = requirements.meaning_of(scored.label_rules, judgement.label) == "clears"
+        if ours_clears and requirements.meaning_of(scored.label_rules, item.expected_label) != "clears":
             scored.missed.append(item.key)
         if comparison.label == datasets.DISAGREE:
             scored.disagreements.append(Disagreement(item.key, judgement.label, item.expected_label, judgement.parts,

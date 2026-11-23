@@ -1,4 +1,4 @@
-"""Reading Bruckner et al.'s files (gold/bruckner.py): their verdicts, their reviewers' answers, the
+"""Reading Bruckner et al.'s files (gold/converters/bruckner.py): their verdicts, their reviewers' answers, the
 CTIS export, and the gold dataset version built from them."""
 
 import csv
@@ -7,7 +7,7 @@ import hashlib
 import pytest
 
 from trialwatch.db.core import Identifier
-from trialwatch.gold import bruckner
+from trialwatch.gold.converters import bruckner
 from trialwatch.gold.datasets import Review
 
 # Valid format but not real trials

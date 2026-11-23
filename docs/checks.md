@@ -58,8 +58,10 @@ flowchart TB
 - **Requirement set.** What a trial must report and how "enough" is decided, as data:
   `src/trialwatch/checks/requirement_sets/eu-ctr-results.json`, read by `checks/requirements.py`. It names the
   document kinds to read, the requirements (a question, or one per registered item such as each primary endpoint,
-  with search hints and a rule type), the parts they count towards and how the parts make a label. The web
-  interface's Requirements page shows every set.
+  with search hints and a rule type), the parts they count towards, and its labels: tried in order, the first
+  whose condition on the parts holds (`when_any`, `when_all`; the last has none), each saying what it means next
+  to a gold label (`accusation`, `clears` or `open`). Gold scoring reads those meanings, so a set with other
+  labels is scored the same way. The web interface's Requirements page shows every set.
 - **System prompt.** `src/trialwatch/checks/prompts/evidence.md`. It names no registry, document type or
   regulation; the trial, its documents and the questions are given per call from data, each fenced in tags. Text
   in a PDF that looks like one of those tags (`<page`, `</document`) has its `<` replaced, so a document can't end
@@ -118,7 +120,7 @@ public pages of their own ([search](search.md), ADR-008).
 
 ## Due-date rules
 
-`src/trialwatch/checks/due_date.py`: Bruckner et al.'s rules for which trials are due and whether results came on
+`src/trialwatch/gold/converters/due_date.py`: Bruckner et al.'s rules for which trials are due and whether results came on
 time, in plain code, no model. `tests/test_due_date.py` checks that they reproduce all 277 of their verdicts from
 their files in `data/bruckner/`.
 
@@ -153,7 +155,7 @@ why. With no trial left, no run is started.
 | `checks/prompts/` | the system prompts and loading them |
 | `llm.py` (shared) | the model call and its cost |
 | `checks/publishing.py` | publication and its gold agreement |
-| `checks/due_date.py` | due-date rules |
+| `gold/converters/due_date.py` | due-date rules (the Bruckner converter uses them) |
 | `db/checks.py` | their SQL |
 
 ## Tables
@@ -162,34 +164,27 @@ why. With no trial left, no run is started.
 erDiagram
     direction LR
     run["checks.run"]
-    question["checks.question"]
-    evidence["checks.evidence"]
+    answer["checks.answer"]
     judgement["checks.judgement"]
     step["checks.step"]
-    publication["checks.publication"]
     trial["core.trial"]
     version["core.document_version"]
     api_call["core.api_call"]
-    run ||--o{ question : "per trial and key"
-    question ||--o{ evidence : "quotes"
+    run ||--o{ answer : "per trial and question"
     run ||--o{ judgement : "per trial"
     run ||--o{ step : "trace"
-    judgement ||--o| publication : "one live"
     trial ||--o{ judgement : "judged"
-    version ||--o{ evidence : "quoted from"
+    version ||--o{ answer : "quoted from"
     run ||--o{ api_call : "billed calls"
 ```
 
 | Table | What it holds |
 |---|---|
 | `checks.run` | one check run: who ran it, model, effort, prompt and requirement set (name, sha256, text as sent), params (method, top_k, …), status (running, succeeded, failed, stopped) and why it ended early, counts, tokens, cost, job |
-| `checks.question` | what was asked per trial (`participants`, `cancelled`, `endpoint:<registered id>`, …), the registered item it is about, the pages shown, and whether it was asked again with every page |
-| `checks.evidence` | what the model quoted: found (true, false, NULL = don't know), kind (numeric_result, narrative_only, chart_only, redacted, not_analysed, other), the quote, document version, file sha256 and page, and whether it is verified |
-| `checks.judgement` | the rules' verdict per trial per run: label (full, not full, undecided; NULL only with an error), parts by name (NULL = undecided), the rule and evidence behind each, the inputs read (trial record, document versions), the models that served it, tokens, cost |
+| `checks.answer` | each question a run asked about a trial (`participants`, `cancelled`, `endpoint:<registered id>`, …): the registered item it is about, the pages shown, whether it was asked again with every page; and the model's answer, if it gave one (`evidence_id`, which the rules trace names): found (true, false, NULL = don't know), kind (numeric_result, narrative_only, chart_only, redacted, not_analysed, other), the quote, document version, file sha256 and page, and whether the quote is really on that page |
+| `checks.judgement` | the rules' verdict per trial per run: label (full, not full, undecided; NULL only with an error), parts by name (NULL = undecided), the rule and evidence behind each, the inputs read (trial record, document versions), the models that served it, tokens, cost; its `agreement` with gold labels, recorded as its run finished; and its withdrawal by staff (at, by, the reason shown to all; audited) |
 | `checks.step` | the trace of one trial in one run: questions, pages, retrieval, call, widening, verification, rules, error, each with its data |
-| `checks.publication` | every judgement, published by its run (audited): published by and at, withdrawn by and at with the note shown to all, confidence (gold agreement of its kind, once measured) and basis. One live publication per judgement; only a finished judgement without an error (a trigger). |
-| `checks.judgement_current` (view) | the newest successful judgement per trial and requirement set from a run that has ended, and whether it is outdated |
-| `checks.judgement_published` (view) | what the public sees per trial: the newest published judgement, withdrawn or not |
+| `checks.judgement_current` (view) | the judgement each trial shows, to staff and the public alike: the newest successful one per requirement set from a run that has ended (public from then: `published_at`), whether it is outdated, its agreement and its withdrawal |
 
 ## Claude API
 

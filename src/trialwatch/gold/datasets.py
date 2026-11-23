@@ -11,7 +11,7 @@ Every dataset version is a folder data/gold/<name>/<version>/ with two files:
 A released version never changes: data/gold/versions.lock holds the sha256 of both files of every
 version, and a test fails when a file no longer matches. A corrected or larger dataset is a new
 version. Each source of gold labels has a converter that builds a version from its own files
-(gold/bruckner.py for Bruckner et al.); everything else here works on any dataset.
+(gold/converters/, e.g. bruckner.py for Bruckner et al.); everything else here works on any dataset.
 """
 
 import hashlib
@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from trialwatch import config
+from trialwatch.checks.requirements import LabelRule, meaning_of
 from trialwatch.db.core import Identifier, normalised
 
 DATASET_FILE = "dataset.json"
@@ -247,7 +248,8 @@ def reviewers_disagreed(item: Item) -> bool:
 
 AGREE = "agree"
 DISAGREE = "disagree"
-# Ours is unsettled (None, or "undecided": left to a person): not counted either way
+# Ours is unsettled (None, or a label the requirement set says is open, e.g. "undecided": left to a
+# person): not counted either way
 OURS_OPEN = "ours open"
 # The dataset has no answer: nothing to compare with
 NO_GOLD = "no gold"
@@ -257,24 +259,29 @@ NO_GOLD = "no gold"
 class Comparison:
     parts: dict[str, str]
     label: str
-    # Ours "not full" where the gold label is "full": the costliest error (ADR-001)
+    # Ours an accusation (e.g. "not full") where the gold label clears the trial ("full"): the costliest
+    # error (ADR-001)
     false_accusation: bool
 
 
-def compare(item: Item, parts: list[str], our_parts: dict, our_label: str | None) -> Comparison:
-    """Our judgement (one check's parts and label) next to the item's expected answers."""
+def compare(item: Item, parts: list[str], our_parts: dict, our_label: str | None,
+            labels: tuple[LabelRule, ...]) -> Comparison:
+    """Our judgement (one check's parts and label) next to the item's expected answers. `labels` are the
+    requirement set's (checks/requirements.py): they say which label is an accusation, which clears a
+    trial and which leaves it open."""
     outcome_by_part = {}
     for part in parts:
-        outcome_by_part[part] = _outcome(item.expected_parts.get(part), our_parts.get(part), None)
-    label_outcome = _outcome(item.expected_label, our_label, "undecided")
-    false_accusation = our_label == "not full" and item.expected_label == "full"
+        outcome_by_part[part] = _outcome(item.expected_parts.get(part), our_parts.get(part), False)
+    ours_means = meaning_of(labels, our_label)
+    label_outcome = _outcome(item.expected_label, our_label, ours_means == "open")
+    false_accusation = ours_means == "accusation" and meaning_of(labels, item.expected_label) == "clears"
     return Comparison(outcome_by_part, label_outcome, false_accusation)
 
 
-def _outcome(expected: object, ours: object, open_value: str | None) -> str:
+def _outcome(expected: object, ours: object, ours_open: bool) -> str:
     if expected is None:
         return NO_GOLD
-    if ours is None or ours == open_value:
+    if ours is None or ours_open:
         return OURS_OPEN
     if ours == expected:
         return AGREE

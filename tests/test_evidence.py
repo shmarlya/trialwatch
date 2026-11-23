@@ -225,7 +225,7 @@ def test_judgement_rests_on_verified_evidence(conn):
     kind = checks_db.judgement_kind(conn, summary.run_id, trial)
     assert (kind.label, kind.quotes_verified, kind.widened, kind.unanswered) == ("not full", True, False, False)
     # each question with the registered item it is about
-    questions = conn.execute("SELECT key, item_text FROM checks.question WHERE run_id = %s ORDER BY key",
+    questions = conn.execute("SELECT key, item_text FROM checks.answer WHERE run_id = %s ORDER BY key",
                              (summary.run_id,)).fetchall()
     assert questions == [("cancelled", None), ("endpoint:11", "Total gastrointestinal transit time"),
                          ("endpoint:12", "Colorectal transit time"), ("participants", None)]
@@ -265,7 +265,7 @@ def test_not_found_in_retrieved_pages_is_asked_again_with_every_page(conn):
     assert "Far appendix marker" not in client.requests[0]["messages"][0]["content"]  # retrieval left it out
     assert "Far appendix marker" in client.requests[1]["messages"][0]["content"]  # widening sent all
     assert summary.widened == 2
-    widened = conn.execute("SELECT key FROM checks.question WHERE run_id = %s AND widened ORDER BY key",
+    widened = conn.execute("SELECT key FROM checks.answer WHERE run_id = %s AND widened ORDER BY key",
                            (summary.run_id,)).fetchall()
     assert widened == [("cancelled",), ("endpoint:12",)]
 
@@ -367,10 +367,23 @@ def test_a_requirement_set_the_rules_would_misread_is_refused(tmp_path, monkeypa
         requirements.load("any-outcome")
     misspelt = json.loads(SET.text)
     misspelt["name"] = "misspelt"
-    misspelt["label"]["full_when"]["true"] = ["participants", "outcome"]
+    misspelt["labels"][1]["when_all"]["true"] = ["participants", "outcome"]
     write_set(tmp_path, "misspelt", misspelt)
-    with pytest.raises(ValueError, match="label.full_when names an unknown part 'outcome'"):
+    with pytest.raises(ValueError, match="label 'full' names an unknown part 'outcome'"):
         requirements.load("misspelt")
+    # labels are data: each means something to gold scoring, and the last one is the default
+    meaningless = json.loads(SET.text)
+    meaningless["name"] = "meaningless"
+    meaningless["labels"][0]["means"] = "guilty"
+    write_set(tmp_path, "meaningless", meaningless)
+    with pytest.raises(ValueError, match="label 'not full' means 'guilty'"):
+        requirements.load("meaningless")
+    no_default = json.loads(SET.text)
+    no_default["name"] = "no-default"
+    no_default["labels"] = no_default["labels"][:2]
+    write_set(tmp_path, "no-default", no_default)
+    with pytest.raises(ValueError, match="the last label, 'full', must have no condition"):
+        requirements.load("no-default")
     unknown_count = json.loads(SET.text)
     unknown_count["name"] = "unknown-count"
     unknown_count["inferences"][0]["count_requirement"] = "enrolment"
@@ -705,7 +718,7 @@ def test_dont_know_is_asked_again_with_every_page_then_left_to_a_person(conn):
     # even after the whole document, "don't know" is never "not reported": a person decides
     assert label == "undecided"
     assert trace["endpoint:12"]["rule"] == "the model doesn't know"
-    found, note = conn.execute("SELECT found, note FROM checks.evidence WHERE run_id = %s AND key = 'endpoint:12'",
+    found, note = conn.execute("SELECT found, note FROM checks.answer WHERE run_id = %s AND key = 'endpoint:12'",
                                (summary.run_id,)).fetchone()
     assert (found, note) == (None, "two tables disagree")
 

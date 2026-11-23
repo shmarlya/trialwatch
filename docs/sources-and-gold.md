@@ -348,7 +348,7 @@ reviewer's answers and comments, and the source's own details. An item without a
 stays searchable but is not compared. Bruckner et al. is the first ([their data](../data/bruckner/README.md)):
 their final verdicts and each reviewer's answers per part, in `bruckner/2026-03-16`.
 
-- **Build** with a converter per source: `uv run trialwatch gold build bruckner` (`gold/bruckner.py`). Run it on
+- **Build** with a converter per source: `uv run trialwatch gold build bruckner` (`gold/converters/bruckner.py`; each converter is registered in `gold/converters/__init__.py`). Run it on
   this machine, not in the container: the app container sees `data/` read-only and reads the datasets from
   `TRIALWATCH_GOLD_DIR`.
 - **Versions are locked.** `data/gold/versions.lock` holds the sha256 of both files of every released version. A
@@ -408,7 +408,7 @@ for any source.
 | Where | What |
 |---|---|
 | `gold/datasets.py` | reading and searching gold datasets, the version lock |
-| `gold/bruckner.py` | the Bruckner converter: their CSVs → `data/gold/` |
+| `gold/converters/` | the converters, one per benchmark (`bruckner.py`: their CSVs → `data/gold/`) |
 | `gold/compare.py` | scoring a run against a dataset |
 | `gold/evaluate.py` | `gold eval`: the whole workflow on a gold dataset |
 | `sources/snapshot.py` | recording and replaying the frozen snapshot |

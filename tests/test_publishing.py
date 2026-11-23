@@ -53,8 +53,9 @@ def a_new_run(conn, judged):
 
 
 def publication(conn, run_id, trial_id):
-    return conn.execute("SELECT confidence, basis FROM checks.publication WHERE run_id = %s AND trial_id = %s",
-                        (run_id, trial_id)).fetchone()
+    """The agreement recorded on the judgement as its run published it: (confidence, basis)."""
+    return conn.execute("SELECT (agreement->>'confidence')::real, agreement->>'basis' FROM checks.judgement"
+                        " WHERE run_id = %s AND trial_id = %s", (run_id, trial_id)).fetchone()
 
 
 def test_a_run_publishes_every_judgement_with_its_kinds_gold_agreement(app_conn, gold):

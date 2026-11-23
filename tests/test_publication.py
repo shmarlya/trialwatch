@@ -2,11 +2,10 @@
 lists the trials with a published judgement, each opening to how its evidence was collected
 (with the run, prompts, requirement sets and quoted files); every other page is for staff. A run publishes
 every judgement it made; staff may only withdraw one with a reason, and it stays public, marked;
-the queries keep the published-only views a public page would use."""
+the queries keep the view a public page uses."""
 
 from datetime import datetime, timedelta, timezone
 
-import psycopg
 import pytest
 from conftest import signed_in_client
 from fastapi.testclient import TestClient
@@ -22,17 +21,16 @@ from trialwatch.web import app as web
 QUOTE = "Overall 24 participants were randomised and analysed."
 
 
-def judged(conn, trial_id, label="not full", error=None, publish=True):
-    """A finished run that judged the trial, quoting its results summary, and published what it judged
-    as a run does (unless `publish` is False); returns the run id."""
+def judged(conn, trial_id, label="not full", error=None, finished=True):
+    """A run that judged the trial, quoting its results summary: finished, which makes what it judged
+    public with its agreement, or still going (`finished` False); returns the run id."""
     run_id = start_a_run(conn)
     sha = conn.execute(
         "SELECT d.file_sha256 FROM core.trial_document l JOIN core.document_current d ON d.id = l.document_id "
         "WHERE l.trial_id = %s LIMIT 1", (trial_id,)).fetchone()[0]
-    checks_db.save_question(conn, run_id, trial_id, "participants", "How many took part?", [], False)
-    checks_db.save_evidence(conn, run_id, trial_id, "participants", found=True, kind="numeric_result", quote=QUOTE,
-                            document_version_id=None, file_sha256=sha, page_no=2, note="a secret model note",
-                            verified=True)
+    answer = checks_db.Answer(found=True, kind="numeric_result", quote=QUOTE, document_version_id=None, file_sha256=sha,
+                              page_no=2, note="a secret model note", verified=True)
+    checks_db.save_answer(conn, run_id, trial_id, "participants", "How many took part?", [], False, answer)
     if error is not None:
         label = None
     checks_db.save_judgement(conn, run_id, trial_id, parts={"participants": True}, label=label,
@@ -47,11 +45,16 @@ def judged(conn, trial_id, label="not full", error=None, publish=True):
         {"name": "rules", "at": now, "data": {"requirements": SET.name, "label": label, "parts": {"participants": True},
                                               "trace": {"participants": {"value": True, "rule": "a verified count"}}}},
     ])
+    if finished:
+        finish(conn, run_id)
+    return run_id
+
+
+def finish(conn, run_id):
+    """The run ends: its judgements are public now, each with how its kind agreed with gold labels."""
     checks_db.finish_run(conn, run_id, status="succeeded", error=None, trials=1, errors=0, input_tokens=123456,
                          output_tokens=7)
-    if publish:
-        publishing.publish_run(conn, run_id)
-    return run_id
+    publishing.publish_run(conn, run_id)
 
 
 @pytest.fixture
@@ -63,10 +66,9 @@ def test_a_run_publishes_what_it_judged_and_a_withdrawn_one_stays_public_marked(
     public = TestClient(web.app)
     assert "No published results yet." in public.get("/").text
     run_id = judged(app_conn, trial)
-    # nobody published it by hand: the run did, as TrialWatch
-    by = app_conn.execute("SELECT a.name FROM checks.publication p JOIN core.actor a ON a.id = p.published_by "
-                          "WHERE p.run_id = %s", (run_id,)).fetchone()
-    assert by == ("trialwatch",)
+    # nobody published it by hand: its run finished, and recorded how judgements of its kind agreed with gold
+    basis = app_conn.execute("SELECT agreement->>'basis' FROM checks.judgement WHERE run_id = %s", (run_id,)).fetchone()
+    assert "gold items agreed" in basis[0]
     home = public.get("/").text
     assert CT in home and '<span class="badge not-full">not full</span>' in home and "So far" not in home
     assert f'href="/trials/{trial}?run={run_id}"' in home
@@ -103,8 +105,8 @@ def test_the_public_home_page_filters_the_published_trials(app_conn, trial):
     unpublished = seed(app_conn, ct_number=unpublished_ct)
     judged(app_conn, trial, label="full")
     judged(app_conn, other, label="not full")
-    # as a run still going has, or one stopped before it could publish
-    judged(app_conn, unpublished, label="full", publish=False)
+    # as a run still going has
+    judged(app_conn, unpublished, label="full", finished=False)
     public = TestClient(web.app)
 
     def shown(query=""):
@@ -134,9 +136,10 @@ def test_the_public_home_page_filters_the_published_trials(app_conn, trial):
 
 def test_a_judgement_with_an_error_is_not_published(app_conn, trial):
     run_id = judged(app_conn, trial, error="the model timed out")
-    assert app_conn.execute("SELECT count(*) FROM checks.publication WHERE run_id = %s", (run_id,)).fetchone() == (0,)
-    with pytest.raises(psycopg.errors.RaiseException):
-        checks_db.publish_judgement(app_conn, run_id, trial)
+    assert overview.trial_judgements(app_conn, trial)[0].published is False
+    assert not checks_db.set_agreement(app_conn, run_id, trial, None, "nothing to measure")
+    assert not checks_db.withdraw_judgement(app_conn, run_id, trial, "nothing to withdraw")
+    assert TestClient(web.app).get(f"/trials/{trial}").status_code == 404
 
 
 def test_nobody_publishes_by_hand_and_withdrawing_needs_staff(app_conn, trial):
@@ -147,24 +150,26 @@ def test_nobody_publishes_by_hand_and_withdrawing_needs_staff(app_conn, trial):
     assert moderator.post(f"/trials/{trial}/judgements/{run_id}/publish").status_code in (404, 405)
 
 
-def test_the_public_sees_the_newest_publication_withdrawn_or_not_and_each_change_is_audited(app_conn, trial):
+def test_the_public_sees_the_newest_judgement_withdrawn_or_not_and_a_withdrawal_is_audited(app_conn, trial):
     judged(app_conn, trial, label="full")
     second = judged(app_conn, trial, label="not full")
     assert overview.trial_row(app_conn, trial, SET.name, published_only=True).label == "not full"
-    assert not checks_db.publish_judgement(app_conn, second, trial)
     core.act_as(app_conn, "pat@test.example")
-    assert checks_db.withdraw_publication(app_conn, second, trial, "wrong page")
+    assert checks_db.withdraw_judgement(app_conn, second, trial, "wrong page")
+    assert not checks_db.withdraw_judgement(app_conn, second, trial, "again")
     # the newest check is still the one shown, marked; the older one doesn't come back in its place
     assert overview.trial_row(app_conn, trial, SET.name, published_only=True).label == "not full"
     shown = overview.published_trial_rows(app_conn, SET.name)[0]
     assert (shown.run_id, shown.withdrawn_note) == (second, "wrong page") and shown.withdrawn_at is not None
-    actions = app_conn.execute(
-        "SELECT action FROM core.audit_log WHERE table_name = 'checks.publication' ORDER BY id").fetchall()
-    assert [row[0] for row in actions] == ["insert", "insert", "update"]
+    # the withdrawal is audited, with who did it; a judgement's other columns are written once, with its run
+    audited = app_conn.execute(
+        "SELECT l.action, a.name FROM core.audit_log l JOIN core.actor a ON a.id = l.actor_id"
+        " WHERE l.table_name = 'checks.judgement' ORDER BY l.id").fetchall()
+    assert audited == [("update", "pat@test.example")]
 
 
 def test_the_public_opens_only_published_results_and_staff_pages_need_sign_in(app_conn, trial):
-    run_id = judged(app_conn, trial, publish=False)
+    run_id = judged(app_conn, trial, finished=False)
     sha = app_conn.execute(
         "SELECT d.file_sha256 FROM core.trial_document l JOIN core.document_current d ON d.id = l.document_id "
         "WHERE l.trial_id = %s LIMIT 1", (trial,)).fetchone()[0].hex()
@@ -186,7 +191,7 @@ def test_the_public_opens_only_published_results_and_staff_pages_need_sign_in(ap
     assert "Checked trials" in home
     for link in ("Trials</a>", "Sponsors</a>", "Prompts</a>", "Requirements</a>", "Sources</a>", "Gold</a>"):
         assert link not in home, link
-    publishing.publish_run(app_conn, run_id)
+    finish(app_conn, run_id)
     page = public.get(f"/trials/{trial}").text
     assert "Acme Pharma" in page and f"/sponsors/{sponsor}" not in page
     assert public.get(f"/runs/{run_id}").status_code == 200

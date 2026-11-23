@@ -21,8 +21,8 @@ from dataclasses import dataclass
 
 import psycopg
 
+from trialwatch.checks import requirements as requirement_sets
 from trialwatch.db import checks as checks_db
-from trialwatch.db import core
 from trialwatch.db.checks import JudgementKind
 from trialwatch.gold import compare, datasets
 
@@ -89,6 +89,8 @@ def calibrate(conn: psycopg.Connection, requirements: str, before_run: int | Non
     `before_run`, only by judgements of runs started before that one."""
     tallies: dict[Kind, Tally] = {}
     used = []
+    # what each label means next to a gold label (an accusation, clearing a trial, left open)
+    label_rules = requirement_sets.load(requirements).labels
     for dataset in _newest_versions(requirements):
         used.append(dataset.ref)
         read_day = compare.evidence_day(dataset)
@@ -116,7 +118,7 @@ def calibrate(conn: psycopg.Connection, requirements: str, before_run: int | Non
                 posted = judgement.latest_published_at
                 if read_day is not None and posted is not None and posted.date() >= read_day:
                     continue
-                outcome = datasets.compare(item, dataset.parts, {}, judgement.label).label
+                outcome = datasets.compare(item, dataset.parts, {}, judgement.label, label_rules).label
                 if outcome not in (datasets.AGREE, datasets.DISAGREE):
                     continue
                 tally = tallies.setdefault(kind_of(judgement), Tally())
@@ -157,8 +159,8 @@ def basis_text(agreement: Agreement, calibration: Calibration) -> str:
 
 
 def publish_run(conn: psycopg.Connection, run_id: int) -> list[int]:
-    """Publish, as TrialWatch itself (not the person who started the run), every judgement of the run
-    without an error, each with how its kind compared with gold labels. Returns the trials published."""
+    """Record on every judgement of the finished run without an error (each public now) how its kind
+    compared with gold labels. Returns the trials published."""
     judgements = checks_db.judgement_kinds_of_run(conn, run_id)
     if not judgements:
         return []
@@ -166,9 +168,8 @@ def publish_run(conn: psycopg.Connection, run_id: int) -> list[int]:
     published = []
     for judgement in judgements:
         agreement = measure(judgement, calibration)
-        with core.acting_as_system(conn):
-            done = checks_db.publish_judgement(conn, run_id, judgement.trial_id, confidence=agreement.confidence,
-                                               basis=basis_text(agreement, calibration))
+        done = checks_db.set_agreement(conn, run_id, judgement.trial_id, agreement.confidence,
+                                       basis_text(agreement, calibration))
         if done:
             published.append(judgement.trial_id)
     return published

@@ -39,8 +39,9 @@
   "inferences": [
     {"type": "nobody_enrolled_contradicted_by_count", "count_requirement": "participants", "part": "cancelled"}
   ],
-  "label": {
-    "not_full_when": {"false": ["participants", "outcomes"], "true": ["cancelled"]},
-    "full_when": {"true": ["participants", "outcomes"], "false": ["cancelled"]}
-  }
+  "labels": [
+    {"name": "not full", "means": "accusation", "when_any": {"false": ["participants", "outcomes"], "true": ["cancelled"]}},
+    {"name": "full", "means": "clears", "when_all": {"true": ["participants", "outcomes"], "false": ["cancelled"]}},
+    {"name": "undecided", "means": "open"}
+  ]
 }

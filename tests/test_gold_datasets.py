@@ -12,8 +12,13 @@ from test_evidence import CT, GOOD, PROMPT, FakeClient, seed, start_a_run
 from trialwatch.checks import evidence as ev
 from trialwatch.db import checks as checks_db
 from trialwatch.db.core import Identifier
-from trialwatch.gold import bruckner, datasets
+from trialwatch.checks import requirements
+from trialwatch.gold import datasets
+from trialwatch.gold.converters import bruckner
 from trialwatch.web import app as web
+
+# what each label means next to a gold label: the requirement set's labels
+LABELS = requirements.load("eu-ctr-results").labels
 
 ROOT = Path(__file__).parent.parent
 BRUCKNER = ROOT / "data" / "bruckner"
@@ -97,12 +102,12 @@ def test_comparison_counts_a_false_accusation_and_leaves_open_answers_out():
     parts = ["participants", "outcomes", "cancelled"]
     gold = an_item(parts={"participants": True, "outcomes": True, "cancelled": None})
     ours = {"participants": True, "outcomes": False, "cancelled": False}
-    result = datasets.compare(gold, parts, ours, "not full")
+    result = datasets.compare(gold, parts, ours, "not full", LABELS)
     assert result.parts == {"participants": "agree", "outcomes": "disagree", "cancelled": "no gold"}
     assert (result.label, result.false_accusation) == ("disagree", True)
-    undecided = datasets.compare(gold, parts, {"participants": None}, "undecided")
+    undecided = datasets.compare(gold, parts, {"participants": None}, "undecided", LABELS)
     assert (undecided.parts["participants"], undecided.label) == ("ours open", "ours open")
-    assert datasets.compare(an_item(label=None), parts, ours, "full").label == "no gold"
+    assert datasets.compare(an_item(label=None), parts, ours, "full", LABELS).label == "no gold"
 
 
 def test_the_gold_page_puts_our_latest_judgement_next_to_the_item(conn, tmp_path):

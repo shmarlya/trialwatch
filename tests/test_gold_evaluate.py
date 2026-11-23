@@ -15,6 +15,7 @@ from test_sources_ctis import FakeCtis
 from typer.testing import CliRunner
 
 from trialwatch import cli
+from trialwatch.checks import requirements
 from trialwatch.checks import evidence as ev
 from trialwatch.db import core
 from trialwatch.gold import compare, datasets, evaluate
@@ -52,7 +53,8 @@ def test_a_sample_keeps_only_its_items_and_names_unknown_keys():
 
 
 def scored_with(labels, not_in_run=0, errors=0, false_accusations=0):
-    scored = compare.Scored(dataset="test/v1", run_id=1, model="m", effort="low", prompt="p", requirements="r")
+    scored = compare.Scored(dataset="test/v1", run_id=1, model="m", effort="low", prompt="p", requirements="r",
+                            label_rules=requirements.load("eu-ctr-results").labels)
     scored.labels = labels
     scored.compared = sum(labels.values())
     scored.labelled = scored.compared + not_in_run + errors

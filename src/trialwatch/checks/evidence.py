@@ -476,34 +476,34 @@ def _save(conn: psycopg.Connection, run_id: int, trial_id: int, questions: list[
             else:
                 # the first call showed the model every page any question needed
                 sent_pages = first
-            checks_db.save_question(conn, run_id, trial_id, question.key, question.item_text,
-                                    tracing.page_refs(sent_pages), widened)
-            item = evidence.get(question.key)
-            if item is None:
-                continue
-            # empty text and a missing page are stored as NULL
-            quote = None
-            if item.quote:
-                quote = item.quote
-            note = None
-            if item.note:
-                note = item.note
-            version_id = None
-            file_sha256 = None
-            page_no = None
-            if item.page:
-                version_id = item.page.document_version_id
-                file_sha256 = item.page.file
-                page_no = item.page.page_no
-            evidence_id = checks_db.save_evidence(
-                conn, run_id, trial_id, question.key, found=item.found, kind=item.kind, quote=quote,
-                document_version_id=version_id, file_sha256=file_sha256, page_no=page_no, note=note,
-                verified=item.verified,
-            )
-            if question.key in rules_trace:
+            answer = _stored_answer(evidence.get(question.key))
+            evidence_id = checks_db.save_answer(conn, run_id, trial_id, question.key, question.item_text,
+                                                tracing.page_refs(sent_pages), widened, answer)
+            if evidence_id is not None and question.key in rules_trace:
                 rules_trace[question.key]["evidence_id"] = evidence_id
         _save_judgement(conn, run_id, trial_id, judged, rules_trace, result, started)
         checks_db.save_steps(conn, run_id, trial_id, trace.steps)
+
+
+def _stored_answer(item: Evidence | None) -> checks_db.Answer | None:
+    """The model's answer as it is stored: empty text and a missing page as NULL; None for no answer."""
+    if item is None:
+        return None
+    quote = None
+    if item.quote:
+        quote = item.quote
+    note = None
+    if item.note:
+        note = item.note
+    version_id = None
+    file_sha256 = None
+    page_no = None
+    if item.page:
+        version_id = item.page.document_version_id
+        file_sha256 = item.page.file
+        page_no = item.page.page_no
+    return checks_db.Answer(found=item.found, kind=item.kind, quote=quote, document_version_id=version_id,
+                            file_sha256=file_sha256, page_no=page_no, note=note, verified=item.verified)
 
 
 def _finish_failed(conn: psycopg.Connection, run_id: int, trial_id: int, result: TrialResult, trace: tracing.Trace,

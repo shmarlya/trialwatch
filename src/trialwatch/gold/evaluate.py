@@ -21,6 +21,7 @@ from pathlib import Path
 
 import psycopg
 
+from trialwatch.checks.requirements import meaning_of
 from trialwatch.db import checks as checks_db
 from trialwatch.gold import compare
 from trialwatch.gold.datasets import Dataset, Item
@@ -157,7 +158,8 @@ def measures(scored: compare.Scored) -> Measures:
     decided = 0
     agreed = 0
     for (ours, theirs), items in scored.labels.items():
-        if ours in ("full", "not full"):
+        # decided: the label is an accusation or clears the trial, not left open
+        if meaning_of(scored.label_rules, ours) in ("accusation", "clears"):
             decided += items
             if ours == theirs:
                 agreed += items

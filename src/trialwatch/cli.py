@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 from importlib.metadata import version
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -28,7 +29,7 @@ from trialwatch.db import geo as geo_db
 from trialwatch.db import search as search_db
 from trialwatch.config import load_env_file
 from trialwatch.geo import load as geo_loading
-from trialwatch.gold import bruckner, datasets
+from trialwatch.gold import converters, datasets
 from trialwatch.search import annotate as search_annotating
 from trialwatch.search import evaluate as search_evaluating
 from trialwatch.search import index as search_index
@@ -57,8 +58,6 @@ app.add_typer(vocab_app, name="vocab")
 search_app = typer.Typer(no_args_is_help=True, help="Patient search (ADR-008): the index of recruiting trials, and searching it.")
 app.add_typer(search_app, name="search")
 
-# Converters that build a gold dataset version from a source's own files (ADR-003)
-GOLD_CONVERTERS = {"bruckner": bruckner.build}
 
 
 @app.callback()
@@ -740,9 +739,9 @@ def gold_build(
     ] = Path("data/bruckner"),
 ) -> None:
     """Build a gold dataset version under data/gold/ and lock it in data/gold/versions.lock."""
-    if converter not in GOLD_CONVERTERS:
-        raise typer.BadParameter(f"choose one of: {', '.join(sorted(GOLD_CONVERTERS))}", param_hint="CONVERTER")
-    build_version = GOLD_CONVERTERS[converter]
+    if converter not in converters.CONVERTERS:
+        raise typer.BadParameter(f"choose one of: {', '.join(sorted(converters.CONVERTERS))}", param_hint="CONVERTER")
+    build_version = converters.CONVERTERS[converter]
     meta, items = build_version(data_dir)
     try:
         ref, written = datasets.write_version(datasets.gold_dir(), meta, items)
@@ -815,13 +814,46 @@ def gold_sample(
         typer.echo(item.key)
 
 
-def _labelled_ct_numbers(chosen: datasets.Dataset) -> list[str]:
-    ct_numbers = []
+@dataclass(frozen=True)
+class GoldKeys:
+    """Where a gold dataset's labelled trials are read: a registered source, and their keys there."""
+
+    source: core_db.RegisteredSource
+    # the identifier scheme of the source's keys (e.g. eu-ct)
+    scheme: str
+    keys: list[str]
+
+
+def _gold_keys(conn: psycopg.Connection, chosen: datasets.Dataset) -> GoldKeys:
+    """The source whose keys are of the identifier scheme most of the dataset's labelled items name (EU
+    CT numbers: CTIS), and those items' keys; BadParameter when no registered source holds them."""
+    best = None
+    for source in core_db.registered_sources(conn):
+        try:
+            scheme = registry.adapter_class(source.adapter).key_scheme
+        except ValueError:
+            continue
+        if scheme is None:
+            continue
+        keys = _labelled_keys(chosen, scheme)
+        if keys and (best is None or len(keys) > len(best.keys)):
+            best = GoldKeys(source, scheme, keys)
+    if best is None:
+        raise typer.BadParameter(f"no registered source holds the labelled trials of {chosen.ref}", param_hint="--dataset")
+    return best
+
+
+def _labelled_keys(chosen: datasets.Dataset, scheme: str) -> list[str]:
+    """Each labelled item's identifier of this scheme, once."""
+    keys = []
     for item in chosen.items:
-        ct_number = gold_evaluate.ct_number_of(item)
-        if item.expected_label is not None and ct_number is not None and ct_number not in ct_numbers:
-            ct_numbers.append(ct_number)
-    return ct_numbers
+        if item.expected_label is None:
+            continue
+        for identifier in item.identifiers:
+            if identifier.scheme == scheme and identifier.value not in keys:
+                keys.append(identifier.value)
+                break
+    return keys
 
 
 @gold_app.command("snapshot")
@@ -838,16 +870,16 @@ def gold_snapshot(
         chosen = datasets.load(dataset)
     except FileNotFoundError as exc:
         raise typer.BadParameter(str(exc), param_hint="--dataset") from exc
-    ct_numbers = _labelled_ct_numbers(chosen)
     import tempfile
 
     with tempfile.TemporaryDirectory() as folder:
         with db.connect_system() as conn:
-            source = _registered(conn, "ctis")
-            with registry.open_adapter(source.adapter) as live:
-                description = f"CTIS's answers for the labelled trials of {chosen.ref}"
+            gold = _gold_keys(conn, chosen)
+            with registry.open_adapter(gold.source.adapter) as live:
+                description = f"{gold.source.name}'s answers for the labelled trials of {chosen.ref}"
                 recording = snapshot.Recording(live, Path(folder), description, dataset=chosen.ref)
-                result = ingest.transfer(conn, source, recording, ct_numbers, why="gold snapshot", progress=typer.echo)
+                result = ingest.transfer(conn, gold.source, recording, gold.keys, why="gold snapshot",
+                                         progress=typer.echo)
             index = recording.finish()
         packed = snapshot.pack(Path(folder), out)
     typer.echo(result.summary())
@@ -894,12 +926,13 @@ def gold_eval(
     requirement_set = requirement_sets.load(settings.requirements)
     if requirement_set.name != chosen.requirements:
         raise typer.BadParameter(f"{config} checks {requirement_set.name}, but {chosen.ref} answers {chosen.requirements}")
-    ct_numbers = _labelled_ct_numbers(chosen)
-    typer.echo(f"{chosen.ref}: {len(ct_numbers)} labelled trials · {settings.summary()}")
+    with db.connect_system() as conn:
+        gold = _gold_keys(conn, chosen)
+    typer.echo(f"{chosen.ref}: {len(gold.keys)} labelled trials · {settings.summary()}")
     import tempfile
 
     with tempfile.TemporaryDirectory() as folder:
-        evidence_from = "live from CTIS"
+        evidence_from = f"live from {gold.source.name}"
         if frozen is not None:
             locked = snapshot.read_lock(lock)
             if locked.dataset != chosen.ref:
@@ -911,26 +944,26 @@ def gold_eval(
             evidence_from = f"frozen snapshot {frozen.name} (sha256 {locked.sha256[:12]}…, made {locked.made_at})"
         typer.echo(f"evidence: {evidence_from}")
         with db.connect_system() as conn:
-            source = _registered(conn, "ctis")
+            source = gold.source
             if frozen is not None:
                 # the source's adapter as always, answered by the snapshot: everything after the network runs as usual
                 replay = snapshot.Replay(registry.adapter_class(source.adapter)(), Path(folder))
-                transferred = ingest.transfer(conn, source, replay, ct_numbers, why="gold eval", progress=typer.echo)
+                transferred = ingest.transfer(conn, source, replay, gold.keys, why="gold eval", progress=typer.echo)
             else:
                 with registry.open_adapter(source.adapter) as adapter:
-                    transferred = ingest.transfer(conn, source, adapter, ct_numbers, why="gold eval",
+                    transferred = ingest.transfer(conn, source, adapter, gold.keys, why="gold eval",
                                                   progress=typer.echo)
     typer.echo(transferred.summary())
     _echo_failures(transferred.failed)
     with db.connect_system() as conn:
-        found = core_db.trials_with_scheme(conn, "eu-ct", ct_numbers)
+        found = core_db.trials_with_scheme(conn, gold.scheme, gold.keys)
         trial_ids = []
-        for ct_number in ct_numbers:
-            if ct_number in found:
-                trial_ids.append(found[ct_number])
+        for key in gold.keys:
+            if key in found:
+                trial_ids.append(found[key])
         # a trial whose evidence did not come in completely is not checked: it counts as missing
         summary = evidence.run(conn, llm.client(), trial_ids, settings, progress=typer.echo, unready=evidence.SKIP)
-        typer.echo(f"{len(trial_ids) - len(summary.skipped)} of {len(ct_numbers)} trials ready for the check")
+        typer.echo(f"{len(trial_ids) - len(summary.skipped)} of {len(gold.keys)} trials ready for the check")
         if summary.run_id is None:
             raise typer.Exit(1)
         scored = gold_compare.compare_run(conn, summary.run_id, chosen)

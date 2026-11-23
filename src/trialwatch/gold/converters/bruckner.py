@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
-from trialwatch.checks import due_date
+from trialwatch.gold.converters import due_date
 from trialwatch.db.core import Identifier
 from trialwatch.gold.datasets import Item, Review
 
@@ -72,6 +72,7 @@ EXPORT_KEY = "Trial number"
 
 
 # --- reading their files ---------------------------------------------------------------------------
+
 
 def _text(value: str | None) -> str | None:
     """A cell's text, or None for R's 'NA' and empty cells."""
@@ -129,8 +130,16 @@ def _read_csv(path: Path, wanted: list[str], what: str) -> list[dict[str, str]]:
 
 
 def _verdict_columns() -> list[str]:
-    columns = ["trial_number", "legal_compliance_assessment", "laypersons_results", "days_to_results", "comments",
-               "regulatory_status", "completion_date", "extended_not_due_yet"]
+    columns = [
+        "trial_number",
+        "legal_compliance_assessment",
+        "laypersons_results",
+        "days_to_results",
+        "comments",
+        "regulatory_status",
+        "completion_date",
+        "extended_not_due_yet",
+    ]
     for column in RESULTS_DOCUMENT:
         columns.append(column)
     return columns
@@ -184,10 +193,16 @@ def verdict_of(row: dict[str, str]) -> Verdict:
     if days is not None:
         days_to_results = int(days)
     return Verdict(
-        ct_number=row["trial_number"].strip(), verdict=verdict, results_document=documents[0],
-        lay_summary=row["laypersons_results"] == "1", days_to_results=days_to_results, comment=_unless_na(row["comments"]),
-        regulatory_status=_text(row["regulatory_status"]), completion_date=_text(row["completion_date"]),
-        extended=row["extended_not_due_yet"] == "1", row=row,
+        ct_number=row["trial_number"].strip(),
+        verdict=verdict,
+        results_document=documents[0],
+        lay_summary=row["laypersons_results"] == "1",
+        days_to_results=days_to_results,
+        comment=_unless_na(row["comments"]),
+        regulatory_status=_text(row["regulatory_status"]),
+        completion_date=_text(row["completion_date"]),
+        extended=row["extended_not_due_yet"] == "1",
+        row=row,
     )
 
 
@@ -233,9 +248,13 @@ def reviewed_document_of(row: dict[str, str]) -> ReviewedDocument:
     if row["agreement_flag"] not in ("TRUE", "FALSE"):
         raise ValueError(f"agreement_flag is {row['agreement_flag']!r}, expected TRUE or FALSE")
     return ReviewedDocument(
-        ct_number=row["trial_number"].strip(), posted_on=posted_on, reviewers_agreed=row["agreement_flag"] == "TRUE",
-        final_comment=_text(row["comments_final"]), cancelled=row["cancelled_final_data"] == "1",
-        reviews=_reviews_of(row), row=row,
+        ct_number=row["trial_number"].strip(),
+        posted_on=posted_on,
+        reviewers_agreed=row["agreement_flag"] == "TRUE",
+        final_comment=_text(row["comments_final"]),
+        cancelled=row["cancelled_final_data"] == "1",
+        reviews=_reviews_of(row),
+        row=row,
     )
 
 
@@ -272,6 +291,7 @@ def consensus(reviews: list[Review], part: str) -> bool | None:
 
 
 # --- the gold dataset (ADR-003) ------------------------------------------------------------------
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -347,16 +367,25 @@ def build(data_dir: Path) -> tuple[dict, list[Item]]:
             details["regulatory framework"] = _text(document.row["regulatory_framework"])
             details["reviewers' final comment"] = document.final_comment
             details["team discussion"] = _text(document.row["for_team_discussion"])
-        items.append(Item(
-            key=verdict.ct_number, identifiers=[Identifier("eu-ct", verdict.ct_number)],
-            title=_one_line(verdict.row.get("Title.of.the.trial")), expected_parts=expected_parts,
-            expected_label=expected_label, reviews=reviews, reviewers_agreed=reviewers_agreed,
-            comment=verdict.comment, evidence=evidence, details=details,
-        ))
+        items.append(
+            Item(
+                key=verdict.ct_number,
+                identifiers=[Identifier("eu-ct", verdict.ct_number)],
+                title=_one_line(verdict.row.get("Title.of.the.trial")),
+                expected_parts=expected_parts,
+                expected_label=expected_label,
+                reviews=reviews,
+                reviewers_agreed=reviewers_agreed,
+                comment=verdict.comment,
+                evidence=evidence,
+                details=details,
+            )
+        )
     return meta(data_dir, len(items)), items
 
 
 # --- our due-date rules against their verdicts (ADR-001) ------------------------------------------
+
 
 @dataclass
 class Disagreement:
@@ -442,7 +471,10 @@ def compare_due(data_dir: Path) -> DueComparison:
             result.check(ct_number, "days to results", days, verdict.days_to_results)
         reported_fully = verdict.results_document == "full" and verdict.lay_summary
         our_verdict = due_date.verdict(
-            cancelled=cancelled, extended=verdict.extended, reported_fully=reported_fully, days_to_results=days,
+            cancelled=cancelled,
+            extended=verdict.extended,
+            reported_fully=reported_fully,
+            days_to_results=days,
             paediatric=paediatric,
         )
         result.check(ct_number, "verdict", our_verdict, verdict.verdict)

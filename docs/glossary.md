@@ -151,11 +151,11 @@ See [checks](checks.md).
 | **Judgement run** | One run of the evidence check (`checks.run`), with its model, effort, prompt and requirement set texts; each run is a version. |
 | **Trace** | Every step of judging one trial in one run (`checks.step`): questions, pages, retrieval, each model call as sent and answered, quote checks, rules. |
 | **Outdated judgement** | A current judgement whose inputs changed after it was made. It still shows, marked outdated. |
-| **Published judgement** | A judgement the public sees (`checks.publication`, ADR-007). Every judgement without an error is one, published by its run with its gold agreement. |
+| **Published judgement** | A judgement the public sees (ADR-007): every judgement without an error, once its run has finished, with its gold agreement (`checks.judgement.agreement`); a withdrawn one stays public, marked. |
 | **Confidence (of a judgement)** | The share of gold items that judgements of the same kind agreed with (same model, prompt text, requirement set, label and evidence signs), measured over at least 20 items. Not the model's own certainty. |
 | **Withdrawal** | A moderator or admin takes back a published judgement with a reason. It stays public, marked withdrawn; this is the only manual step. |
 | **False accusation** | Our check says a trial's results are not fully reported where the reviewers found them full. The costliest error (ADR-001). |
-| **Due-date rules** | Bruckner et al.'s rules for which trials are due and whether results came on time, in plain code (`checks/due_date.py`); they reproduce all 277 of their verdicts. |
+| **Due-date rules** | Bruckner et al.'s rules for which trials are due and whether results came on time, in plain code (`gold/converters/due_date.py`); they reproduce all 277 of their verdicts. |
 
 ## Operations
 

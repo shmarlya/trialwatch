@@ -33,6 +33,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from functools import cache
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote as url_quote
@@ -1212,13 +1213,13 @@ def remove_sponsor(trial_id: int, organisation_id: int,
 def withdraw_judgement(trial_id: int, run_id: int, note: Annotated[str, Form()] = "",
                        user: auth_db.User = Depends(Requires("judgement.withdraw"))) -> Response:
     """Withdraw a published judgement, with a reason (ADR-007): it stays public, marked withdrawn with
-    the reason, and the publication is kept."""
+    the reason (audited)."""
     reason = _or_none(note)
     if reason is None:
         message = "say why it is withdrawn: the public sees the reason"
         return RedirectResponse(f"/trials/{trial_id}?run={run_id}&error={url_quote(message)}", status_code=303)
     with db.connect(actor=user.email) as conn:
-        checks_db.withdraw_publication(conn, run_id, trial_id, reason)
+        checks_db.withdraw_judgement(conn, run_id, trial_id, reason)
     return RedirectResponse(f"/trials/{trial_id}?run={run_id}", status_code=303)
 
 
@@ -1655,6 +1656,13 @@ def _stored_identifiers(item: gold_datasets.Item) -> list[tuple[str, str]]:
     return found
 
 
+@cache
+def label_rules(requirements_name: str) -> tuple[requirement_sets.LabelRule, ...]:
+    """A requirement set's labels, which say what each label means next to a gold label; read once (gold
+    pages compare every item of a dataset)."""
+    return requirement_sets.load(requirements_name).labels
+
+
 def set_aside(dataset: gold_datasets.Dataset, published_at: datetime | None) -> bool:
     """Our judgement read a document posted on or after the day the dataset's reviewers read theirs,
     so ours and theirs may be different documents (as gold/compare.py sets them aside)."""
@@ -1689,7 +1697,8 @@ def _gold_rows(conn, dataset: gold_datasets.Dataset) -> list[GoldRow]:
             judgement = judgement_by_trial[trial_id]
             aside = set_aside(dataset, judgement.latest_published_at)
             if not aside:
-                comparison = gold_datasets.compare(item, dataset.parts, judgement.parts, judgement.label)
+                comparison = gold_datasets.compare(item, dataset.parts, judgement.parts, judgement.label,
+                                                    label_rules(dataset.requirements))
         disagreed = gold_datasets.reviewers_disagreed(item)
         rows.append(GoldRow(item, trial_id, judgement, comparison, disagreed, aside))
     return rows
@@ -1816,7 +1825,8 @@ def gold_item_page(request: Request, name: str, version: str, key: str, error: s
             continue
         comparison = None
         if not set_aside(dataset, judgement.latest_published_at):
-            comparison = gold_datasets.compare(item, dataset.parts, judgement.parts, judgement.label)
+            comparison = gold_datasets.compare(item, dataset.parts, judgement.parts, judgement.label,
+                                                    label_rules(dataset.requirements))
         compared.append((judgement, comparison))
     ct_numbers = []
     for identifier in item.identifiers:
@@ -1841,7 +1851,8 @@ def _gold_items_for(identifiers: list, judgements: list) -> list[tuple]:
         for judgement in judgements:
             if _comparable(judgement, dataset):
                 if not set_aside(dataset, judgement.latest_published_at):
-                    comparison = gold_datasets.compare(item, dataset.parts, judgement.parts, judgement.label)
+                    comparison = gold_datasets.compare(item, dataset.parts, judgement.parts, judgement.label,
+                                                    label_rules(dataset.requirements))
                 break
         found.append((dataset, item, comparison))
     return found

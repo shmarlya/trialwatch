@@ -192,7 +192,7 @@
   <tr><th>Job</th><th>What</th><th>By</th><th>Created</th><th>Status</th><th class="num">Attempts</th><th class="num">Cost</th><th>Last error</th></tr>
   {% for job in jobs %}
   <tr>
-    <td><a href="/jobs/{{ job.id }}">{{ job.id }}</a>{% if job.parent_id %} <span class="small muted">of {{ job.parent_id }}</span>{% endif %}</td>
+    <td><a href="/jobs/{{ job.id }}">{{ job.id }}</a></td>
     <td>{{ steps[job.kind] }}{% if job.params.dry_run %} <span class="muted">(dry run)</span>{% endif %}</td>
     <td class="small">{{ who(job.actor) }}</td>
     <td class="small">{{ when(job.created_at) }}</td>

@@ -51,7 +51,7 @@ uv run ruff check
 - [Checks](docs/checks.md): the evidence check, publication, the trace, the due-date rules.
 - [Sources and gold datasets](docs/sources-and-gold.md): CTIS and other sources, the central model, the gold
   dataset and the gold evaluations in CI.
-- [Operations](docs/operations.md): running it, sign-in and roles, jobs and the weekly refresh, spend, the database,
+- [Operations](docs/operations.md): running it, sign-in and roles, jobs and the refresh, spend, the database,
   tests and CI.
 - [Glossary](docs/glossary.md) · [Code style](STYLE.md) · [Decisions (ADRs)](docs/adr/README.md) ·
   [Benchmark data](data/bruckner/README.md)

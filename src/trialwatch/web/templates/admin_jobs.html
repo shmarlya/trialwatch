@@ -8,7 +8,7 @@
 {%- endmacro %}
 {% block content %}
 <h1>Jobs</h1>
-<p class="sub">Everything the worker (<code>trialwatch worker</code>) runs: steps people start, and the weekly refresh TrialWatch starts by itself. A failed attempt is tried again later (sync and transfer 5 times, a check 3); a job that failed every attempt, or that the monthly spending cap holds, needs attention here.</p>
+<p class="sub">Everything the worker (<code>trialwatch worker</code>) runs: steps people start, and the weekly refresh TrialWatch starts by itself. A failed attempt is tried again later (sync and transfer 5 times, the others 3); a job that failed every attempt, or that the monthly spending cap holds, needs attention here.</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <p class="tabs">
   {% for name, tab_info in tabs.items() %}
@@ -20,7 +20,7 @@
   <tr><th>Job</th><th>What</th><th>By</th><th>Created</th><th>Status</th><th class="num">Attempts</th><th>Next try</th><th class="num">Cost</th><th>Last error</th><th></th></tr>
   {% for job in jobs %}
   <tr>
-    <td><a href="/jobs/{{ job.id }}">{{ job.id }}</a>{% if job.parent_id %} <span class="small muted">of <a href="/jobs/{{ job.parent_id }}">{{ job.parent_id }}</a></span>{% endif %}</td>
+    <td><a href="/jobs/{{ job.id }}">{{ job.id }}</a></td>
     <td>{{ steps[job.kind] }}{% if job.params.source %} · {{ job.params.source }}{% endif %}{% if job.params.get("keys") %} · {{ job.params.get("keys") | length }} trials{% endif %}{% if job.params.trial_ids %} · {{ job.params.trial_ids | length }} trials{% endif %}</td>
     <td class="small">{{ who(job.actor) }}</td>
     <td class="small">{{ when(job.created_at) }}</td>

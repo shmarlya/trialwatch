@@ -188,18 +188,19 @@ def test_the_refresh_tags_recruiting_trials_and_the_cap_holds_it(app_conn, recru
     costs_db.set_monthly_cap(app_conn, Decimal("0"))
     job_id = queue(app_conn, "refresh", {}, actor=db.SYSTEM_ACTOR, automatic=True)
     work(app_conn, monkeypatch)
-    children = jobs_db.children(app_conn, job_id)
-    assert [(child.kind, child.status) for child in children] == [("annotate", "held")]
+    job = jobs_db.job(app_conn, job_id)
+    assert (job.status, job.last_error, job.attempts) == ("held", steps.CAP_REACHED, 0)
     assert model.requests == []
     costs_db.set_monthly_cap(app_conn, None)
     work(app_conn, monkeypatch)
-    assert jobs_db.job(app_conn, children[0].id).status == "succeeded"
-    assert len(model.requests) == 1 and jobs_db.job(app_conn, job_id).status == "succeeded"
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "succeeded", job.last_error
+    assert len(model.requests) == 1 and job.result["annotate"]["tagged"] == 1
 
 
 def test_the_command_dry_run_sends_nothing(app_conn, recruiting, monkeypatch):
     monkeypatch.setattr(cli, "load_env_file", Calls())
     result = CliRunner().invoke(cli.app, ["search", "annotate", "--all", "--dry-run"])
     assert result.exit_code == 0, result.stdout
-    assert "1 trial to tag with claude-haiku-5-5" in result.stdout
+    assert "1 trials to tag with claude-haiku-5-5" in result.stdout
     assert "<languages>en, fr</languages>" in result.stdout and "dry run: nothing was sent" in result.stdout

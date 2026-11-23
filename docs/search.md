@@ -112,7 +112,7 @@ Other commands: `source profiles ctis`, `geo geocode`, `geo find NAME`, `search 
 | `sources/profile.py` | a trial's profile, read at every transfer: who can join, where it recruits, conditions, MedDRA, products |
 | `search/index.py`, `concepts.py` | the trial's search document, built in the transfer; its MeSH concepts |
 | `search/query.py`, `categories.json`, `lexicon.json` | rules and the gazetteer read a query (no model) |
-| `search/annotate.py` | AI tags with checked quotes (job `annotate`, in the weekly refresh) |
+| `search/annotate.py` | AI tags with checked quotes (job `annotate`, and a step of the refresh) |
 | `search/evaluate.py` | `search eval` |
 | `geo/` | GeoNames load; sites geocoded |
 | `vocab/` | MeSH load |

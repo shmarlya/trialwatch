@@ -104,7 +104,7 @@ uv run trialwatch user add you@example.org --role admin
 `user list`, `user role EMAIL ROLE`, `user password EMAIL` and `user disable EMAIL` (`--enable` to undo) manage
 them; the command line itself is not limited by roles, since it holds the database password.
 
-## Jobs, the worker and the weekly refresh
+## Jobs, the worker and the refresh
 
 A form on the site does not run its step itself: it queues a job (`jobs.job`), and the worker runs the queued jobs
 one at a time, each as whoever created it. `trialwatch web` starts a worker of its own as a child process, writing
@@ -116,8 +116,11 @@ site with `--no-worker`, or leave it: several workers are safe, each takes a dif
 uv run trialwatch worker
 ```
 
-Jobs survive restarts. A failed attempt is tried again after 1 min, 5 min, 30 min, 2 h, 6 h (sync and transfer 5
-attempts, a check 3); a retry redoes only what is left (the keys not transferred yet, the trials whose model call
+Every kind of job (sync, transfer, check, annotate, refresh) is one entry in `src/trialwatch/jobs/tasks.py`: its
+label, how many attempts it gets, whether the spending cap holds it, how its params are checked when it is queued,
+and the step that runs it. The commands `source sync`, `source transfer`, `search annotate` and `check evidence`
+run the same steps here and now, without the queue. Jobs survive restarts. A failed attempt is tried again after 1 min, 5 min, 30 min,
+2 h, 6 h (sync and transfer 5 attempts, the others 3); a retry redoes only what is left (the keys not transferred yet, the trials whose model call
 failed for a passing reason such as an overload). An error that a retry can't fix (an unknown source, an invalid
 setup, a bad API key) fails the job at once. A job whose worker died (no heartbeat for 5 minutes) goes back to the
 queue. Jobs can be cancelled; a running one stops after the trial or page it is on, and what it did so far is kept.
@@ -127,20 +130,22 @@ there are any), their errors and their progress per attempt; an admin can try on
 **Schedules** (`jobs.schedule`) start switched off: an admin starts or stops one and sets how often it runs (daily,
 weekly or monthly, at an hour UTC) under Schedules on `/admin/jobs`; stopping one leaves a job it already started
 running. The first is `weekly-refresh`, every Monday at 03:00 UTC by default (daily keeps the search's
-"recruiting" fresher). It syncs every switched-on source's list, transfers the trials that are new, changed at the
-source (stale) or failed last time, in batches of 50, recruiting ones first, then tags with AI the recruiting
-trials whose profile has no tags yet (the `annotate` job, in batches of 50, held by the spending cap like checks),
-then checks, in batches of 20 with the default setup, the trials that were never judged or whose judgement is
-outdated (`src/trialwatch/jobs/refresh.py`). Nothing changed, nothing is checked and nothing is spent. Everything
-it does, and what TrialWatch publishes by itself, is recorded as the actor `trialwatch` (`core.actor` 1), not as a
-person.
+"recruiting" fresher). It starts the **refresh**: one job that, step after step, syncs every switched-on source's
+list, transfers the trials that are new, changed at the source (stale) or failed last time, recruiting ones first,
+tags with AI the recruiting trials whose profile has no tags yet, then checks with the default setup the trials that
+were never judged or whose judgement is outdated (`src/trialwatch/jobs/refresh.py`). Nothing changed, nothing is
+checked and nothing is spent. A step that fails doesn't stop the others; the attempt fails and the next one carries
+on from what is stored (a source synced in an earlier attempt isn't listed again). The spending cap holds the
+refresh before its tagging and checking. While it runs, a job a person queues waits for it, unless a second worker
+runs. Everything it does, and what TrialWatch publishes by itself, is recorded as the actor `trialwatch`
+(`core.actor` 1), not as a person.
 
 | Where | What |
 |---|---|
 | `web/app.py`, `web/jobs.py` | the web interface's routes; queuing jobs and their live progress |
 | `web/templates/`, `web/static/` | pages, and the brand and UI components ([STYLE.md](../STYLE.md), UI) |
 | `auth/` | accounts, passwords, sessions, the action chart |
-| `jobs/worker.py`, `steps.py`, `refresh.py`, `retry.py` | the worker, what each job kind does, the refresh, retries |
+| `jobs/tasks.py`, `worker.py`, `steps.py`, `refresh.py`, `retry.py` | every kind of job, the worker, what each kind does, the refresh, retries |
 | `config.py` | every setting read from the environment (and `.env`) |
 | `llm.py`, `prices.json` | every model call: the client, pricing per billed attempt, recording it as spend |
 | `telemetry.py` | traces and counters for admins (OpenTelemetry; recorded nowhere until Grafana is set up) |
@@ -154,8 +159,7 @@ Anthropic's list prices in `src/trialwatch/prices.json` (each row keeps the pric
 missing from the list is shown as unpriced, never as $0; a new model needs a price before it runs). Runs,
 judgements, trace steps and jobs show their cost to staff, and `/admin/spend` shows the totals: this month, the
 last 30 days, all time, by month, model, operation and actor, and the costliest runs. An admin sets a monthly cap
-there (`core.app_setting`): once this month's spend reaches it, the automatic checks and tags of the weekly refresh
-are held, not failed (they go on by themselves next month or when the cap is raised); checks a person starts always
+there (`core.app_setting`): once this month's spend reaches it, the refresh's checks and tags are held, not failed (they go on by themselves next month or when the cap is raised); checks a person starts always
 run. The gold evaluation reports show the cost too.
 
 ## Database
@@ -190,7 +194,6 @@ erDiagram
     app_user ||--o{ session : "signed in"
     actor ||--o{ job : "created"
     job ||--o{ job_line : "progress"
-    job |o--o{ job : "a refresh's stages"
     schedule |o--o{ job : "started"
     job |o--o{ api_call : "billed calls"
     actor ||--o{ api_call : "for"
@@ -200,7 +203,7 @@ erDiagram
 |---|---|
 | `auth.app_user` | a person who can sign in: email (unique, lower case), argon2id password hash (left out of the audit log), role (admin, moderator), their `core.actor`, disabled_at |
 | `auth.session` | a signed-in browser: the SHA-256 of the cookie's token (the token isn't kept), user, last seen, expiry |
-| `jobs.job` | one job: kind (sync, transfer, check, annotate, refresh), params, automatic (the cap applies), parent and schedule, priority, status (queued, running, waiting, held, succeeded, failed, cancelled), attempts and retries, the worker on it and its heartbeat |
+| `jobs.job` | one job: kind (sync, transfer, check, annotate, refresh), params, automatic (the cap applies), schedule, priority, status (queued, running, held, succeeded, failed, cancelled), attempts and retries, the worker on it and its heartbeat |
 | `jobs.job_line` | a job's progress lines, per attempt |
 | `jobs.schedule` | when a job starts by itself: name, kind and params, frequency (daily, weekly, monthly), weekday, hour UTC, enabled, next run |
 | `core.api_call` | every billed call to a paid API: model, operation (check, annotate), run, trial, job, tokens, cost, the prices charged, the provider's request id |

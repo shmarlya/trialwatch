@@ -11,7 +11,7 @@ outcome-switch detector.
 flowchart TB
     ctis["CTIS<br>trials + results PDFs"] --> adapters["Source adapters<br>CTIS · manual uploads"]
     epmc["Europe PMC<br>publications (planned)"] -.-> adapters
-    worker["Worker<br>job queue · weekly refresh · retries"] -- "triggers" --> adapters
+    worker["Worker<br>job queue · refresh · retries"] -- "triggers" --> adapters
     adapters --> core["Central model (core)<br>trials · documents · files + page text"]
     core --> due["Due-date rules<br>plain code"]
     core --> evidence["Evidence check<br>requirement set + LLM + quote verify"]
@@ -132,8 +132,8 @@ uv run trialwatch check evidence --all --dry-run
 
 `check evidence CT…` checks named trials, `--all` every trial whose evidence is ready; without `--dry-run` it calls
 the model (`ANTHROPIC_API_KEY` from `.env`). On the web interface, model checks start as dry runs: untick "dry
-run" to send. A trial can be checked again, also with another setup to compare runs. The weekly refresh checks,
-with the default setup, the trials never judged or whose judgement is outdated ([operations](operations.md#jobs-the-worker-and-the-weekly-refresh)).
+run" to send. A trial can be checked again, also with another setup to compare runs. The refresh checks,
+with the default setup, the trials never judged or whose judgement is outdated ([operations](operations.md#jobs-the-worker-and-the-refresh)).
 
 The command line, the worker's check job and the gold evaluation all run a check the same way (`run` in
 `checks/evidence.py`), and a dry run shows the same preview everywhere. Only what happens to a trial whose evidence

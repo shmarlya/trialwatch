@@ -1,11 +1,15 @@
-"""What each kind of job does: the same functions as the CLI commands of the workflow steps, with the
-job's params, its progress written to jobs.job_line and its Stop button (cancel) and the spending cap
-asked between trials or pages.
+"""What each kind of job does, with its params: the same step whether the worker runs it as a job, the
+refresh runs it as one of its steps, or a command (`trialwatch source transfer`, `check evidence`, ...)
+runs it here and now. A step writes its progress lines and asks whether to stop through its Context:
+the command line's prints them and never stops, a job's (JobContext) writes them to jobs.job_line and
+stops for its Stop button (cancel) and the spending cap, asked between trials or pages.
 
-A retry redoes only what is left: a transfer the keys not transferred since the job was created, a
-check the trials not judged in the job's runs or whose call failed for a passing reason.
+A retry of a job redoes only what is left: a transfer the keys not transferred since the job was
+created, a check the trials not judged in the job's runs or whose call failed for a passing reason, a
+tagging the trials still untagged.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import psycopg
@@ -14,41 +18,57 @@ from trialwatch import llm
 from trialwatch.checks import evidence
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
+from trialwatch.checks.prompts import load_prompt
 from trialwatch.db import core
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
 from trialwatch.db import search as search_db
 from trialwatch.db.jobs import Job
-from trialwatch.jobs import CAPPED_KINDS
 from trialwatch.jobs.retry import PermanentError, is_transient
 from trialwatch.search import annotate
-from trialwatch.sources import registry
+from trialwatch.sources import profile, registry
 from trialwatch.trials import ingest, readiness
 
-# Calls go to Anthropic's API itself, as from the CLI
 CAP_REACHED = "held: this month's spend reached the monthly cap (/admin/spend)"
-
-STEPS = {
-    "sync": "Sync a source's list (source sync)",
-    "transfer": "Transfer evidence (source transfer)",
-    "check": "Evidence check (check evidence)",
-    "annotate": "AI tags for patient search (search annotate)",
-    "refresh": "Weekly refresh: sync, transfer what changed, check what changed",
-}
 
 
 class Context:
-    """What a running job's step talks to: progress lines, and whether to stop (a person cancelled it,
-    or an automatic check reached the spending cap)."""
+    """What a step talks to: where its progress lines go, and whether to stop. This one is the command
+    line's: its lines are printed, and nothing but Ctrl-C stops it."""
 
-    def __init__(self, queue: psycopg.Connection, job: Job) -> None:
+    def __init__(self, echo: Callable[[str], None]) -> None:
+        self.echo = echo
+        # the job it runs for (None from the command line), and which attempt: a retry does what is left
+        self.job: Job | None = None
+        self.attempt = 1
+        # started by TrialWatch itself: a check skips trials not ready instead of refusing them
+        self.automatic = False
+        self.cancelled = False
+        self.hold_reason: str | None = None
+        self.watch_cap = False
+
+    def add(self, line: str) -> None:
+        self.echo(line)
+
+    def should_stop(self) -> bool:
+        return False
+
+
+class JobContext(Context):
+    """A job's: its lines go to jobs.job_line (the job's page follows them), and it stops when a person
+    cancels the job or, for TrialWatch's own model calls, when this month's spend reached the cap."""
+
+    def __init__(self, queue: psycopg.Connection, job: Job, capped: bool = False) -> None:
         # the worker's own connection (as trialwatch): lines and the job's flags, not the job's work
         self.queue = queue
         self.job = job
+        self.attempt = job.attempts
+        self.automatic = job.automatic
         self.cancelled = False
-        self.hold_reason: str | None = None
-        # only automatic model calls (checks, AI tags) are held by the cap; a person's always run
-        self.watch_cap = job.automatic and job.kind in CAPPED_KINDS
+        self.hold_reason = None
+        # only automatic model calls (checks, AI tags; jobs/tasks.py says which kinds) are held by the
+        # cap; a person's always run. The refresh turns it on before its paid steps.
+        self.watch_cap = job.automatic and capped
 
     def add(self, line: str) -> None:
         jobs_db.add_line(self.queue, self.job.id, self.job.attempts, line)
@@ -69,47 +89,11 @@ class Context:
 
 @dataclass
 class Outcome:
-    """How a step ended: what it did (jobs.job.result), what failed (item -> error; worth another
-    attempt unless final), and whether it now waits for child jobs it added."""
+    """How a step ended: what it did (jobs.job.result), and what failed that is worth another attempt
+    (item -> error). What a retry can't fix is in the result (a check's left_to_people)."""
 
     result: dict = field(default_factory=dict)
     failed: dict[str, str] = field(default_factory=dict)
-    wait: bool = False
-    # its failures were tried already (a refresh's failed children): the job fails without a retry
-    final: bool = False
-
-
-# --- checking params before a job is queued ------------------------------------------------------
-
-def params_problem(kind: str, params: dict) -> str | None:
-    """Why a job of `kind` can't run with these params, or None. Checked when it is queued (so the
-    form says so at once) and again when it runs."""
-    if kind not in STEPS:
-        return f"unknown kind of job {kind!r}"
-    limit = params.get("limit")
-    if limit is not None and limit < 1:
-        return "the limit must be 1 or more"
-    if kind in ("sync", "transfer") and not params.get("source"):
-        return "choose a source"
-    if kind == "transfer":
-        keys = params.get("keys")
-        which = params.get("which")
-        if keys and which:
-            return "choose trials, or which of the source's trials, not both"
-        if not keys and not which:
-            return "choose trials, or which of the source's trials to transfer"
-        if which and which not in core.TRANSFER_CHOICES:
-            return f"choose one of {', '.join(core.TRANSFER_CHOICES)}"
-    if kind == "annotate" and not params.get("trial_ids") and not params.get("every"):
-        return "choose trials, or every recruiting trial not tagged yet"
-    if kind == "check":
-        if not params.get("trial_ids") and not params.get("every"):
-            return "choose trials, or tick 'every trial ready for a check'"
-        try:
-            check_settings.load(params.get("config", check_settings.DEFAULT))
-        except (FileNotFoundError, ValueError) as exc:
-            return str(exc)
-    return None
 
 
 def _source(conn: psycopg.Connection, code: str) -> core.RegisteredSource:
@@ -121,8 +105,8 @@ def _source(conn: psycopg.Connection, code: str) -> core.RegisteredSource:
 
 # --- sync ----------------------------------------------------------------------------------------
 
-def run_sync(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
-    source = _source(conn, job.params["source"])
+def run_sync(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
+    source = _source(conn, params["source"])
     with registry.open_adapter(source.adapter) as adapter:
         try:
             result = ingest.sync_list(conn, source, adapter, progress=ctx.add, should_stop=ctx.should_stop)
@@ -138,18 +122,20 @@ def run_sync(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
 
 # --- transfer ------------------------------------------------------------------------------------
 
-def transfer_keys(conn: psycopg.Connection, job: Job) -> list[str]:
+def transfer_keys(conn: psycopg.Connection, ctx: Context, params: dict) -> list[str]:
     """The keys to transfer: those given, or the source's trials of a kind (pending, failed, ...);
     on a retry, without those transferred since the job was created."""
-    params = job.params
     if params.get("which"):
-        keys = core.keys_to_transfer(conn, params["source"], params["which"])
+        try:
+            keys = core.keys_to_transfer(conn, params["source"], params["which"])
+        except ValueError as exc:
+            raise PermanentError(str(exc)) from exc
     else:
         keys = list(params["keys"])
     if params.get("limit") is not None:
         keys = keys[:params["limit"]]
-    if job.attempts > 1 and keys:
-        done = jobs_db.keys_transferred_since(conn, params["source"], keys, job.created_at)
+    if ctx.attempt > 1 and keys:
+        done = jobs_db.keys_transferred_since(conn, params["source"], keys, ctx.job.created_at)
         left = []
         for key in keys:
             if key not in done:
@@ -158,14 +144,14 @@ def transfer_keys(conn: psycopg.Connection, job: Job) -> list[str]:
     return keys
 
 
-def run_transfer(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
-    source = _source(conn, job.params["source"])
-    keys = transfer_keys(conn, job)
+def run_transfer(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
+    source = _source(conn, params["source"])
+    keys = transfer_keys(conn, ctx, params)
     why = "chosen"
-    if job.params.get("which"):
-        why = job.params["which"]
-    if job.automatic:
-        why = f"{why} (job {job.id})"
+    if params.get("which"):
+        why = params["which"]
+    if ctx.automatic:
+        why = f"{why} (job {ctx.job.id})"
     ctx.add(f"{len(keys)} trials to transfer from {source.code} ({why})")
     if not keys:
         return Outcome({"trials": 0})
@@ -189,21 +175,21 @@ def anthropic_client() -> llm.MessagesClient:
     return llm.client()
 
 
-def _chosen_trials(conn: psycopg.Connection, job: Job, requirement_set) -> list[int]:
+def _chosen_trials(conn: psycopg.Connection, ctx: Context, params: dict, requirement_set) -> list[int]:
     """The trials given, or every trial ready for a check of this set; on a retry, only those the job
     has not judged yet or whose call failed for a passing reason."""
-    if job.params.get("every"):
+    if params.get("every"):
         chosen = readiness.ready_trials(conn, requirement_set.document_kinds)
     else:
         chosen = []
-        for trial_id in job.params["trial_ids"]:
+        for trial_id in params["trial_ids"]:
             if trial_id not in chosen:
                 chosen.append(trial_id)
-    if job.params.get("limit") is not None:
-        chosen = chosen[:job.params["limit"]]
-    if job.attempts <= 1:
+    if params.get("limit") is not None:
+        chosen = chosen[:params["limit"]]
+    if ctx.attempt <= 1:
         return chosen
-    judged = jobs_db.trial_errors_of(conn, job.id)
+    judged = jobs_db.trial_errors_of(conn, ctx.job.id)
     left = []
     for trial_id in chosen:
         if trial_id not in judged or is_transient(judged[trial_id]):
@@ -211,26 +197,33 @@ def _chosen_trials(conn: psycopg.Connection, job: Job, requirement_set) -> list[
     return left
 
 
-def run_check(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
-    params = job.params
+def run_check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
     try:
         settings = check_settings.load(params.get("config", check_settings.DEFAULT))
     except (FileNotFoundError, ValueError) as exc:
         raise PermanentError(str(exc)) from exc
     requirement_set = requirement_sets.load(settings.requirements)
-    trial_ids = _chosen_trials(conn, job, requirement_set)
+    trial_ids = _chosen_trials(conn, ctx, params, requirement_set)
     # an automatic check skips trials whose evidence changed or broke since they were chosen (the next
-    # refresh takes them); a person's check refuses them, as on the command line
+    # refresh takes them); a person's check refuses them
     unready = evidence.REFUSE
-    if job.automatic:
+    if ctx.automatic:
         unready = evidence.SKIP
-    ctx.add(f"{len(trial_ids)} trials · {settings.summary()}")
+    prompt = load_prompt(settings.prompt)
+    ctx.add(f"{len(trial_ids)} trials · {settings.summary()} (prompt sha256 {prompt.sha256.hex()[:12]})")
     if not trial_ids:
         return Outcome({"trials": 0})
     if params.get("dry_run"):
+        if unready == evidence.REFUSE:
+            try:
+                evidence.refuse_unready(conn, trial_ids, requirement_set)
+            except evidence.NotReady as exc:
+                raise PermanentError(str(exc)) from exc
         for preview in evidence.preview(conn, trial_ids, settings):
             ctx.add(f"{preview.name}: {len(preview.questions)} questions, {len(preview.pages)} pages "
                     f"({preview.readable} readable)")
+            for question in preview.questions:
+                ctx.add(f"  {question.key}")
         ctx.add("dry run: nothing was sent")
         return Outcome({"trials": len(trial_ids), "dry_run": True})
     # an automatic check never starts over the cap; it is held before anything is sent
@@ -264,33 +257,60 @@ def run_check(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
 
 # --- annotate (patient search, ADR-008) ----------------------------------------------------------
 
-def run_annotate(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
-    """Tag the trials given (or every recruiting trial not tagged for its current profile) with AI;
-    on a retry, only those still untagged."""
-    if job.params.get("every") or job.attempts > 1:
-        waiting = search_db.trials_to_annotate(conn)
-    else:
-        waiting = None
-    chosen = []
-    if job.params.get("every"):
+def _trials_to_tag(conn: psycopg.Connection, ctx: Context, params: dict, settings: annotate.Settings) -> list[int]:
+    """The trials given, or every recruiting trial not tagged for its current profile (with
+    `outdated_prompt`, also those tagged by an earlier prompt text); on a retry, only those still untagged."""
+    prompt_sha = None
+    if params.get("outdated_prompt"):
+        prompt_sha = load_prompt(settings.prompt).sha256
+    waiting = None
+    if params.get("every") or ctx.attempt > 1:
+        waiting = search_db.trials_to_annotate(conn, prompt_sha)
+    if params.get("every"):
         chosen = waiting
     else:
-        for trial_id in job.params["trial_ids"]:
+        chosen = []
+        for trial_id in params["trial_ids"]:
             if trial_id in chosen:
                 continue
             if waiting is not None and trial_id not in waiting:
                 continue
             chosen.append(trial_id)
-    if job.params.get("limit") is not None:
-        chosen = chosen[:job.params["limit"]]
-    ctx.add(f"{len(chosen)} trials to tag")
+    if params.get("limit") is not None:
+        chosen = chosen[:params["limit"]]
+    return chosen
+
+
+def _show_annotate_request(ctx: Context, conn: psycopg.Connection, settings: annotate.Settings, trial_id: int) -> None:
+    """What would be sent for one trial (a dry run)."""
+    stored = profile.current(conn, trial_id)
+    if stored is None:
+        raise PermanentError(f"trial {trial_id} has no profile")
+    read = stored.read
+    fields = annotate.fields_for(read)
+    languages = annotate.languages_for(conn, read, settings.max_languages)
+    candidates = annotate.candidates_for(conn, read, settings.max_candidates)
+    request = annotate.build_request(settings, load_prompt(settings.prompt), fields, languages, candidates)
+    ctx.add(request["messages"][0]["content"])
+
+
+def run_annotate(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
+    """Tag trials with AI for patient search."""
+    settings = annotate.load_settings()
+    chosen = _trials_to_tag(conn, ctx, params, settings)
+    ctx.add(f"{len(chosen)} trials to tag with {settings.model} (effort {settings.effort})")
     if not chosen:
         return Outcome({"trials": 0})
+    if params.get("dry_run"):
+        _show_annotate_request(ctx, conn, settings, chosen[0])
+        ctx.add("dry run: nothing was sent")
+        return Outcome({"trials": len(chosen), "dry_run": True})
     # an automatic run never starts over the cap; it is held before anything is sent
     if ctx.should_stop():
         return Outcome({"trials": 0})
     try:
-        summary = annotate.run(conn, anthropic_client(), chosen, progress=ctx.add, should_stop=ctx.should_stop)
+        summary = annotate.run(conn, anthropic_client(), chosen, settings, progress=ctx.add,
+                               should_stop=ctx.should_stop)
     except llm.BAD_CREDENTIALS as exc:
         raise PermanentError(f"{type(exc).__name__}: {exc}") from exc
     passing = {}

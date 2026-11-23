@@ -1,21 +1,24 @@
-"""The weekly refresh (a job of kind refresh, started by the weekly-refresh schedule as TrialWatch
-itself): keep every trial's evidence and judgement current without anyone starting it.
+"""The refresh (a job of kind refresh, started by the refresh schedule as TrialWatch itself): keeps
+every trial's evidence, AI tags and judgement current without anyone starting it. One job, step after
+step, each the same step a job of its own kind runs (jobs/steps.py):
 
-Its stages, each a set of child jobs it waits for (jobs.job.status 'waiting'; the last child to end
-queues it again for the next stage):
+1. sync every switched-on source that has a list
+2. transfer the trials each source lists that are new, changed since their transfer (stale) or whose
+   last transfer failed, the ones the list calls recruiting first (patient search, ADR-008)
+3. annotate the recruiting trials whose profile has no AI tags yet (new, or changed since). A changed
+   prompt does not tag every trial again: `trialwatch search annotate --all --outdated-prompt`.
+4. check the trials ready for a check that were never judged or whose judgement is outdated (a record
+   or document it read changed). Nothing changed: no check, no money spent.
 
-1. sync: one sync job per switched-on source that has a list
-2. transfer: the trials each source lists that are new, changed since their transfer (stale) or whose
-   last transfer failed, in batches of TRANSFER_BATCH, the ones the list calls recruiting first
-3. annotate: the recruiting trials whose profile has no AI tags yet (new, or changed since), in batches
-   of ANNOTATE_BATCH, as automatic jobs the monthly spending cap holds (patient search, ADR-008). A
-   changed prompt does not tag every trial again: `trialwatch search annotate --all --outdated-prompt`.
-4. check: the trials ready for a check that were never judged or whose judgement is outdated (a
-   record or document it read changed), in batches of CHECK_BATCH, as automatic jobs (the monthly
-   spending cap holds them). Nothing changed: no check, no money spent.
-5. done: what happened, counted from the child jobs. A child that failed fails the refresh (it shows
-   on /admin/jobs); the trials the other children brought in are still checked.
+Steps 3 and 4 call a paid model: the monthly spending cap holds the refresh before them, and it carries
+on when the cap allows. A step that fails does not stop the others: its failure fails the attempt, and
+the refresh is tried again later. Each step picks its work from what is stored now, so a new attempt
+carries on where the last one stopped (a transferred trial is no longer stale, a tagged or judged one
+no longer waits), and a source synced in an earlier attempt is not listed again.
 """
+
+import traceback
+from collections.abc import Callable
 
 import psycopg
 
@@ -23,20 +26,16 @@ from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
 from trialwatch.db import checks as checks_db
 from trialwatch.db import core
-from trialwatch.db import jobs as jobs_db
-from trialwatch.db import search as search_db
-from trialwatch.db.jobs import Job
-from trialwatch.jobs import MAX_ATTEMPTS, PRIORITY_AUTOMATIC
+from trialwatch.jobs import steps
+from trialwatch.jobs.retry import PermanentError
 from trialwatch.jobs.steps import Context, Outcome
 from trialwatch.sources import registry
 from trialwatch.trials import readiness
 
-TRANSFER_BATCH = 50
-ANNOTATE_BATCH = 50
-CHECK_BATCH = 20
-# Which trials of a source the transfer stage takes (core.TRANSFER_CHOICES)
+# Which trials of a source it transfers (core.TRANSFER_CHOICES)
 TRANSFER_WHICH = ("pending", "stale", "failed")
-STAGES = ("sync", "transfer", "annotate", "check", "done")
+
+Step = Callable[[Context, psycopg.Connection, dict], Outcome]
 
 
 def _sources(conn: psycopg.Connection, capability: str) -> list[core.RegisteredSource]:
@@ -51,117 +50,78 @@ def _sources(conn: psycopg.Connection, capability: str) -> list[core.RegisteredS
     return found
 
 
-def _add_child(conn: psycopg.Connection, job: Job, kind: str, params: dict) -> int:
-    return jobs_db.enqueue(conn, kind, params, max_attempts=MAX_ATTEMPTS[kind], automatic=True, parent_id=job.id,
-                           priority=PRIORITY_AUTOMATIC)
+def _transfer(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
+    source = params["source"]
+    # recruiting trials first (patient search, ADR-008)
+    keys = core.keys_to_transfer_any(conn, source, TRANSFER_WHICH)
+    ctx.add(f"{len(keys)} trials of {source} are {' or '.join(TRANSFER_WHICH)}")
+    return steps.run_transfer(ctx, conn, {"source": source, "keys": keys})
 
 
-def _in_batches(items: list, size: int) -> list[list]:
-    batches = []
-    for start in range(0, len(items), size):
-        batches.append(items[start:start + size])
-    return batches
-
-
-def _sync(ctx: Context, conn: psycopg.Connection, job: Job, result: dict) -> int:
-    added = 0
-    for source in _sources(conn, "lists"):
-        _add_child(conn, job, "sync", {"source": source.code})
-        added += 1
-    ctx.add(f"sync: {added} sources")
-    return added
-
-
-def _transfer(ctx: Context, conn: psycopg.Connection, job: Job, result: dict) -> int:
-    added = 0
-    planned = {}
-    for source in _sources(conn, "transfers"):
-        # recruiting trials first (patient search, ADR-008): their batches are queued, so run, first
-        keys = core.keys_to_transfer_any(conn, source.code, TRANSFER_WHICH)
-        planned[source.code] = len(keys)
-        for batch in _in_batches(keys, TRANSFER_BATCH):
-            _add_child(conn, job, "transfer", {"source": source.code, "keys": batch})
-            added += 1
-        ctx.add(f"transfer: {len(keys)} trials from {source.code} ({', '.join(TRANSFER_WHICH)}) in "
-                f"{len(_in_batches(keys, TRANSFER_BATCH))} jobs")
-    result["to_transfer"] = planned
-    return added
-
-
-def _annotate(ctx: Context, conn: psycopg.Connection, job: Job, result: dict) -> int:
-    waiting = search_db.trials_to_annotate(conn)
-    result["to_annotate"] = len(waiting)
-    added = 0
-    for batch in _in_batches(waiting, ANNOTATE_BATCH):
-        _add_child(conn, job, "annotate", {"trial_ids": batch})
-        added += 1
-    ctx.add(f"annotate: {len(waiting)} recruiting trials without AI tags for their profile, in {added} jobs")
-    return added
-
-
-def _check(ctx: Context, conn: psycopg.Connection, job: Job, result: dict) -> int:
-    config = job.params.get("config", check_settings.DEFAULT)
+def _check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
+    config = params["config"]
     settings = check_settings.load(config)
     requirement_set = requirement_sets.load(settings.requirements)
     ready = readiness.ready_trials(conn, requirement_set.document_kinds)
     changed = checks_db.trials_needing_check(conn, ready, requirement_set.name)
-    result["ready"] = len(ready)
-    result["to_check"] = len(changed)
-    added = 0
-    for batch in _in_batches(changed, CHECK_BATCH):
-        _add_child(conn, job, "check", {"trial_ids": batch, "config": config})
-        added += 1
-    ctx.add(f"check: {len(changed)} of {len(ready)} ready trials are new or changed, in {added} jobs")
-    return added
+    ctx.add(f"{len(changed)} of {len(ready)} trials ready for a check are new or changed")
+    outcome = steps.run_check(ctx, conn, {"trial_ids": changed, "config": config})
+    outcome.result["ready"] = len(ready)
+    return outcome
 
 
-def _done(ctx: Context, conn: psycopg.Connection, job: Job, result: dict) -> dict[str, str]:
-    """Count the child jobs by kind and status; the failed ones are the refresh's failures."""
-    counts = {}
-    failed = {}
-    for child in jobs_db.children(conn, job.id):
-        key = f"{child.kind} {child.status}"
-        if key not in counts:
-            counts[key] = 0
-        counts[key] += 1
-        if child.status == "failed":
-            failed[f"job {child.id} ({child.kind})"] = child.last_error
-    result["children"] = counts
-    listed = []
-    for key, count in sorted(counts.items()):
-        listed.append(f"{key} {count}")
-    ctx.add(f"done: {', '.join(listed)}")
-    return failed
-
-
-PLANNERS = {"sync": _sync, "transfer": _transfer, "annotate": _annotate, "check": _check}
-
-
-def run_refresh(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
-    """Plan the next stage's child jobs and wait for them; a stage with nothing to do goes straight on."""
-    result = dict(job.result)
-    stage_done = result.get("stage")
-    if stage_done == "done":
-        # tried again after it ended (Retry on /admin/jobs): a new refresh from the start
-        result = {}
-        stage_done = None
-    if stage_done is None:
-        next_index = 0
+def _run(ctx: Context, conn: psycopg.Connection, name: str, step: Step, params: dict, result: dict,
+         failed: dict[str, str]) -> bool:
+    """Run one step, as the refresh (its runs name the refresh's job, its retries are the refresh's).
+    What failed in it is one of the refresh's failures, not the end of the refresh. Its result goes in
+    the refresh's under `name`; True when nothing in it failed."""
+    ctx.add(f"— {name}")
+    try:
+        outcome = step(ctx, conn, params)
+    except PermanentError as exc:
+        error = str(exc)
+    except Exception as exc:  # a network error, a busy source: tried again with the refresh
+        error = f"{type(exc).__name__}: {exc}"
+        ctx.add(traceback.format_exc())
     else:
-        next_index = STAGES.index(stage_done) + 1
-    while True:
-        stage = STAGES[next_index]
-        result["stage"] = stage
-        if stage == "done":
-            failed = _done(ctx, conn, job, result)
-            if failed:
-                result["failed_children"] = failed
-            # a failed child already had its own attempts: the refresh itself is not tried again
-            return Outcome(result, failed, final=True)
-        if ctx.should_stop():
-            return Outcome(result)
-        added = PLANNERS[stage](ctx, conn, job, result)
-        if added:
-            return Outcome(result, {}, wait=True)
-        next_index += 1
+        result[name] = outcome.result
+        for item, item_error in outcome.failed.items():
+            failed[f"{name}, {item}"] = item_error
+        return not outcome.failed
+    ctx.add(f"{name} failed: {error}")
+    failed[name] = error
+    return False
 
+
+def run_refresh(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
+    result = {}
+    failed: dict[str, str] = {}
+    # the sources an earlier attempt of this refresh synced without a failure
+    earlier = {}
+    if ctx.job is not None:
+        earlier = ctx.job.result
+    synced = list(earlier.get("synced", []))
+    result["synced"] = synced
+    for source in _sources(conn, "lists"):
+        if ctx.should_stop():
+            return Outcome(result, failed)
+        name = f"sync {source.code}"
+        if source.code in synced:
+            ctx.add(f"— {name}: synced in an earlier attempt")
+            continue
+        if _run(ctx, conn, name, steps.run_sync, {"source": source.code}, result, failed):
+            synced.append(source.code)
+    for source in _sources(conn, "transfers"):
+        if ctx.should_stop():
+            return Outcome(result, failed)
+        _run(ctx, conn, f"transfer {source.code}", _transfer, {"source": source.code}, result, failed)
+    # the steps that call a paid model: an automatic refresh is held by the spending cap from here on
+    ctx.watch_cap = ctx.automatic
+    if ctx.should_stop():
+        return Outcome(result, failed)
+    _run(ctx, conn, "annotate", steps.run_annotate, {"every": True}, result, failed)
+    if ctx.should_stop():
+        return Outcome(result, failed)
+    config = params.get("config", check_settings.DEFAULT)
+    _run(ctx, conn, "check", _check, {"config": config}, result, failed)
+    return Outcome(result, failed)

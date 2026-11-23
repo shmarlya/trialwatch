@@ -11,8 +11,7 @@ import psycopg
 
 from trialwatch.checks import settings as check_settings
 from trialwatch.db import jobs as jobs_db
-from trialwatch.jobs import MAX_ATTEMPTS, PRIORITY_PERSON
-from trialwatch.jobs.steps import STEPS, params_problem
+from trialwatch.jobs import PRIORITY_PERSON, tasks
 
 # The forms' step names and the kind of job each becomes
 STEP_KINDS = {"list": "sync", "transfer": "transfer", "evidence": "check"}
@@ -68,7 +67,7 @@ def check_request(request: JobRequest) -> None:
     if request.step not in STEP_KINDS:
         raise ValueError(f"unknown step {request.step!r}")
     kind, params = job_params(request)
-    problem = params_problem(kind, params)
+    problem = tasks.problem(kind, params)
     if problem is not None:
         raise ValueError(problem)
 
@@ -78,7 +77,4 @@ def enqueue(conn: psycopg.Connection, request: JobRequest) -> int:
     job's id. Raises ValueError."""
     check_request(request)
     kind, params = job_params(request)
-    return jobs_db.enqueue(conn, kind, params, max_attempts=MAX_ATTEMPTS[kind], priority=PRIORITY_PERSON)
-
-
-__all__ = ["STEPS", "STEP_KINDS", "JobRequest", "check_request", "enqueue", "job_params"]
+    return jobs_db.enqueue(conn, kind, params, max_attempts=tasks.TASKS[kind].max_attempts, priority=PRIORITY_PERSON)

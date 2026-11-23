@@ -29,9 +29,9 @@ from trialwatch.db import core
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
 from trialwatch.db.jobs import Job
-from trialwatch.jobs import MAX_ATTEMPTS, PRIORITY_AUTOMATIC, refresh, steps
+from trialwatch.jobs import PRIORITY_AUTOMATIC, tasks
 from trialwatch.jobs.retry import PermanentError, backoff
-from trialwatch.jobs.steps import Context, Outcome
+from trialwatch.jobs.steps import JobContext, Outcome
 
 HEARTBEAT = timedelta(seconds=30)
 STALLED = timedelta(minutes=5)
@@ -40,14 +40,6 @@ HOUSEKEEPING = timedelta(minutes=1)
 # How long it sleeps when nothing is queued
 IDLE = 5.0
 LONGEST_ERROR = 4000
-
-RUNNERS: dict[str, Callable[[Context, psycopg.Connection, Job], Outcome]] = {
-    "sync": steps.run_sync,
-    "transfer": steps.run_transfer,
-    "check": steps.run_check,
-    "annotate": steps.run_annotate,
-    "refresh": refresh.run_refresh,
-}
 
 log = logging.getLogger("trialwatch.worker")
 
@@ -109,30 +101,28 @@ def failures_text(failed: dict[str, str]) -> str:
 
 def run_one(queue: psycopg.Connection, job: Job, worker: str) -> str:
     """Run a claimed job's attempt and record how it went; returns the job's status after."""
-    ctx = Context(queue, job)
+    task = tasks.TASKS.get(job.kind)
+    ctx = JobContext(queue, job, capped=task is not None and task.capped)
     ctx.add(f"attempt {job.attempts} of {job.max_attempts} on {worker}")
     outcome = None
     error = None
     permanent = False
     try:
         with Heartbeat(job.id, worker), job_connection(job) as conn:
-            problem = steps.params_problem(job.kind, job.params)
+            problem = tasks.problem(job.kind, job.params)
             if problem is not None:
                 raise PermanentError(problem)
-            outcome = RUNNERS[job.kind](ctx, conn, job)
+            outcome = task.run(ctx, conn, job.params)
     except PermanentError as exc:
         error = str(exc)
         permanent = True
     except Exception as exc:  # anything else may pass (a network error, a busy source): tried again
         error = f"{type(exc).__name__}: {exc}"
         ctx.add(traceback.format_exc())
-    status = _record(queue, ctx, job, outcome, error, permanent)
-    if job.parent_id is not None and status in jobs_db.ENDED:
-        jobs_db.requeue_parent_when_done(queue, job.parent_id)
-    return status
+    return _record(queue, ctx, job, outcome, error, permanent)
 
 
-def _record(queue: psycopg.Connection, ctx: Context, job: Job, outcome: Outcome | None, error: str | None,
+def _record(queue: psycopg.Connection, ctx: JobContext, job: Job, outcome: Outcome | None, error: str | None,
             permanent: bool) -> str:
     result = job.result
     if outcome is not None:
@@ -146,13 +136,6 @@ def _record(queue: psycopg.Connection, ctx: Context, job: Job, outcome: Outcome 
         return "held"
     if error is None and outcome is not None and outcome.failed:
         error = failures_text(outcome.failed)
-        permanent = outcome.final
-    if error is None and outcome is not None and outcome.wait:
-        jobs_db.wait_for_children(queue, job.id, result)
-        ctx.add("waiting for its jobs")
-        # children that all ended before this point (none could, but a worker may be quick) still move it on
-        jobs_db.requeue_parent_when_done(queue, job.id)
-        return "waiting"
     if error is None:
         jobs_db.finish(queue, job.id, "succeeded", result)
         ctx.add("succeeded")
@@ -184,7 +167,7 @@ def housekeeping(queue: psycopg.Connection) -> None:
     if not costs_db.cap_reached(queue):
         resumed = jobs_db.resume_held(queue)
         if resumed:
-            log.warning("held jobs resumed: %s", resumed)
+            log.info("held jobs resumed: %s", resumed)
 
 
 def start_due_schedules(queue: psycopg.Connection) -> list[int]:
@@ -195,9 +178,10 @@ def start_due_schedules(queue: psycopg.Connection) -> list[int]:
             schedule = jobs_db.take_due_schedule(queue)
             if schedule is None:
                 return started
-            job_id = jobs_db.enqueue(queue, schedule.kind, schedule.params, max_attempts=MAX_ATTEMPTS[schedule.kind],
-                                     automatic=True, schedule_id=schedule.id, priority=PRIORITY_AUTOMATIC)
-        log.warning("schedule %s started job %s", schedule.name, job_id)
+            max_attempts = tasks.TASKS[schedule.kind].max_attempts
+            job_id = jobs_db.enqueue(queue, schedule.kind, schedule.params, max_attempts=max_attempts, automatic=True,
+                                     schedule_id=schedule.id, priority=PRIORITY_AUTOMATIC)
+        log.info("schedule %s started job %s", schedule.name, job_id)
         started.append(job_id)
 
 
@@ -220,7 +204,7 @@ def run(once: bool = False, should_stop: Callable[[], bool] | None = None) -> in
                     return ran
                 time.sleep(IDLE)
                 continue
-            log.warning("job %s (%s) attempt %s", job.id, job.kind, job.attempts)
+            log.info("job %s (%s) attempt %s", job.id, job.kind, job.attempts)
             status = run_one(queue, job, worker)
-            log.warning("job %s: %s", job.id, status)
+            log.info("job %s: %s", job.id, status)
             ran += 1

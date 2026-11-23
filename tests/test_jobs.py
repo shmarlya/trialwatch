@@ -1,30 +1,33 @@
 """Jobs (src/trialwatch/jobs/): the queue in the database, the worker's attempts and retries, the
-weekly refresh that syncs, transfers and checks what changed, and the spending cap that holds automatic
+refresh that syncs, transfers and checks what changed, and the spending cap that holds automatic
 checks. Against a fake CTIS and a fake model."""
 
 import contextlib
 import copy
+import dataclasses
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
 import psycopg
 import pytest
+from test_cli import Calls
 from test_evidence import CT, CT_2, GOOD, PAGES, FakeClient, PageTexts, payload, seed
 from test_sources_ctis import FakeCtis, listed_row
+from typer.testing import CliRunner
 
-from trialwatch import db
+from trialwatch import cli, db
 from trialwatch.db import SESSION_OPTIONS, core
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
-from trialwatch.jobs import MAX_ATTEMPTS, refresh, retry, steps, worker
+from trialwatch.jobs import retry, steps, tasks, worker
 from trialwatch.sources import ctis
 
 
 def queue(conn, kind, params, actor="test-person", **options):
     core.act_as(conn, actor)
     if "max_attempts" not in options:
-        options["max_attempts"] = MAX_ATTEMPTS[kind]
+        options["max_attempts"] = tasks.TASKS[kind].max_attempts
     # the prepared options are passed as keyword arguments to the library call
     return jobs_db.enqueue(conn, kind, params, **options)
 
@@ -105,6 +108,22 @@ def test_a_job_is_claimed_once_and_its_attempt_counted(conn):
     assert jobs_db.claim_next(conn, "w3") is None
 
 
+def test_every_kind_the_database_allows_has_a_task(conn):
+    definition = conn.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                              "WHERE conname = 'job_kind_check'").fetchone()[0]
+    for kind in tasks.TASKS:
+        assert f"'{kind}'" in definition
+    assert definition.count("'::text") == len(tasks.TASKS)
+
+
+def test_the_registry_checks_params_before_a_job_is_queued():
+    assert tasks.problem("index", {}) == "unknown kind of job 'index'"
+    assert tasks.problem("transfer", {"source": "ctis"}) == "choose trials, or which of the source's trials to transfer"
+    assert tasks.problem("check", {"config": "default"}) == "choose trials, or every trial ready for a check"
+    assert tasks.problem("refresh", {}) is None
+    assert "no-such-setup" in tasks.problem("refresh", {"config": "no-such-setup"})
+
+
 def test_two_workers_never_take_the_same_job(database_url):
     one = psycopg.connect(database_url, autocommit=True, options=SESSION_OPTIONS)
     two = psycopg.connect(database_url, autocommit=True, options=SESSION_OPTIONS)
@@ -126,10 +145,10 @@ def test_two_workers_never_take_the_same_job(database_url):
 def test_a_failed_attempt_is_tried_later_then_left_failed(app_conn, monkeypatch):
     job_id = queue(app_conn, "sync", {"source": "ctis"}, max_attempts=2)
 
-    def failing(ctx, conn, job):
+    def failing(ctx, conn, params):
         raise httpx.ConnectError("CTIS is down")
 
-    monkeypatch.setitem(worker.RUNNERS, "sync", failing)
+    monkeypatch.setitem(tasks.TASKS, "sync", dataclasses.replace(tasks.TASKS["sync"], run=failing))
     assert work(app_conn, monkeypatch) == 1
     job = jobs_db.job(app_conn, job_id)
     assert (job.status, job.attempts, job.last_error) == ("queued", 1, "ConnectError: CTIS is down")
@@ -190,7 +209,7 @@ def test_cancelling_a_queued_job_ends_it_and_a_running_one_after_its_item(conn):
     jobs_db.claim_next(conn, "w")
     assert jobs_db.request_cancel(conn, running) == "running"
     job = jobs_db.job(conn, running)
-    ctx = steps.Context(conn, job)
+    ctx = steps.JobContext(conn, job)
     assert ctx.should_stop() and ctx.cancelled
 
 
@@ -242,11 +261,39 @@ def test_a_transfer_retry_takes_only_the_keys_not_transferred_yet(app_conn, fake
     app_conn.execute("UPDATE jobs.job SET attempts = 2 WHERE id = %s", (job_id,))
     worker.run_one(app_conn, jobs_db.job(app_conn, job_id), "w")
     assert jobs_db.job(app_conn, job_id).status == "succeeded"
-    assert steps.transfer_keys(app_conn, jobs_db.job(app_conn, job_id)) == []
+    retried = jobs_db.job(app_conn, job_id)
+    assert steps.transfer_keys(app_conn, steps.JobContext(app_conn, retried), retried.params) == []
     assert job.attempts == 1
 
 
-# --- the weekly refresh --------------------------------------------------------------------------
+def job_count(conn):
+    return sum(jobs_db.status_counts(conn).values())
+
+
+def test_the_commands_run_the_same_steps_here_and_now(app_conn, fake_world, monkeypatch):
+    fake, model = fake_world
+    monkeypatch.setattr(cli, "load_env_file", Calls())
+    runner = CliRunner()
+    jobs_before = job_count(app_conn)
+    # the params are checked as a job's are
+    refused = runner.invoke(cli.app, ["source", "transfer", "ctis", CT, "--which", "pending"])
+    assert refused.exit_code == 2 and "not both" in refused.output
+    synced = runner.invoke(cli.app, ["source", "sync", "ctis"])
+    assert synced.exit_code == 0, synced.output
+    transferred = runner.invoke(cli.app, ["source", "transfer", "ctis", "--which", "pending", "--limit", "1"])
+    assert transferred.exit_code == 0, transferred.output
+    assert "1 trials to transfer from ctis (pending)" in transferred.output
+    dry_run = runner.invoke(cli.app, ["check", "evidence", "--all", "--dry-run"])
+    assert dry_run.exit_code == 0, dry_run.output
+    assert "dry run: nothing was sent" in dry_run.output and checked_trials(model) == 0
+    checked = runner.invoke(cli.app, ["check", "evidence", "--all"])
+    assert checked.exit_code == 0, checked.output
+    assert "1 trials · " in checked.output and checked_trials(model) == 1
+    # nothing was queued: the command line runs the steps itself
+    assert job_count(app_conn) == jobs_before
+
+
+# --- the refresh ---------------------------------------------------------------------------------
 
 def refresh_job(conn):
     return queue(conn, "refresh", {}, actor=db.SYSTEM_ACTOR, automatic=True)
@@ -262,15 +309,15 @@ def test_the_refresh_syncs_transfers_and_checks_what_is_new(app_conn, fake_world
     work(app_conn, monkeypatch)
     job = jobs_db.job(app_conn, job_id)
     assert job.status == "succeeded", (job.last_error, line_texts(app_conn, job_id))
-    kinds = []
-    for child in jobs_db.children(app_conn, job_id):
-        kinds.append((child.kind, child.status, child.automatic))
-    assert kinds == [("sync", "succeeded", True), ("transfer", "succeeded", True), ("check", "succeeded", True)]
-    assert job.result["to_check"] == 2 and job.result["children"]["check succeeded"] == 1
+    assert job.result["synced"] == ["ctis"]
+    assert job.result["transfer ctis"]["trials"] == 2
+    assert (job.result["check"]["ready"], job.result["check"]["trials"]) == (2, 2)
     assert checked_trials(model) == 2
-    # the check runs are TrialWatch's own
+    # one job: its runs name it, and the check run is TrialWatch's own
+    runs = jobs_db.runs_of(app_conn, job_id)
+    assert len(runs.check_runs) == 1 and len(runs.ingest_runs) == 2
     actors = app_conn.execute("SELECT DISTINCT a.name FROM checks.run r JOIN core.actor a ON a.id = r.actor_id "
-                              "JOIN jobs.job j ON j.id = r.job_id WHERE j.parent_id = %s", (job_id,)).fetchall()
+                              "WHERE r.job_id = %s", (job_id,)).fetchall()
     assert actors == [(db.SYSTEM_ACTOR,)]
 
     # a week later nothing changed: nothing is transferred or checked, nothing spent
@@ -278,7 +325,7 @@ def test_the_refresh_syncs_transfers_and_checks_what_is_new(app_conn, fake_world
     work(app_conn, monkeypatch)
     job = jobs_db.job(app_conn, second)
     assert job.status == "succeeded"
-    assert job.result["to_transfer"] == {"ctis": 0} and job.result["to_check"] == 0
+    assert job.result["transfer ctis"]["trials"] == 0 and job.result["check"]["trials"] == 0
     assert checked_trials(model) == 2
 
     # CTIS changed one trial's results summary: only that trial is transferred and checked again
@@ -288,14 +335,12 @@ def test_the_refresh_syncs_transfers_and_checks_what_is_new(app_conn, fake_world
     work(app_conn, monkeypatch)
     job = jobs_db.job(app_conn, third)
     assert job.status == "succeeded", job.last_error
-    assert job.result["to_transfer"] == {"ctis": 1} and job.result["to_check"] == 1
+    assert job.result["transfer ctis"]["trials"] == 1 and job.result["check"]["trials"] == 1
     assert checked_trials(model) == 3
 
 
-def test_a_failed_transfer_fails_the_refresh_but_the_rest_is_still_checked(app_conn, fake_world, monkeypatch):
+def test_a_failed_transfer_fails_the_attempt_and_the_next_carries_on(app_conn, fake_world, monkeypatch):
     fake, model = fake_world
-    monkeypatch.setitem(MAX_ATTEMPTS, "transfer", 1)
-    monkeypatch.setattr(refresh, "TRANSFER_BATCH", 1)
     original = fake.retrieve
 
     def broken_for_ct2(ct_number):
@@ -307,11 +352,20 @@ def test_a_failed_transfer_fails_the_refresh_but_the_rest_is_still_checked(app_c
     job_id = refresh_job(app_conn)
     work(app_conn, monkeypatch)
     job = jobs_db.job(app_conn, job_id)
-    assert job.status == "failed"
-    assert "transfer" in job.last_error
-    # the trial that came in was checked
+    assert (job.status, job.attempts) == ("queued", 1)
+    assert job.last_error.startswith("1 failed: transfer ctis, ") and "CTIS is down" in job.last_error
+    # the trial that came in was still checked
     assert checked_trials(model) == 1
-    assert job.result["children"]["transfer failed"] == 1
+
+    # CTIS is back: the next attempt does not list the source again, and transfers and checks the rest
+    fake.retrieve = original
+    due_now(app_conn, job_id)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "succeeded", job.last_error
+    assert "— sync ctis: synced in an earlier attempt" in line_texts(app_conn, job_id)
+    assert job.result["transfer ctis"]["trials"] == 1 and job.result["check"]["trials"] == 1
+    assert checked_trials(model) == 2
 
 
 # --- the spending cap ----------------------------------------------------------------------------
@@ -462,3 +516,14 @@ def test_only_admins_change_schedules(app_conn):
     assert moderator.post(f"/admin/schedules/{schedule_id}/switch", data={"enabled": "true"}).status_code == 403
     assert TestClient(web.app).post(f"/admin/schedules/{schedule_id}/switch").status_code == 401
     assert not jobs_db.schedule(app_conn, schedule_id).enabled
+
+
+def test_a_refresh_shows_its_steps_on_its_page(app_conn, fake_world, monkeypatch, admin_client):
+    job_id = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    page = admin_client.get(f"/jobs/{job_id}")
+    assert page.status_code == 200
+    assert "Refresh: sync, transfer what changed" in page.text
+    assert "— sync ctis" in page.text and "— transfer ctis" in page.text and "— check" in page.text
+    running = admin_client.get("/admin/jobs?tab=active")
+    assert running.status_code == 200 and "Running" in running.text

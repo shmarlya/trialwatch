@@ -22,7 +22,6 @@ from trialwatch.auth import accounts, actions, passwords
 from trialwatch.checks import evidence
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
-from trialwatch.checks.prompts import load_prompt
 from trialwatch.db import auth as auth_db
 from trialwatch.db import core as core_db
 from trialwatch.db import geo as geo_db
@@ -30,15 +29,17 @@ from trialwatch.db import search as search_db
 from trialwatch.config import load_env_file
 from trialwatch.geo import load as geo_loading
 from trialwatch.gold import converters, datasets
-from trialwatch.search import annotate as search_annotating
 from trialwatch.search import evaluate as search_evaluating
 from trialwatch.search import index as search_index
 from trialwatch.vocab import load as vocab_loading
 from trialwatch.gold import compare as gold_compare
 from trialwatch.gold import evaluate as gold_evaluate
+from trialwatch.jobs import tasks
+from trialwatch.jobs.retry import PermanentError
+from trialwatch.jobs.steps import Outcome
 from trialwatch.sources import profile, registry, snapshot
 from trialwatch.sources.ctis_client import CT_NUMBER
-from trialwatch.trials import ingest, readiness
+from trialwatch.trials import ingest
 
 app = typer.Typer(no_args_is_help=True, help="TrialWatch: EU clinical-trial results watchdog.")
 source_app = typer.Typer(no_args_is_help=True, help="Data sources (ADR-005): the registry, syncing lists, transferring evidence.")
@@ -174,20 +175,35 @@ def jobs_retry(job_id: Annotated[int, typer.Argument(help="The job, as `jobs lis
 
 @jobs_app.command("refresh")
 def jobs_refresh() -> None:
-    """Queue the weekly refresh now (sync every source, transfer what changed, check what changed), as
+    """Queue the refresh now (sync every source, transfer what changed, tag and check what changed), as
     TrialWatch itself; `trialwatch worker` runs it."""
     from trialwatch.db import jobs as jobs_db
-    from trialwatch.jobs import MAX_ATTEMPTS, PRIORITY_AUTOMATIC
+    from trialwatch.jobs import PRIORITY_AUTOMATIC, tasks
 
     with db.connect_system() as conn:
-        job_id = jobs_db.enqueue(conn, "refresh", {}, max_attempts=MAX_ATTEMPTS["refresh"], automatic=True,
-                                 priority=PRIORITY_AUTOMATIC)
+        job_id = jobs_db.enqueue(conn, "refresh", {}, max_attempts=tasks.TASKS["refresh"].max_attempts,
+                                 automatic=True, priority=PRIORITY_AUTOMATIC)
     typer.echo(f"refresh queued as job {job_id}")
 
 
 def _echo_failures(failed: dict[str, str]) -> None:
     for where, message in failed.items():
         typer.echo(f"  {where}: {message}", err=True)
+
+
+def _run_step(conn: psycopg.Connection, kind: str, params: dict) -> Outcome:
+    """Run the step a job of `kind` runs (jobs/tasks.py) here and now, printing its lines. Exits 1 when
+    anything in it failed."""
+    try:
+        outcome = tasks.run_here(conn, kind, params, typer.echo)
+    except PermanentError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _echo_failures(outcome.failed)
+    # a check leaves to a person what another attempt can't fix; nothing is tried again here, so it fails too
+    left_to_people = outcome.result.get("left_to_people", {})
+    if outcome.failed or left_to_people:
+        raise typer.Exit(1)
+    return outcome
 
 
 def _registered(conn, code: str) -> core_db.RegisteredSource:
@@ -301,16 +317,7 @@ def source_sync(code: Annotated[str, typer.Argument(help="The source, e.g. ctis"
     """Sync a source's list: every trial it lists (as its config filters them) becomes a trial here,
     with its key, title and identifiers. Records and documents come with `source transfer`."""
     with db.connect_system() as conn:
-        source = _registered(conn, code)
-        with registry.open_adapter(source.adapter) as adapter:
-            try:
-                result = ingest.sync_list(conn, source, adapter, progress=typer.echo)
-            except ValueError as exc:
-                raise typer.BadParameter(str(exc)) from exc
-    typer.echo(result.summary())
-    _echo_failures(result.failed)
-    if result.failed:
-        raise typer.Exit(1)
+        _run_step(conn, "sync", {"source": code})
 
 
 @source_app.command("transfer")
@@ -332,31 +339,15 @@ def source_transfer(
     if from_file is not None:
         for key in _lines_of(from_file):
             given.append(key)
-    if given and which:
-        raise typer.BadParameter("give keys or --which, not both")
-    if not given and not which:
-        raise typer.BadParameter("give keys, --file or --which")
+    params = {"source": code}
+    if given:
+        params["keys"] = given
+    if which:
+        params["which"] = which
+    if limit is not None:
+        params["limit"] = limit
     with db.connect_system() as conn:
-        source = _registered(conn, code)
-        why = "chosen"
-        if which:
-            try:
-                given = core_db.keys_to_transfer(conn, code, which)
-            except ValueError as exc:
-                raise typer.BadParameter(str(exc), param_hint="--which") from exc
-            why = which
-        if limit is not None:
-            given = given[:limit]
-        typer.echo(f"{len(given)} trials to transfer from {code} ({why})")
-        with registry.open_adapter(source.adapter) as adapter:
-            try:
-                result = ingest.transfer(conn, source, adapter, given, why=why, progress=typer.echo)
-            except ValueError as exc:
-                raise typer.BadParameter(str(exc)) from exc
-    typer.echo(result.summary())
-    _echo_failures(result.failed)
-    if result.failed:
-        raise typer.Exit(1)
+        _run_step(conn, "transfer", params)
 
 
 @source_app.command("locations")
@@ -548,7 +539,11 @@ def search_annotate(
     purpose, synonyms of their conditions in their countries' languages, MeSH concepts and the age
     limits of their inclusion criteria, each tag with a quote checked against its field. Calls the
     model (search/configs/annotate.json) and records what it costs; the refresh does it by itself."""
-    settings = search_annotating.load_settings()
+    params = {}
+    if limit is not None:
+        params["limit"] = limit
+    if dry_run:
+        params["dry_run"] = True
     with db.connect() as conn:
         if ct_numbers:
             found = core_db.trials_with_scheme(conn, "eu-ct", ct_numbers)
@@ -557,35 +552,14 @@ def search_annotate(
                 if ct_number not in found:
                     raise typer.BadParameter(f"no trial {ct_number}")
                 trial_ids.append(found[ct_number])
+            params["trial_ids"] = trial_ids
         elif every:
-            prompt_sha = None
+            params["every"] = True
             if outdated_prompt:
-                prompt_sha = load_prompt(settings.prompt).sha256
-            trial_ids = search_db.trials_to_annotate(conn, prompt_sha)
+                params["outdated_prompt"] = True
         else:
             raise typer.BadParameter("give EU CT numbers or --all")
-        if limit is not None:
-            trial_ids = trial_ids[:limit]
-        typer.echo(f"{_count(len(trial_ids), 'trial')} to tag with {settings.model} (effort {settings.effort})")
-        if not trial_ids:
-            return
-        if dry_run:
-            stored = profile.current(conn, trial_ids[0])
-            if stored is None:
-                raise typer.BadParameter(f"trial {trial_ids[0]} has no profile")
-            read = stored.read
-            request = search_annotating.build_request(
-                settings, load_prompt(settings.prompt), search_annotating.fields_for(read),
-                search_annotating.languages_for(conn, read, settings.max_languages),
-                search_annotating.candidates_for(conn, read, settings.max_candidates))
-            typer.echo(request["messages"][0]["content"])
-            typer.echo("dry run: nothing was sent")
-            return
-        summary = search_annotating.run(conn, llm.client(), trial_ids, settings, progress=typer.echo)
-    typer.echo(f"annotation run {summary.run_id}: {summary.tagged} of {summary.trials} tagged, {summary.kept} tags kept, "
-               f"{summary.dropped} dropped, {llm.dollars(summary.cost_usd)}")
-    if summary.failed:
-        raise typer.Exit(1)
+        _run_step(conn, "annotate", params)
 
 
 @search_app.command("eval")
@@ -646,12 +620,8 @@ def _ct_numbers_given(ct_numbers: list[str] | None, from_file: Path | None) -> l
     return wanted
 
 
-def _trials_to_judge(conn, ct_numbers: list[str] | None, from_file: Path | None, all_trials: bool,
-                     requirement_set: requirement_sets.RequirementSet) -> list[int]:
-    """core.trial ids: every trial a check of this requirement set may read now (--all), or the trials
-    with these EU CT numbers."""
-    if all_trials:
-        return readiness.ready_trials(conn, requirement_set.document_kinds)
+def _trials_to_judge(conn, ct_numbers: list[str] | None, from_file: Path | None) -> list[int]:
+    """core.trial ids of the trials with these EU CT numbers."""
     wanted = _ct_numbers_given(ct_numbers, from_file)
     found = core_db.trials_with_scheme(conn, "eu-ct", wanted)
     missing = []
@@ -685,33 +655,17 @@ def check_evidence(
     requirement set's kinds linked to the trial, have the model quote evidence, verify every quote
     against the page text, and decide with the set's rules. Each run adds rows, with a step-by-step
     trace per trial, and records the setup it used."""
-    try:
-        settings = check_settings.load(config)
-    except (FileNotFoundError, ValueError) as exc:
-        raise typer.BadParameter(str(exc), param_hint="--config") from exc
-    requirement_set = requirement_sets.load(settings.requirements)
-    system_prompt = load_prompt(settings.prompt)
+    params = {"config": config}
+    if limit is not None:
+        params["limit"] = limit
+    if dry_run:
+        params["dry_run"] = True
     with db.connect_system() as conn:
-        trial_ids = _trials_to_judge(conn, ct_numbers, from_file, all_trials, requirement_set)
-        if limit is not None:
-            trial_ids = trial_ids[:limit]
-        try:
-            evidence.refuse_unready(conn, trial_ids, requirement_set)
-        except evidence.NotReady as exc:
-            raise typer.BadParameter(str(exc)) from exc
-        typer.echo(f"{settings.summary()} (prompt sha256 {system_prompt.sha256.hex()[:12]}) · {len(trial_ids)} trials")
-        if dry_run:
-            for preview in evidence.preview(conn, trial_ids, settings):
-                typer.echo(f"{preview.name}: {len(preview.pages)} pages ({preview.readable} readable), "
-                           f"{len(preview.questions)} questions")
-                for question in preview.questions:
-                    typer.echo(f"  {question.key}")
-            return
-        summary = evidence.run(conn, llm.client(), trial_ids, settings, progress=typer.echo)
-    typer.echo(summary.summary())
-    _echo_failures(summary.failed)
-    if summary.failed:
-        raise typer.Exit(1)
+        if all_trials:
+            params["every"] = True
+        else:
+            params["trial_ids"] = _trials_to_judge(conn, ct_numbers, from_file)
+        _run_step(conn, "check", params)
 
 
 @check_app.command("configs")

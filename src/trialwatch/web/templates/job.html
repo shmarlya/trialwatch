@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import when, run_status %}
+{% from "macros.html" import when %}
 {% block title %}Job {{ job.id }} · TrialWatch{% endblock %}
 {% block content %}
 <h1>Job {{ job.id }} · {{ steps[job.kind] }}{% if job.params.dry_run %} <span class="muted">(dry run)</span>{% endif %}</h1>
@@ -7,7 +7,6 @@
   Status: <b id="status">{{ job.status }}</b>
   · attempt <span id="attempts">{{ job.attempts }}</span> of {{ job.max_attempts }}
   · {% if job.automatic %}automatic{% endif %} created by {{ who(job.actor) }} {{ when(job.created_at) }}
-  {% if parent %} · part of <a href="/jobs/{{ parent.id }}">job {{ parent.id }} ({{ steps[parent.kind] }})</a>{% endif %}
   {% if job.status == "queued" and job.attempts %} · next try {{ when(job.run_after) }}{% endif %}
   · cost <span id="cost">{{ dollars(cost) }}</span>
 </p>
@@ -18,7 +17,7 @@
   {% if job.params.every %}every trial ready for a check{% endif %}
   {% if job.params.trial_ids %}trials {% for trial_id in job.params.trial_ids[:20] %}<a href="/trials/{{ trial_id }}">{{ trial_id }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% if job.params.trial_ids | length > 20 %} and {{ job.params.trial_ids | length - 20 }} more{% endif %}{% endif %}
   {% if job.params.limit %} · limit {{ job.params.limit }}{% endif %}
-  {% if job.kind == "check" %} · setup {{ job.params.config }}{% endif %}
+  {% if job.params.config %} · setup {{ job.params.config }}{% endif %}
 </p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 {% if job.last_error and job.status != "succeeded" %}<div class="alert"><b>{% if job.status == "held" %}Held{% else %}Last error{% endif %}:</b> {{ job.last_error }}</div>{% endif %}
@@ -28,17 +27,6 @@
 </div>
 {% if runs.check_runs or runs.ingest_runs %}
 <p class="small">Runs: {% for run_id in runs.check_runs %}<a href="/runs/{{ run_id }}">check run {{ run_id }}</a> {% endfor %}{% for run_id in runs.ingest_runs %}ingest run {{ run_id }} {% endfor %}</p>
-{% endif %}
-{% if children %}
-<h2>Its jobs</h2>
-<div class="table-wrap"><table>
-  <tr><th>Job</th><th>What</th><th>Status</th><th class="num">Attempts</th><th>Last error</th></tr>
-  {% for child in children %}
-  <tr><td><a href="/jobs/{{ child.id }}">{{ child.id }}</a></td><td>{{ steps[child.kind] }}{% if child.params.source %} · {{ child.params.source }}{% endif %}{% if child.params.get("keys") %} · {{ child.params.get("keys") | length }} trials{% endif %}{% if child.params.trial_ids %} · {{ child.params.trial_ids | length }} trials{% endif %}</td>
-      <td>{{ run_status(child.status) }}</td><td class="num">{{ child.attempts }}/{{ child.max_attempts }}</td>
-      <td class="small muted">{% if child.last_error %}{{ child.last_error[:160] }}{% endif %}</td></tr>
-  {% endfor %}
-</table></div>
 {% endif %}
 <h2>Progress</h2>
 <pre id="log">{% for line in lines %}{% if loop.first or line.attempt != loop.previtem.attempt %}— attempt {{ line.attempt }} —

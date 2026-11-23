@@ -65,12 +65,12 @@ from trialwatch.geo import countries
 from trialwatch.llm import dollars
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
-from trialwatch.jobs import MAX_ATTEMPTS, PRIORITY_AUTOMATIC
+from trialwatch.jobs import PRIORITY_AUTOMATIC, tasks
 from trialwatch.web import jobs as web_jobs
 from trialwatch.web import search as web_search
 from trialwatch.search import categories as search_categories
 from trialwatch.search import query as search_query
-from trialwatch.web.jobs import STEPS, JobRequest
+from trialwatch.web.jobs import JobRequest
 
 
 
@@ -757,7 +757,7 @@ def dashboard(request: Request, error: str | None = None, q: str = "", result: s
         spend = costs_db.spend_totals(conn)
     context = {"times": times, "spend": spend, "sources": sources, "coverage": coverage, "runs": runs[:10], "jobs": recent, "job_costs": job_costs,
                "running": _running(),
-               "steps": STEPS, "error": error, "defaults": defaults,
+               "steps": tasks.LABELS, "error": error, "defaults": defaults,
                "choices": choices, "configs": check_settings.load_all()}
     return TEMPLATES.TemplateResponse(request, "dashboard.html", context)
 
@@ -915,14 +915,10 @@ def job_page(request: Request, job_id: int, error: str | None = None,
     with db.connect_system() as conn:
         job = _job_or_404(conn, job_id)
         lines = jobs_db.lines(conn, job_id)
-        children = jobs_db.children(conn, job_id)
         runs = jobs_db.runs_of(conn, job_id)
         cost = jobs_db.job_cost(conn, job_id)
-        parent = None
-        if job.parent_id is not None:
-            parent = jobs_db.job(conn, job.parent_id)
-    context = {"job": job, "lines": lines, "children": children, "runs": runs, "cost": cost, "parent": parent,
-               "steps": STEPS, "error": error, "dollars": dollars}
+    context = {"job": job, "lines": lines, "runs": runs, "cost": cost, "steps": tasks.LABELS, "error": error,
+               "dollars": dollars}
     return TEMPLATES.TemplateResponse(request, "job.html", context)
 
 
@@ -947,7 +943,7 @@ def job_progress(job_id: int, after: int = 0,
 
 JOB_TABS = {
     "attention": ("Need attention", ("failed", "held")),
-    "active": ("Running or waiting", ("running", "waiting")),
+    "active": ("Running", ("running",)),
     "queued": ("Queued", ("queued",)),
     "ended": ("Ended", ("succeeded", "cancelled", "failed")),
 }
@@ -970,7 +966,7 @@ def jobs_page(request: Request, tab: str = "attention", error: str | None = None
             total += counts.get(status, 0)
         tab_counts[name] = total
     context = {"tab": tab, "tabs": JOB_TABS, "tab_counts": tab_counts, "jobs": found, "costs": costs,
-               "schedules": schedules, "steps": STEPS, "error": error, "dollars": dollars,
+               "schedules": schedules, "steps": tasks.LABELS, "error": error, "dollars": dollars,
                "weekdays": WEEKDAYS, "frequencies": jobs_db.FREQUENCIES}
     return TEMPLATES.TemplateResponse(request, "admin_jobs.html", context)
 
@@ -1014,8 +1010,9 @@ def run_schedule_now(schedule_id: int, user: auth_db.User = Depends(Requires("sc
     if schedule is None:
         raise HTTPException(404, "no such schedule")
     with db.connect_system() as conn:
-        job_id = jobs_db.enqueue(conn, schedule.kind, schedule.params, max_attempts=MAX_ATTEMPTS[schedule.kind],
-                                 automatic=True, schedule_id=schedule.id, priority=PRIORITY_AUTOMATIC)
+        max_attempts = tasks.TASKS[schedule.kind].max_attempts
+        job_id = jobs_db.enqueue(conn, schedule.kind, schedule.params, max_attempts=max_attempts, automatic=True,
+                                 schedule_id=schedule.id, priority=PRIORITY_AUTOMATIC)
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
@@ -1441,7 +1438,7 @@ def sources_page(request: Request, error: str | None = None,
     with db.connect_system() as conn:
         rows = overview.source_rows(conn)
     context = {"rows": rows, "free_adapters": _unregistered_adapters(rows), "error": error, "running": _running(),
-               "steps": STEPS}
+               "steps": tasks.LABELS}
     return TEMPLATES.TemplateResponse(request, "sources.html", context)
 
 
@@ -1500,7 +1497,7 @@ def source_page(request: Request, code: str, state: str = "", q: str = "", page:
         "row": row, "adapter": adapter, "config_text": json.dumps(row.config, indent=2), "trials": trials,
         "total": total, "page": page, "pages": max(1, -(-total // SOURCE_TRIALS_PER_PAGE)), "state": state, "q": q,
         "filters": overview.SOURCE_TRIAL_FILTERS, "choices": core.TRANSFER_CHOICES, "runs": runs,
-        "running": _running(), "steps": STEPS, "error": error, "saved": saved, "here": here,
+        "running": _running(), "steps": tasks.LABELS, "error": error, "saved": saved, "here": here,
         "defaults": default_settings(),
     }
     return TEMPLATES.TemplateResponse(request, "source.html", context)

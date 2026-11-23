@@ -1451,7 +1451,6 @@ CREATE TABLE jobs.job (
     kind text NOT NULL,
     params jsonb DEFAULT '{}'::jsonb NOT NULL,
     automatic boolean DEFAULT false NOT NULL,
-    parent_id bigint,
     schedule_id integer,
     priority smallint DEFAULT 100 NOT NULL,
     status text DEFAULT 'queued'::text NOT NULL,
@@ -1470,7 +1469,7 @@ CREATE TABLE jobs.job (
     CONSTRAINT job_check CHECK (((status = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text])) = (finished_at IS NOT NULL))),
     CONSTRAINT job_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text, 'annotate'::text]))),
     CONSTRAINT job_max_attempts_check CHECK ((max_attempts >= 1)),
-    CONSTRAINT job_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'waiting'::text, 'held'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
+    CONSTRAINT job_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'held'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
 );
 
 
@@ -2549,13 +2548,6 @@ CREATE INDEX job_line_job_idx ON jobs.job_line USING btree (job_id, id);
 
 
 --
--- Name: job_parent_idx; Type: INDEX; Schema: jobs; Owner: -
---
-
-CREATE INDEX job_parent_idx ON jobs.job USING btree (parent_id);
-
-
---
 -- Name: job_queue_idx; Type: INDEX; Schema: jobs; Owner: -
 --
 
@@ -3492,14 +3484,6 @@ ALTER TABLE ONLY jobs.job_line
 
 
 --
--- Name: job job_parent_id_fkey; Type: FK CONSTRAINT; Schema: jobs; Owner: -
---
-
-ALTER TABLE ONLY jobs.job
-    ADD CONSTRAINT job_parent_id_fkey FOREIGN KEY (parent_id) REFERENCES jobs.job(id);
-
-
---
 -- Name: job job_schedule_id_fkey; Type: FK CONSTRAINT; Schema: jobs; Owner: -
 --
 
@@ -3611,4 +3595,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261124100000'),
     ('20261124110000'),
     ('20261124120000'),
-    ('20261124130000');
+    ('20261124130000'),
+    ('20261124140000');

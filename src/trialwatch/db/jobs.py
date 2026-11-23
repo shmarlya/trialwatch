@@ -22,7 +22,6 @@ class Job:
     kind: str
     params: dict
     automatic: bool
-    parent_id: int | None
     schedule_id: int | None
     priority: int
     status: str
@@ -47,7 +46,7 @@ class Job:
 
 
 _JOB_COLUMNS = """
-    j.id, j.kind, j.params, j.automatic, j.parent_id, j.schedule_id, j.priority, j.status, j.attempts,
+    j.id, j.kind, j.params, j.automatic, j.schedule_id, j.priority, j.status, j.attempts,
     j.max_attempts, j.run_after, j.cancel_requested, j.last_error, j.result, j.locked_by, j.heartbeat_at,
     j.created_by, j.created_at, j.started_at, j.finished_at, a.name AS actor
 """
@@ -55,12 +54,12 @@ _JOBS = f"SELECT {_JOB_COLUMNS} FROM jobs.job j JOIN core.actor a ON a.id = j.cr
 
 
 def enqueue(conn: psycopg.Connection, kind: str, params: dict, *, max_attempts: int, automatic: bool = False,
-            parent_id: int | None = None, schedule_id: int | None = None, priority: int = 100) -> int:
+            schedule_id: int | None = None, priority: int = 100) -> int:
     """Add a queued job, created by the session's actor; returns its id."""
     row = conn.execute(
-        "INSERT INTO jobs.job (kind, params, automatic, parent_id, schedule_id, priority, max_attempts, created_by) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, current_setting('trialwatch.actor')::bigint) RETURNING id",
-        (kind, Jsonb(params), automatic, parent_id, schedule_id, priority, max_attempts),
+        "INSERT INTO jobs.job (kind, params, automatic, schedule_id, priority, max_attempts, created_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, current_setting('trialwatch.actor')::bigint) RETURNING id",
+        (kind, Jsonb(params), automatic, schedule_id, priority, max_attempts),
     ).fetchone()
     return row[0]
 
@@ -79,11 +78,6 @@ def jobs_with_status(conn: psycopg.Connection, statuses: tuple[str, ...], limit:
 def recent_jobs(conn: psycopg.Connection, limit: int = 50) -> list[Job]:
     with conn.cursor(row_factory=class_row(Job)) as cursor:
         return cursor.execute(_JOBS + " ORDER BY j.id DESC LIMIT %s", (limit,)).fetchall()
-
-
-def children(conn: psycopg.Connection, parent_id: int) -> list[Job]:
-    with conn.cursor(row_factory=class_row(Job)) as cursor:
-        return cursor.execute(_JOBS + " WHERE j.parent_id = %s ORDER BY j.id", (parent_id,)).fetchall()
 
 
 def status_counts(conn: psycopg.Connection) -> dict[str, int]:
@@ -171,16 +165,6 @@ def finish(conn: psycopg.Connection, job_id: int, status: str, result: dict, err
     )
 
 
-def wait_for_children(conn: psycopg.Connection, job_id: int, result: dict) -> None:
-    """The job waits for its child jobs; the last one to end puts it back in the queue
-    (requeue_parent_when_done). Waiting is not an attempt, so the claim's count is given back."""
-    conn.execute(
-        "UPDATE jobs.job SET status = 'waiting', result = %s, attempts = attempts - 1, locked_by = NULL "
-        "WHERE id = %s",
-        (Jsonb(result), job_id),
-    )
-
-
 def hold(conn: psycopg.Connection, job_id: int, result: dict, reason: str) -> None:
     """Held by the spending cap: not a failed attempt, so the claim's count is given back."""
     conn.execute(
@@ -197,23 +181,6 @@ def try_later(conn: psycopg.Connection, job_id: int, delay: timedelta, result: d
         "locked_by = NULL WHERE id = %s",
         (delay, Jsonb(result), error, job_id),
     )
-
-
-def requeue_parent_when_done(conn: psycopg.Connection, parent_id: int) -> bool:
-    """When every child of a waiting job has ended, queue the parent again for its next stage. Locks the
-    parent, so of two children ending at once only one requeues it. True when it was requeued."""
-    with conn.transaction():
-        row = conn.execute("SELECT status FROM jobs.job WHERE id = %s FOR UPDATE", (parent_id,)).fetchone()
-        if row is None or row[0] != "waiting":
-            return False
-        open_children = conn.execute(
-            "SELECT count(*) FROM jobs.job WHERE parent_id = %s AND status <> ALL(%s)", (parent_id, list(ENDED))
-        ).fetchone()
-        if open_children[0] > 0:
-            return False
-        conn.execute("UPDATE jobs.job SET status = 'queued', run_after = clock_timestamp() WHERE id = %s",
-                     (parent_id,))
-    return True
 
 
 def requeue_stalled(conn: psycopg.Connection, older_than: timedelta) -> list[int]:
@@ -250,8 +217,8 @@ def resume_held(conn: psycopg.Connection) -> list[int]:
 # --- what people do on /admin/jobs ---------------------------------------------------------------
 
 def request_cancel(conn: psycopg.Connection, job_id: int) -> str | None:
-    """Cancel a job: one not started (queued, held, waiting) ends at once, with its queued children; a
-    running one stops after the trial or page it is on. Returns its status after, None if it has ended."""
+    """Cancel a job: one not running (queued, held) ends at once; a running one stops after the trial or
+    page it is on. Returns its status after, None if it has ended."""
     with conn.transaction():
         row = conn.execute("SELECT status FROM jobs.job WHERE id = %s FOR UPDATE", (job_id,)).fetchone()
         if row is None or row[0] in ENDED:
@@ -261,10 +228,6 @@ def request_cancel(conn: psycopg.Connection, job_id: int) -> str | None:
             return "running"
         conn.execute("UPDATE jobs.job SET status = 'cancelled', cancel_requested = true, finished_at = clock_timestamp() "
                      "WHERE id = %s", (job_id,))
-        conn.execute("UPDATE jobs.job SET status = 'cancelled', cancel_requested = true, finished_at = clock_timestamp() "
-                     "WHERE parent_id = %s AND status IN ('queued', 'held', 'waiting')", (job_id,))
-        conn.execute("UPDATE jobs.job SET cancel_requested = true WHERE parent_id = %s AND status = 'running'",
-                     (job_id,))
     return "cancelled"
 
 
@@ -278,30 +241,20 @@ def retry_now(conn: psycopg.Connection, job_id: int) -> bool:
         """,
         (job_id,),
     )
-    if cursor.rowcount != 1:
-        return False
-    # a waiting parent that had already moved on stays as it is; one that ended waits again
-    return True
+    return cursor.rowcount == 1
 
 
 def job_cost(conn: psycopg.Connection, job_id: int) -> Decimal:
-    """What the job's billed calls cost, its child jobs' included."""
-    row = conn.execute(
-        "SELECT coalesce(sum(c.cost_usd), 0) FROM core.api_call c JOIN jobs.job j ON j.id = c.job_id "
-        "WHERE j.id = %s OR j.parent_id = %s",
-        (job_id, job_id),
-    ).fetchone()
+    """What the job's billed calls cost."""
+    row = conn.execute("SELECT coalesce(sum(cost_usd), 0) FROM core.api_call WHERE job_id = %s", (job_id,)).fetchone()
     return row[0]
 
 
 def job_costs(conn: psycopg.Connection, job_ids: list[int]) -> dict[int, Decimal]:
-    """Job id -> what it cost, its child jobs' included."""
+    """Job id -> what it cost."""
     rows = conn.execute(
-        """
-        SELECT j.id, (SELECT coalesce(sum(c.cost_usd), 0) FROM core.api_call c JOIN jobs.job k ON k.id = c.job_id
-                       WHERE k.id = j.id OR k.parent_id = j.id)
-          FROM jobs.job j WHERE j.id = ANY(%s)
-        """,
+        "SELECT j.id, (SELECT coalesce(sum(c.cost_usd), 0) FROM core.api_call c WHERE c.job_id = j.id) "
+        "FROM jobs.job j WHERE j.id = ANY(%s)",
         (job_ids,),
     ).fetchall()
     costs = {}

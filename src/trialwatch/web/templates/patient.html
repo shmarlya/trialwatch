@@ -44,9 +44,9 @@
     {% if hit.conditions %}<p class="conditions">{{ hit.conditions | join(" · ") }}</p>{% endif %}
     <dl class="facts small">
       <dt>Where</dt>
-      <dd>{% if hit.distance_km is not none %}{% if hit.precision != "postcode" and hit.distance_km < 3 %}<b>in {{ hit.site_city }}</b>{% else %}<b>{{ "%.0f" | format(hit.distance_km) }} km</b>{% if hit.precision != "postcode" %} <span class="muted">(about: placed by its city)</span>{% endif %}{% endif %}:
+      <dd>{% if hit.distance_km is not none %}{% if hit.precision not in ("postcode", "source") and hit.distance_km < 3 %}<b>in {{ hit.site_city }}</b>{% else %}<b>{{ "%.0f" | format(hit.distance_km) }} km</b>{% if hit.precision not in ("postcode", "source") %} <span class="muted">(about: placed by its city)</span>{% endif %}{% endif %}:
         {{ hit.site or "a site" }}{% if hit.site_city %}, {{ hit.site_city }}{% endif %}{% if hit.sites_near and hit.sites_near > 1 %} · {{ hit.sites_near }} sites{% if km %} within {{ km }} km{% endif %}{% endif %}<br>{% endif %}
-        recruiting in {{ hit.recruiting_countries | join(", ") or "—" }}</dd>
+        recruiting in {{ hit.recruiting_countries | country_names | join(", ") or "—" }}</dd>
       <dt>Who can join</dt>
       <dd>{% for group in hit.age_groups %}{{ age_words[group] }}{% if not loop.last %}, {% endif %}{% else %}ages not said{% endfor %}
         · {{ sexes(hit.female, hit.male) }} · {{ groups(hit.patients, hit.healthy_volunteers) }}{% if hit.rare %} · <span class="badge info">rare disease</span>{% endif %}</dd>

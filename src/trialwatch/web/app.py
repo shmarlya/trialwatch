@@ -60,6 +60,7 @@ from trialwatch.gold import datasets as gold_datasets
 from trialwatch.db import search as search_db
 from trialwatch.sources import manual, profile, registry
 from trialwatch.trials import readiness
+from trialwatch.geo import countries
 from trialwatch.llm import dollars
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
@@ -87,6 +88,14 @@ def auth_context(request: Request) -> dict:
 TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates", context_processors=[auth_context])
 # `dollars(amount)` in a template: money as pages show it ($1.23, $0.0042)
 TEMPLATES.env.globals["dollars"] = dollars
+
+
+def country_names(codes: list[str]) -> list[str]:
+    """Countries by code (as search keeps them) as pages name them."""
+    return [countries.name_of(code) for code in codes]
+
+
+TEMPLATES.env.filters["country_names"] = country_names
 # Names of the trace steps as the trial page shows them
 STEP_TITLES = {
     "questions": "Questions: the requirements for this trial",
@@ -1327,10 +1336,10 @@ class PatientView:
 
 
 def _patient_view(conn: psycopg.Connection, trial_id: int) -> PatientView | None:
-    stored = core.trial_profile(conn, trial_id)
+    stored = profile.current(conn, trial_id)
     if stored is None:
         return None
-    read = profile.profile_from_data(stored.profile)
+    read = stored.read
     source = core.registered_source(conn, stored.source)
     url = None
     source_name = stored.source

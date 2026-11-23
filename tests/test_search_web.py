@@ -13,6 +13,7 @@ from vocabulary import load_mesh
 
 from trialwatch.db import core
 from trialwatch.db import search as search_db
+from trialwatch.geo import countries
 from trialwatch.sources import ctis
 from trialwatch.trials import ingest
 from trialwatch.web import app as web
@@ -163,3 +164,24 @@ def test_a_whole_country_search_shows_the_nearest_site_in_that_country(trials, a
     two_countries = by_key[FRANCE_AND_BELGIUM]
     assert (two_countries.site_city, two_countries.site_country) == ("Nice", "France")
     assert two_countries.sites_near == 1
+
+
+def test_countries_are_compared_by_code_however_a_source_spells_them():
+    assert (countries.iso2_of("France"), countries.iso2_of("Deutschland"), countries.iso2_of("  belgique ")) == (
+        "FR", "DE", "BE")
+    # a country we have no name for has no code: shown, but no part in finding trials by country
+    assert countries.iso2_of("United States") is None and countries.iso2_of(None) is None
+    assert (countries.name_of("FR"), countries.name_of("US")) == ("France", "US")
+
+
+def test_a_site_whose_source_gives_its_point_is_found_without_geonames(trials, app_conn):
+    # a second source places a site of the Lyon trial in Paris itself, with its own point and an address
+    # GeoNames doesn't know
+    site = core.Location(country="France", city="Nowhere-in-GeoNames", site="Hôpital du test", latitude=PARIS_POINT[0],
+                         longitude=PARIS_POINT[1])
+    core.set_trial_locations(app_conn, trials[IN_LYON], "manual", [site])
+    near_paris = search_db.SearchFilter(latitude=PARIS_POINT[0], longitude=PARIS_POINT[1], radius_km=10.0)
+    hits, _total = search_db.search_hits(app_conn, near_paris, 0, 10)
+    by_key = {hit.source_key: hit for hit in hits}
+    found = by_key[IN_LYON]
+    assert (found.site, found.precision, round(found.distance_km)) == ("Hôpital du test", "source", 0)

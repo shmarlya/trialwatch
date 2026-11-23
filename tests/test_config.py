@@ -94,3 +94,11 @@ def test_a_database_url_already_set_is_kept(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://elsewhere/db")
     config.load_env_file(env_file(tmp_path))
     assert os.environ["DATABASE_URL"] == "postgresql://elsewhere/db"
+
+
+def test_the_gazetteer_covers_the_eu_eea_unless_configured(monkeypatch):
+    monkeypatch.delenv("TRIALWATCH_COUNTRIES", raising=False)
+    default = config.gazetteer_countries()
+    assert "FR" in default and "NO" in default and "US" not in default
+    monkeypatch.setenv("TRIALWATCH_COUNTRIES", "fr, us ,")
+    assert config.gazetteer_countries() == ["FR", "US"]

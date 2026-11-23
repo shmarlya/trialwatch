@@ -15,7 +15,7 @@ import httpx
 import psycopg
 import typer
 
-from trialwatch import llm
+from trialwatch import config, llm
 from trialwatch import db
 from trialwatch.auth import accounts, actions, passwords
 from trialwatch.checks import evidence
@@ -27,7 +27,6 @@ from trialwatch.db import core as core_db
 from trialwatch.db import geo as geo_db
 from trialwatch.db import search as search_db
 from trialwatch.config import load_env_file
-from trialwatch.geo import geonames
 from trialwatch.geo import load as geo_loading
 from trialwatch.gold import bruckner, datasets
 from trialwatch.search import annotate as search_annotating
@@ -438,18 +437,18 @@ def geo_load(
                      help="Read GeoNames' files from this folder instead of downloading them"),
     ] = None,
 ) -> None:
-    """Load GeoNames (CC BY 4.0): countries, the EU/EEA's places with 1000+ people and their names in
-    many languages, and their postal codes; then find where every trial site is again."""
+    """Load GeoNames (CC BY 4.0): countries, the places with 1000+ people of the countries patient
+    search covers (TRIALWATCH_COUNTRIES, by default the EU/EEA) with their names in many languages, and
+    their postal codes; then find where every trial site is again."""
     chosen = []
-    known = geonames.eea_countries()
     if countries:
         for country in countries:
-            code = country.upper()
-            if code not in known:
-                raise typer.BadParameter(f"not an EU/EEA country code: {country}", param_hint="--country")
+            code = country.strip().upper()
+            if len(code) != 2 or not code.isalpha():
+                raise typer.BadParameter(f"not a two-letter country code: {country}", param_hint="--country")
             chosen.append(code)
     else:
-        chosen = known
+        chosen = config.gazetteer_countries()
     with db.connect_system() as conn:
         summary = geo_loading.load(conn, chosen, from_dir, progress=typer.echo)
         typer.echo(f"geo load run {summary.run_id}: {summary.countries} countries, {summary.places:,} places, "
@@ -572,10 +571,10 @@ def search_annotate(
         if not trial_ids:
             return
         if dry_run:
-            stored = core_db.trial_profile(conn, trial_ids[0])
+            stored = profile.current(conn, trial_ids[0])
             if stored is None:
                 raise typer.BadParameter(f"trial {trial_ids[0]} has no profile")
-            read = profile.profile_from_data(stored.profile)
+            read = stored.read
             request = search_annotating.build_request(
                 settings, load_prompt(settings.prompt), search_annotating.fields_for(read),
                 search_annotating.languages_for(conn, read, settings.max_languages),

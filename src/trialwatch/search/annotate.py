@@ -23,7 +23,6 @@ import psycopg
 from trialwatch import llm
 from trialwatch.checks.prompts import Prompt, load_prompt
 from trialwatch.checks.verify import verify_in_text
-from trialwatch.db import core
 from trialwatch.db import geo as geo_db
 from trialwatch.db import search as search_db
 from trialwatch.db import vocab as vocab_db
@@ -358,10 +357,10 @@ class RunSummary:
 def annotate_trial(conn: psycopg.Connection, client: MessagesClient, settings: Settings, prompt: Prompt,
                    run_id: int, trial_id: int) -> tuple[int, int, str | None, Decimal]:
     """Tag one trial; returns (tags kept, tags dropped, error, cost)."""
-    stored = core.trial_profile(conn, trial_id)
+    stored = profile.current(conn, trial_id)
     if stored is None:
         return 0, 0, "no profile", Decimal(0)
-    read = profile.profile_from_data(stored.profile)
+    read = stored.read
     fields = fields_for(read)
     languages = languages_for(conn, read, settings.max_languages)
     candidates = candidates_for(conn, read, settings.max_candidates)

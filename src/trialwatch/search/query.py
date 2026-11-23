@@ -310,7 +310,7 @@ def _best_place(matches: list, country_hint: str | None, phrase: str, least: int
     largest. ("Roma" is Rome, not the village of Roma in Sweden: too small to count.)"""
     candidates = []
     for match in matches:
-        if match.eea and match.population >= least:
+        if match.in_gazetteer and match.population >= least:
             candidates.append(match)
     if country_hint is not None:
         for match in candidates:
@@ -365,7 +365,7 @@ def _take_place(words: list[str | None], original: list[str], lookups: Lookups,
             words[start - 1] = None
         others = []
         for other in by_name[phrase]:
-            if other.eea and other.geonameid != place.geonameid and other.population >= least:
+            if other.in_gazetteer and other.geonameid != place.geonameid and other.population >= least:
                 others.append(other)
         for other in others[:3]:
             interpretation.alternatives.append(Alternative(

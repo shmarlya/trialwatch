@@ -20,6 +20,8 @@ from trialwatch.sources import profile
 from trialwatch.vocab import mesh
 
 TOKEN_PREFIX = "zmesh"
+# a MeSH descriptor's id (its UI), e.g. D003924
+MESH_UI = re.compile(r"D[0-9]+")
 MIN_WORD_LETTERS = 5
 MAX_PHRASE_WORDS = 6
 # entry terms too general to stand for a trial's condition when found as a single word in its text
@@ -36,7 +38,7 @@ WORD = re.compile(r"[^\W_]+")
 class Concept:
     ui: str
     name: str
-    # exact-name | same-words | phrase | ai-quote
+    # exact-name | same-words | phrase (found in the text) | source-code (the source coded it in MeSH) | ai-quote
     method: str
     field: str
     quote: str
@@ -57,6 +59,18 @@ def condition_fields(read: profile.TrialProfile) -> list[tuple[str, str]]:
             number += 1
             fields.append((f"meddra-{number}", term.name))
     return fields
+
+
+def from_coded_terms(read: profile.TrialProfile) -> list[Concept]:
+    """The MeSH descriptors the source itself coded the trial's conditions in (ClinicalTrials.gov does;
+    CTIS codes in MedDRA): concepts as they are, with nothing to look for."""
+    found = []
+    number = 0
+    for term in read.coded_terms:
+        if term.system == "mesh" and MESH_UI.fullmatch(term.code):
+            number += 1
+            found.append(Concept(term.code, term.name, "source-code", f"mesh-{number}", term.name))
+    return found
 
 
 def _phrases(text: str) -> list[tuple[int, int, str]]:

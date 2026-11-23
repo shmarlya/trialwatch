@@ -19,8 +19,8 @@ from dataclasses import dataclass, field
 
 import psycopg
 
-from trialwatch.db import core
 from trialwatch.db import search as search_db
+from trialwatch.geo import countries
 from trialwatch.search import categories, concepts
 from trialwatch.sources import profile
 
@@ -85,7 +85,10 @@ def _facts_named(facts: dict | None, name: str) -> list[dict]:
     return facts[name]
 
 
-def _years(facts: dict | None, name: str) -> float | None:
+def _years(registered: float | None, facts: dict | None, name: str) -> float | None:
+    """An age limit: the one the source registers, else the one the AI tags quoted from the criteria."""
+    if registered is not None:
+        return registered
     if facts is None or not isinstance(facts.get(name), dict):
         return None
     return facts[name]["years"]
@@ -148,17 +151,23 @@ def document_for(trial_id: int, source: str, read: profile.TrialProfile, profile
     condition_names = []
     for condition in read.conditions:
         condition_names.append(condition.name)
+    # by code: search compares countries by code (geo/countries.py), however a source spells them
+    recruiting_codes = []
+    for name in profile.recruiting_countries(read):
+        code = countries.iso2_of(name)
+        if code is not None and code not in recruiting_codes:
+            recruiting_codes.append(code)
     title = read.public_title
     if title is None:
         title = read.full_title
     return SearchDocument(
         trial_id=trial_id, source=source, profile_hash=profile_hash, recruiting=read.recruiting,
-        recruiting_countries=profile.recruiting_countries(read), title=title, conditions=condition_names,
+        recruiting_countries=recruiting_codes, title=title, conditions=condition_names,
         categories=trial_categories, phase=read.phase, age_groups=list(read.age_groups), female=read.female,
         male=read.male, healthy_volunteers=read.healthy_volunteers, patients=read.patients, rare=_is_rare(read),
         text_a="\n".join(a), text_b="\n".join(b), text_c="\n".join(c), text_d="\n".join(d),
-        lexemes_a=lexemes_a, lexemes_b=lexemes_b, annotation_id=annotation_id, age_min=_years(facts, "age_min"),
-        age_max=_years(facts, "age_max"), interventions=_tag_values(facts, "interventions", "kind"),
+        lexemes_a=lexemes_a, lexemes_b=lexemes_b, annotation_id=annotation_id, age_min=_years(read.age_min, facts, "age_min"),
+        age_max=_years(read.age_max, facts, "age_max"), interventions=_tag_values(facts, "interventions", "kind"),
         purposes=_tag_values(facts, "purposes", "purpose"),
     )
 
@@ -175,14 +184,17 @@ def rebuild_trial(conn: psycopg.Connection, trial_id: int, force: bool = False) 
     """Build the trial's search document from its stored profile, unless the document was built from
     the same profile already (`force`: rebuild anyway). A trial without a profile has no document.
     Returns True when it built one."""
-    stored = core.trial_profile(conn, trial_id)
+    stored = profile.current(conn, trial_id)
     if stored is None:
         search_db.delete_document(conn, trial_id)
         return False
     if not force and search_db.document_hash(conn, trial_id) == stored.profile_hash:
         return False
-    read = profile.profile_from_data(stored.profile)
+    read = stored.read
     found = concepts.find(conn, concepts.condition_fields(read))
+    for coded in concepts.from_coded_terms(read):
+        if coded not in found:
+            found.append(coded)
     # the AI tags of this very profile, if it was annotated (an annotation of an older profile is not used)
     annotation = search_db.latest_annotation(conn, trial_id, bytes(stored.profile_hash))
     facts = None

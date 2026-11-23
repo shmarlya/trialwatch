@@ -85,7 +85,7 @@ def recruiting(app_conn, tmp_path):
 
 
 def stored_profile(conn, trial_id):
-    return profile.profile_from_data(core.trial_profile(conn, trial_id).profile)
+    return profile.current(conn, trial_id).read
 
 
 def test_only_tags_quoted_from_their_field_and_asked_for_are_kept(app_conn, recruiting):

@@ -84,7 +84,7 @@ def test_a_transfer_stores_it_and_reading_it_again_changes_nothing(conn):
     ingest.sync_list(conn, core.registered_source(conn, "ctis"), ctis.CtisAdapter(fake))
     transfer(conn, fake, keys=(CT,))
     trial_id = core.trials_with_scheme(conn, "eu-ct", [CT])[CT]
-    stored = core.trial_profile(conn, trial_id)
+    stored = core.trial_profiles(conn, trial_id)[0]
     assert stored.source == "ctis" and stored.recruiting is True
     assert stored.profile["conditions"][0]["name"] == "Type 2 Diabetes Mellitus"
     assert EMAIL not in json.dumps(stored.profile)
@@ -97,7 +97,7 @@ def test_a_transfer_stores_it_and_reading_it_again_changes_nothing(conn):
     conn.execute("UPDATE core.source_listing SET summary = %s WHERE source_key = %s",
                  (json.dumps(listing(CT, status_code=5, countries={"France": 5})), CT))
     transfer(conn, fake, keys=(CT,))
-    assert core.trial_profile(conn, trial_id).recruiting is False
+    assert core.trial_profiles(conn, trial_id)[0].recruiting is False
 
 
 def test_the_command_reads_them_again_from_stored_records(app_conn, monkeypatch):
@@ -110,4 +110,27 @@ def test_the_command_reads_them_again_from_stored_records(app_conn, monkeypatch)
     assert result.exit_code == 0, result.stdout
     assert "read the profiles of 1 trial (1 new or changed)" in result.stdout
     trial_id = core.trials_with_scheme(app_conn, "eu-ct", [CT])[CT]
-    assert core.trial_profile(app_conn, trial_id).profile["coded_terms"][0]["code"] == DIABETES_TERM["classificationCode"]
+    assert core.trial_profiles(app_conn, trial_id)[0].profile["coded_terms"][0]["code"] == DIABETES_TERM["classificationCode"]
+
+
+def test_a_trial_held_by_two_sources_is_one_profile_for_search():
+    # the newest first: lists joined, each country once as the newest source gives it, single values
+    # from the newest source that gives one; recruiting when any source says it recruits now
+    newest = profile.TrialProfile(
+        public_title="From the newer registry", recruiting=False, age_groups=("18-64",), age_min=18.0,
+        conditions=(profile.Condition("Asthma"),),
+        countries=(profile.CountryStatus("Deutschland", "Recruiting", recruiting=True),),
+    )
+    older = profile.TrialProfile(
+        public_title="From CTIS", full_title="A full title only CTIS gives", recruiting=True,
+        age_groups=("18-64", "65+"), conditions=(profile.Condition("Asthma"), profile.Condition("COPD")),
+        countries=(profile.CountryStatus("Germany", "Ongoing, recruiting", recruiting=True),
+                   profile.CountryStatus("France", "Ended", recruiting=False)),
+    )
+    together = profile.merge([newest, older])
+    assert (together.public_title, together.full_title, together.recruiting) == (
+        "From the newer registry", "A full title only CTIS gives", True)
+    assert together.age_groups == ("18-64", "65+") and together.age_min == 18.0
+    assert [condition.name for condition in together.conditions] == ["Asthma", "COPD"]
+    assert [(status.country, status.status) for status in together.countries] == [
+        ("Deutschland", "Recruiting"), ("France", "Ended")]

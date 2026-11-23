@@ -55,14 +55,15 @@ def load(conn: psycopg.Connection, countries: list[str], from_dir: Path | None =
 
         country_file = _required(geonames.COUNTRY_INFO, from_dir, work_dir)
         files.append(_file_record(country_file))
+        # the names people type in the main EU languages, and CTIS's spellings (geo/countries.json)
         names_by_country = geonames.eea_names()
         country_rows = []
         name_rows = []
         for country in geonames.read_countries(country_file.path):
-            in_eea = country.iso2 in names_by_country
-            country_rows.append((country.iso2, country.iso3, country.name, list(country.languages), in_eea))
+            in_gazetteer = country.iso2 in countries
+            country_rows.append((country.iso2, country.iso3, country.name, list(country.languages), in_gazetteer))
             name_rows.append((country.iso2, country.name))
-            if in_eea:
+            if country.iso2 in names_by_country:
                 for name in names_by_country[country.iso2]:
                     name_rows.append((country.iso2, name))
         geo_db.replace_countries(conn, country_rows, name_rows)

@@ -37,7 +37,7 @@ def replace_countries(conn: psycopg.Connection, countries: Sequence[tuple[str, s
     conn.execute("DELETE FROM geo.country_name")
     conn.execute("DELETE FROM geo.country")
     with conn.cursor() as cur:
-        with cur.copy("COPY geo.country (iso2, iso3, name, languages, eea) FROM STDIN") as copy:
+        with cur.copy("COPY geo.country (iso2, iso3, name, languages, in_gazetteer) FROM STDIN") as copy:
             for country in countries:
                 copy.write_row(country)
     conn.execute("CREATE TEMPORARY TABLE country_name_in (iso2 char(2), name text) ON COMMIT DROP")
@@ -258,7 +258,8 @@ class NamedPlace:
     name: str
     country_code: str
     country_name: str
-    eea: bool
+    # in a country whose places are loaded (TRIALWATCH_COUNTRIES)
+    in_gazetteer: bool
     population: int
     latitude: float
     longitude: float
@@ -269,7 +270,7 @@ def places_named(conn: psycopg.Connection, names: Sequence[str]) -> list[NamedPl
     with conn.cursor(row_factory=class_row(NamedPlace)) as cur:
         return cur.execute(
             """
-            SELECT given AS name_key, p.geonameid, p.name, p.country_code, c.name AS country_name, c.eea,
+            SELECT given AS name_key, p.geonameid, p.name, p.country_code, c.name AS country_name, c.in_gazetteer,
                    p.population, p.latitude, p.longitude
             FROM unnest(%s::text[]) AS given
             JOIN geo.place_name n ON n.name_key = geo.name_key(given)
@@ -297,7 +298,7 @@ def countries_named(conn: psycopg.Connection, names: Sequence[str]) -> list[Name
             FROM unnest(%s::text[]) AS given
             JOIN geo.country_name n ON n.name_key = geo.name_key(given)
             JOIN geo.country c ON c.iso2 = n.iso2
-            ORDER BY given, c.eea DESC, c.iso2
+            ORDER BY given, c.in_gazetteer DESC, c.iso2
             """,
             (list(names),),
         ).fetchall()
@@ -325,7 +326,7 @@ def postcode_places(conn: psycopg.Connection, postcode: str) -> list[PostcodePla
                 SELECT p.country_code, c.name AS country_name, min(p.postcode) AS postcode,
                        min(p.place_name) AS place_name, avg(p.latitude) AS latitude, avg(p.longitude) AS longitude
                 FROM geo.postcode p JOIN geo.country c ON c.iso2 = p.country_code
-                WHERE p.postcode_key = geo.postcode_key(%s) AND c.eea
+                WHERE p.postcode_key = geo.postcode_key(%s) AND c.in_gazetteer
                 GROUP BY p.country_code, c.name
             )
             SELECT f.country_code, f.country_name, f.postcode, f.place_name, f.latitude, f.longitude

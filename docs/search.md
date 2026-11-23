@@ -31,6 +31,14 @@ flowchart LR
   recruitment dates per country; never people), finds where its new sites are, and builds its **search document**
   (`search.document`), so a trial is findable the moment it arrives. `source profiles ctis` and `search reindex`
   rebuild them from stored records, fetching nothing.
+- **Any source.** The profile is one shape for every registry. A trial held by several sources is one profile for
+  search (`profile.current`): lists joined, each item once (a country once, as the newest source gives it), single
+  values from the newest source that gives one, recruiting when any source says it recruits now; a trial held by
+  one source is its profile as it is. Countries are compared by ISO code (`src/trialwatch/geo/countries.py`), so two
+  registries spelling a country differently meet: `search.document.recruiting_countries` and
+  `core.trial_location.country_iso2` hold codes, pages show names. A source may also give a site's point (used as
+  is), its conditions coded in MeSH (taken as concepts as they are, method `source-code`) and exact age limits
+  (`age_min`, `age_max`; preferred to the ones AI tags quote). CTIS gives none of these three.
 - **Words, weighted.** A: conditions, their translations, MedDRA names, AI synonyms; B: titles; C: products and
   objective; D: inclusion criteria. Exclusion criteria are never indexed. Words match without accents and by their
   beginning ("diabète", "diabet…").
@@ -39,7 +47,8 @@ flowchart LR
   without AI (`search.trial_concept`, with the words they were found in), and its document carries the concept and
   every one above it, so "diabetes" finds a trial filed as "NIDDM". `trialwatch vocab load` loads MeSH's diseases
   and mental disorders.
-- **Places.** GeoNames (CC BY 4.0) gives every EU/EEA place with 1000+ people, its names in many languages (Wien,
+- **Places.** GeoNames (CC BY 4.0) gives every place with 1000+ people of the countries search covers
+  (`TRIALWATCH_COUNTRIES`, by default the EU/EEA, where CTIS trials have sites), its names in many languages (Wien,
   Vienna, Vienne) and postal codes with a point; `trialwatch geo load` loads it (Greece has no postal code file),
   `geo geocode` finds each site's point (by postcode, else city name, else a city named alike; it prints the ones
   not found), `geo find NAME` shows what a name means. A place in a query is a distance: "Paris" finds the site in
@@ -141,12 +150,12 @@ erDiagram
 |---|---|
 | `core.trial_profile` | what someone looking for a trial needs, per trial and source, read from a record (jsonb, with its sha256: unchanged = no rebuild); `recruiting`. No people; not part of `registered`. |
 | `search.document` | one per trial: what patient search matches. Recruiting countries, conditions, categories, phase, ages (AI ages quoted), sex, healthy volunteers, interventions and purposes (AI, quoted), and `tsv` with weights A–D (GIN index). |
-| `search.trial_concept` | the MeSH concepts a trial's conditions name: method (exact-name, same-words, phrase, ai-quote) and the field and words it was found in |
+| `search.trial_concept` | the MeSH concepts a trial's conditions name: method (exact-name, same-words, phrase, source-code, ai-quote) and the field and words it was found in |
 | `search.term` | words of recruiting trials and how many trials have each, for "did you mean" (trigram index) |
 | `search.annotation_run` | a run of AI tags with its exact prompt (and sha256), model, effort, status, tokens and cost |
 | `search.annotation` | one trial's AI tags in a run (append-only): kept facts, each with its field and quote; dropped tags and why; the request and raw answer |
-| `geo.country`, `geo.country_name` | countries (GeoNames countryInfo; languages, EEA) and every name of each, in many languages |
-| `geo.place`, `geo.place_name` | EU/EEA places with 1000+ people and their point; every name of a place (trigram index) |
+| `geo.country`, `geo.country_name` | countries (GeoNames countryInfo; languages; `in_gazetteer`: its places are loaded) and every name of each, in many languages |
+| `geo.place`, `geo.place_name` | places with 1000+ people of the loaded countries and their point; every name of a place (trigram index) |
 | `geo.postcode` | postal codes with a point |
 | `geo.address_point` | where each distinct site address is; precision postcode, city, city-fuzzy or none (never in a distance search) |
 | `geo.load_run`, `vocab.load_run` | each load: the files and their sha256, counts, licence (both audited) |

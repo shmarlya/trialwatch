@@ -19,6 +19,8 @@ import psycopg
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
+from trialwatch.geo import countries
+
 
 # --- actors and sources --------------------------------------------------------------------------
 
@@ -737,11 +739,15 @@ class Location:
     postcode: str | None = None
     site: str | None = None
     status: str | None = None
+    # where the site is, when the source says so (else it is found by its address in GeoNames)
+    latitude: float | None = None
+    longitude: float | None = None
 
 
 def set_trial_locations(conn: psycopg.Connection, trial_id: int, source: str, locations: Sequence[Location]) -> int:
     """Make the trial's locations from this source what the source says now (rows from other sources
-    are not touched); a location given twice counts once. Returns how many it holds."""
+    are not touched), each with its country's code; a location given twice counts once. Returns how
+    many it holds."""
     source_number = source_id(conn, source)
     unique = []
     for location in locations:
@@ -750,11 +756,13 @@ def set_trial_locations(conn: psycopg.Connection, trial_id: int, source: str, lo
     with conn.transaction():
         conn.execute("DELETE FROM core.trial_location WHERE trial_id = %s AND source_id = %s", (trial_id, source_number))
         for location in unique:
+            country = location.country.strip()
             conn.execute(
-                "INSERT INTO core.trial_location (trial_id, source_id, country, city, postcode, site, status, created_by) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, current_setting('trialwatch.actor')::bigint)",
-                (trial_id, source_number, location.country.strip(), location.city, location.postcode, location.site,
-                 location.status),
+                "INSERT INTO core.trial_location (trial_id, source_id, country, country_iso2, city, postcode, site, "
+                "status, latitude, longitude, created_by) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, current_setting('trialwatch.actor')::bigint)",
+                (trial_id, source_number, country, countries.iso2_of(country), location.city, location.postcode,
+                 location.site, location.status, location.latitude, location.longitude),
             )
     return len(unique)
 
@@ -833,19 +841,18 @@ class StoredProfile:
     read_at: datetime
 
 
-def trial_profile(conn: psycopg.Connection, trial_id: int) -> StoredProfile | None:
-    """The trial's newest profile from any source (a trial most sources list once)."""
+def trial_profiles(conn: psycopg.Connection, trial_id: int) -> list[StoredProfile]:
+    """The trial's profile from each source that holds it, the newest first."""
     with conn.cursor(row_factory=class_row(StoredProfile)) as cur:
         return cur.execute(
             """
             SELECT p.trial_id, s.code AS source, p.profile, p.profile_hash, p.recruiting, p.read_at
             FROM core.trial_profile p JOIN core.source s ON s.id = p.source_id
             WHERE p.trial_id = %s
-            ORDER BY p.read_at DESC
-            LIMIT 1
+            ORDER BY p.read_at DESC, s.code
             """,
             (trial_id,),
-        ).fetchone()
+        ).fetchall()
 
 
 # --- data sources: the registry, their lists, evidence transfers (ADR-005) ---------------------

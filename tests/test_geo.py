@@ -38,7 +38,7 @@ def test_loading_reads_countries_places_with_their_names_and_postcodes(conn, tmp
     assert run[0] == ["FR", "DE", "AT", "BE", "ES"] and run[1:3] == (11, 7) and "CC BY 4.0" in run[3]
     # a place by any of its names, accents and case aside
     vienna = geo_db.places_named(conn, ["WIEN"])
-    assert [(place.name, place.country_name, place.eea) for place in vienna] == [("Vienna", "Austria", True)]
+    assert [(place.name, place.country_name, place.in_gazetteer) for place in vienna] == [("Vienna", "Austria", True)]
     assert geo_db.places_named(conn, ["Wiedeń"])[0].geonameid == 2761369
     assert geo_db.places_named(conn, ["munchen"])[0].name == "Munich"
     # two places called Frankfurt: largest first
@@ -47,7 +47,7 @@ def test_loading_reads_countries_places_with_their_names_and_postcodes(conn, tmp
     # countries by the names people type, in their languages; the UK is known but not in the EU/EEA
     assert geo_db.countries_named(conn, ["Allemagne"])[0].iso2 == "DE"
     assert geo_db.countries_named(conn, ["españa"])[0].name == "Spain"
-    assert conn.execute("SELECT eea FROM geo.country WHERE iso2 = 'GB'").fetchone() == (False,)
+    assert conn.execute("SELECT in_gazetteer FROM geo.country WHERE iso2 = 'GB'").fetchone() == (False,)
     # a postal code anywhere in the EU/EEA
     paris = geo_db.postcode_places(conn, "75013")
     assert [(place.country_code, place.place_name) for place in paris] == [("FR", "Paris 13")]
@@ -113,5 +113,6 @@ def test_the_commands_load_geocode_and_explain_a_name(app_conn, monkeypatch, tmp
     assert "postcode 94800 Villejuif, France" in result.stdout
     result = runner.invoke(cli.app, ["geo", "geocode", "--again"])
     assert result.exit_code == 0 and "geocoded 1 site address\n" in result.stdout
-    result = runner.invoke(cli.app, ["geo", "load", "--country", "us"])
-    assert result.exit_code != 0 and "not an EU/EEA country code" in result.output
+    # any country may be loaded (TRIALWATCH_COUNTRIES says which by default); a code must be one
+    result = runner.invoke(cli.app, ["geo", "load", "--country", "usa"])
+    assert result.exit_code != 0 and "not a two-letter country code" in result.output

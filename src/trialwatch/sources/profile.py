@@ -12,11 +12,13 @@ stored records without fetching anything (`trialwatch source profiles`). It is n
 `registered` reading: checks don't read it, so reading it differently never outdates a judgement.
 """
 
+import dataclasses
 from dataclasses import dataclass
 
 import psycopg
 
 from trialwatch.db import core
+from trialwatch.geo import countries as country_codes
 from trialwatch.hashing import json_hash
 
 # Age groups every source's profile uses (CTIS's own groups)
@@ -113,6 +115,10 @@ class TrialProfile:
     exclusion: tuple[Criterion, ...] = ()
     # some of AGE_GROUPS
     age_groups: tuple[str, ...] = ()
+    # the exact age limits the source registers, in years, when it does (ClinicalTrials.gov's
+    # minimumAge / maximumAge; CTIS gives only the groups)
+    age_min: float | None = None
+    age_max: float | None = None
     female: bool | None = None
     male: bool | None = None
     healthy_volunteers: bool | None = None
@@ -174,7 +180,7 @@ def profile_data(profile: TrialProfile) -> dict:
         countries.append({"country": country.country, "status": country.status, "recruiting": country.recruiting,
                           "recruitment_start": country.recruitment_start,
                           "recruitment_end": country.recruitment_end})
-    return {
+    data = {
         "public_title": profile.public_title, "full_title": profile.full_title,
         "title_translations": _texts_data(profile.title_translations), "status": profile.status,
         "recruiting": profile.recruiting, "conditions": conditions, "coded_terms": terms, "areas": areas,
@@ -184,6 +190,13 @@ def profile_data(profile: TrialProfile) -> dict:
         "female": profile.female, "male": profile.male, "healthy_volunteers": profile.healthy_volunteers,
         "patients": profile.patients, "products": products, "countries": countries,
     }
+    # written only when a source gives them, so the profiles of sources that don't keep their hash (an
+    # AI annotation belongs to the hash of the profile it read)
+    if profile.age_min is not None:
+        data["age_min"] = profile.age_min
+    if profile.age_max is not None:
+        data["age_max"] = profile.age_max
+    return data
 
 
 def profile_from_data(data: dict) -> TrialProfile:
@@ -215,7 +228,8 @@ def profile_from_data(data: dict) -> TrialProfile:
         main_objective=data["main_objective"], inclusion=_criteria_from(data["inclusion"]),
         exclusion=_criteria_from(data["exclusion"]), age_groups=tuple(data["age_groups"]), female=data["female"],
         male=data["male"], healthy_volunteers=data["healthy_volunteers"], patients=data["patients"],
-        products=tuple(products), countries=tuple(countries),
+        products=tuple(products), countries=tuple(countries), age_min=data.get("age_min"),
+        age_max=data.get("age_max"),
     )
 
 
@@ -232,6 +246,83 @@ def recruiting_countries(profile: TrialProfile) -> list[str]:
         if country.recruiting is True and country.country not in found:
             found.append(country.country)
     return found
+
+
+# --- a trial held by several sources --------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CurrentProfile:
+    """What search reads of a trial: its profiles from every source that holds it, as one."""
+
+    read: TrialProfile
+    profile_hash: bytes
+    # the source of the newest profile (a search document names one)
+    source: str
+
+
+def current(conn: psycopg.Connection, trial_id: int) -> CurrentProfile | None:
+    """The trial's profile as search reads it; None when no source gave one."""
+    stored = core.trial_profiles(conn, trial_id)
+    if not stored:
+        return None
+    newest = stored[0]
+    if len(stored) == 1:
+        # one source: its profile as it is, so what was made from its hash (an AI annotation) still applies
+        return CurrentProfile(profile_from_data(newest.profile), bytes(newest.profile_hash), newest.source)
+    reads = [profile_from_data(each.profile) for each in stored]
+    together = merge(reads)
+    return CurrentProfile(together, profile_hash(together), newest.source)
+
+
+def merge(profiles: list[TrialProfile]) -> TrialProfile:
+    """Several sources' profiles of one trial as one, the newest first: lists joined, each item once (a
+    country once, as the newest source gives it); a single value from the newest source that gives one.
+    It recruits when any source says it recruits now."""
+    newest = profiles[0]
+    changes = {}
+    for field in dataclasses.fields(TrialProfile):
+        values = [getattr(each, field.name) for each in profiles]
+        if field.name == "recruiting":
+            changes[field.name] = any(values)
+        elif field.name == "countries":
+            changes[field.name] = _countries_once(values)
+        elif isinstance(values[0], tuple):
+            changes[field.name] = _joined(values)
+        else:
+            changes[field.name] = _first_given(values)
+    # a prepared dictionary of the new values, passed to dataclasses.replace as keyword arguments
+    return dataclasses.replace(newest, **changes)
+
+
+def _joined(lists: list[tuple]) -> tuple:
+    found = []
+    for items in lists:
+        for item in items:
+            if item not in found:
+                found.append(item)
+    return tuple(found)
+
+
+def _countries_once(lists: list[tuple[CountryStatus, ...]]) -> tuple[CountryStatus, ...]:
+    """Each country once, as the newest source gives it (by code, however each source spells it)."""
+    found = []
+    seen = []
+    for statuses in lists:
+        for status in statuses:
+            code = country_codes.iso2_of(status.country)
+            if code is None:
+                code = status.country
+            if code not in seen:
+                seen.append(code)
+                found.append(status)
+    return tuple(found)
+
+
+def _first_given(values: list):
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 def store(conn: psycopg.Connection, trial_id: int, source: str, source_key: str, read: TrialProfile) -> bool:

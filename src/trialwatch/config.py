@@ -11,6 +11,8 @@ The settings (each read by a function below):
 - TRIALWATCH_ADMIN_EMAIL / TRIALWATCH_ADMIN_PASSWORD: the first admin (trialwatch.auth.accounts)
 - TRIALWATCH_ACTOR: who a command's writes are recorded as (default: the operating system account)
 - TRIALWATCH_GOLD_DIR: the gold datasets (default: the repository's data/gold/)
+- TRIALWATCH_COUNTRIES: whose places `trialwatch geo load` loads, ISO codes, comma-separated (default:
+  the EU/EEA, where CTIS trials have sites)
 """
 
 import os
@@ -111,6 +113,20 @@ def actor_name() -> str | None:
     if name:
         return name
     return None
+
+
+def gazetteer_countries() -> list[str]:
+    """The countries whose places patient search knows (TRIALWATCH_COUNTRIES), by ISO code."""
+    configured = []
+    for code in os.environ.get("TRIALWATCH_COUNTRIES", "").split(","):
+        if code.strip():
+            configured.append(code.strip().upper())
+    if configured:
+        return configured
+    # imported here: config is read before anything else, and needs no geo code otherwise
+    from trialwatch.geo import geonames
+
+    return geonames.eea_countries()
 
 
 def gold_dir() -> Path:

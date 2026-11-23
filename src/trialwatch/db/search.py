@@ -166,6 +166,7 @@ class SearchFilter:
     radius_km: float | None = None
     # ISO code and English name of a country the trial must recruit in
     country: str | None = None
+    # the country's name as the reading gave it: for showing, and for the eval's plain-text baseline
     country_name: str | None = None
     age: int | None = None
     # an age group ("0-17", "18-64", "65+") when no age is given
@@ -217,23 +218,15 @@ def age_group_of(age: int) -> str:
     return "65+"
 
 
-def _in_country(column: str) -> str:
-    """The country named in `column` (as the source spells it) is the filter's country: by its name, or
-    by any name GeoNames gives the country's code."""
-    return (f"(geo.name_key({column}) = geo.name_key(%(country_name)s)"
-            f" OR EXISTS (SELECT FROM geo.country_name n WHERE n.name_key = geo.name_key({column})"
-            " AND n.iso2 = %(country)s))")
-
-
 def _conditions(f: SearchFilter, params: dict) -> list[str]:
     """The WHERE conditions of the filter on search.document d (q.query is the tsquery)."""
     conditions = ["d.recruiting", _STILL_RECRUITING]
     if f.tsquery is not None:
         conditions.append("d.tsv @@ q.query")
     if f.country is not None:
-        conditions.append(f"EXISTS (SELECT FROM unnest(d.recruiting_countries) AS c WHERE {_in_country('c')})")
+        # recruiting countries are codes (search/index.py), like the filter's
+        conditions.append("%(country)s = ANY(d.recruiting_countries)")
         params["country"] = f.country
-        params["country_name"] = f.country_name
     age_group = f.age_group
     if f.age is not None:
         age_group = age_group_of(f.age)
@@ -292,14 +285,19 @@ def _query_parts(f: SearchFilter, box_km: float | None) -> tuple[str, dict]:
         params["dlon"] = degrees_longitude
         sql += """,
         sites AS (
-            SELECT m.trial_id, l.site, l.city, l.country, a.precision,
-                   geo.distance_km(%(latitude)s, %(longitude)s, a.latitude, a.longitude) AS km
+            SELECT m.trial_id, l.site, l.city, l.country, l.country_iso2, p.precision,
+                   geo.distance_km(%(latitude)s, %(longitude)s, p.latitude, p.longitude) AS km
             FROM matched m
-            JOIN core.trial_location l ON l.trial_id = m.trial_id AND l.country = ANY(m.recruiting_countries)
-            JOIN geo.address_point a ON a.country_key = l.country_key AND a.postcode_key = l.postcode_key
-                                    AND a.city_key = l.city_key
-            WHERE a.latitude BETWEEN %(latitude)s - %(dlat)s AND %(latitude)s + %(dlat)s
-              AND a.longitude BETWEEN %(longitude)s - %(dlon)s AND %(longitude)s + %(dlon)s
+            JOIN core.trial_location l ON l.trial_id = m.trial_id AND l.country_iso2 = ANY(m.recruiting_countries)
+            LEFT JOIN geo.address_point a ON a.country_key = l.country_key AND a.postcode_key = l.postcode_key
+                                         AND a.city_key = l.city_key
+            -- the point the source gives, else the one GeoNames gave the address
+            CROSS JOIN LATERAL (
+                SELECT coalesce(l.latitude, a.latitude) AS latitude, coalesce(l.longitude, a.longitude) AS longitude,
+                       CASE WHEN l.latitude IS NOT NULL THEN 'source' ELSE a.precision END AS precision
+            ) p
+            WHERE p.latitude BETWEEN %(latitude)s - %(dlat)s AND %(latitude)s + %(dlat)s
+              AND p.longitude BETWEEN %(longitude)s - %(dlon)s AND %(longitude)s + %(dlon)s
         )"""
     return sql, params
 
@@ -335,7 +333,7 @@ def search_hits(conn: psycopg.Connection, f: SearchFilter, offset: int, limit: i
         site_conditions = ["km <= %(radius)s"]
         if f.country is not None:
             # the nearest site in that country, not one across a border that happens to be closer
-            site_conditions.append(_in_country("country"))
+            site_conditions.append("country_iso2 = %(country)s")
         sql += f""",
         nearest AS (
             SELECT DISTINCT ON (trial_id) trial_id, site, city, country, precision, km,

@@ -1259,7 +1259,11 @@ CREATE TABLE core.trial_location (
     country_key text GENERATED ALWAYS AS (geo.name_key(country)) STORED,
     postcode_key text GENERATED ALWAYS AS (geo.postcode_key(postcode)) STORED,
     city_key text GENERATED ALWAYS AS (geo.name_key(city)) STORED,
-    CONSTRAINT trial_location_country_check CHECK ((btrim(country) <> ''::text))
+    country_iso2 character(2),
+    latitude double precision,
+    longitude double precision,
+    CONSTRAINT trial_location_country_check CHECK ((btrim(country) <> ''::text)),
+    CONSTRAINT trial_location_point_check CHECK (((latitude IS NULL) = (longitude IS NULL)))
 );
 
 
@@ -1268,6 +1272,20 @@ CREATE TABLE core.trial_location (
 --
 
 COMMENT ON TABLE core.trial_location IS 'where a trial runs, per source: its sites (city, postcode, country) and countries';
+
+
+--
+-- Name: COLUMN trial_location.country_iso2; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core.trial_location.country_iso2 IS 'the country''s ISO 3166 code (geo/countries.py); NULL: a name we don''t know (no part in finding trials by country)';
+
+
+--
+-- Name: COLUMN trial_location.latitude; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core.trial_location.latitude IS 'where the site is, when the source says so; else geo.address_point by its address';
 
 
 --
@@ -1377,7 +1395,7 @@ CREATE TABLE geo.country (
     iso3 character(3),
     name text NOT NULL,
     languages text[] DEFAULT '{}'::text[] NOT NULL,
-    eea boolean DEFAULT false NOT NULL
+    in_gazetteer boolean DEFAULT false CONSTRAINT country_eea_not_null NOT NULL
 );
 
 
@@ -1386,6 +1404,13 @@ CREATE TABLE geo.country (
 --
 
 COMMENT ON TABLE geo.country IS 'countries (GeoNames countryInfo), reference data replaced by each geo load';
+
+
+--
+-- Name: COLUMN country.in_gazetteer; Type: COMMENT; Schema: geo; Owner: -
+--
+
+COMMENT ON COLUMN geo.country.in_gazetteer IS 'its places and postal codes are loaded: a query''s place is looked for here';
 
 
 --
@@ -1792,7 +1817,7 @@ CREATE TABLE search.trial_concept (
     method text NOT NULL,
     field text NOT NULL,
     quote text NOT NULL,
-    CONSTRAINT trial_concept_method_check CHECK ((method = ANY (ARRAY['exact-name'::text, 'same-words'::text, 'phrase'::text, 'ai-quote'::text])))
+    CONSTRAINT trial_concept_method_check CHECK ((method = ANY (ARRAY['exact-name'::text, 'same-words'::text, 'phrase'::text, 'source-code'::text, 'ai-quote'::text])))
 );
 
 
@@ -2552,6 +2577,13 @@ CREATE INDEX trial_location_city_idx ON core.trial_location USING btree (lower(c
 --
 
 CREATE INDEX trial_location_country_idx ON core.trial_location USING btree (lower(country));
+
+
+--
+-- Name: trial_location_iso2_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX trial_location_iso2_idx ON core.trial_location USING btree (trial_id, country_iso2);
 
 
 --
@@ -3714,4 +3746,5 @@ ALTER TABLE ONLY vocab.mesh_tree
 --
 
 INSERT INTO public.schema_migrations (version) VALUES
-    ('20261121120000');
+    ('20261121120000'),
+    ('20261124100000');

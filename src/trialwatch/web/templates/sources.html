@@ -3,7 +3,7 @@
 {% block title %}Sources · TrialWatch{% endblock %}
 {% block content %}
 <h1>Sources</h1>
-<p class="sub">Where trials come from. Each registered source is read by an adapter and has its config: which trials its list holds, which evidence a transfer brings. <b>Sync the list</b> to get every listed trial (its key, title, identifiers), then <b>transfer the evidence</b> of the trials you want: their record and documents, with the page text read. Only trials whose transfer is complete can be checked.</p>
+<p class="sub">Where trials come from.</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 
 <div class="table-wrap"><table>
@@ -29,7 +29,7 @@
 {% if free_adapters and can("source.register") %}
 <h2>Register a source</h2>
 <form class="panel step medium" method="post" action="/sources">
-  <span class="small muted">Starts with the adapter's default config; change it on the source's page.</span>
+  <span class="small muted">Starts with the adapter's default config.</span>
   <label>Adapter<select name="adapter">{% for name in free_adapters %}<option>{{ name }}</option>{% endfor %}</select></label>
   <label>Code (optional)<input type="text" name="code" placeholder="the adapter's name"></label>
   <label>Name (optional)<input type="text" name="name"></label>

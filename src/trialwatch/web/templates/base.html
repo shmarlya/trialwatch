@@ -47,22 +47,25 @@
   <a href="{{ href }}"{% if (href == "/" and here == "/") or (href != "/" and here.startswith(href)) %} aria-current="page"{% endif %}>{{ text }}</a>
 {%- endmacro %}
 <header class="app-header">
-  <a class="brand" href="/"><img src="/static/logo.svg" alt="" width="26" height="26">TrialWatch</a>
-  <nav class="app-nav" aria-label="Main">
-    {{ nav("/", "Workflow" if can("view.internal") else "Home") }}
-    {% if can("view.recruiting") %}{{ nav("/find", "Find a trial") }}{% endif %}
-    {% if can("view.internal") %}{{ nav("/sources", "Sources") }}{% endif %}
-    {% if can("view") %}
-    {{ nav("/trials", "Trials") }}
-    {{ nav("/sponsors", "Sponsors") }}
-    {{ nav("/prompts", "Prompts") }}
-    {{ nav("/requirements", "Requirements") }}
-    {% endif %}
-    {% if can("view.internal") %}{{ nav("/gold", "Gold") }}{% endif %}
-    {% if can("job.view") %}{{ nav("/admin/jobs", "Jobs") }}{% endif %}
-    {% if can("spend.view") %}{{ nav("/admin/spend", "Spend") }}{% endif %}
-    {% if can("user.manage") %}{{ nav("/admin/users", "Users") }}{% endif %}
-  </nav>
+  <a class="brand" href="/"><img src="/static/logo.svg" alt="" width="26" height="26">TrialWatch<span class="alpha" title="Early version: results and features may change or be wrong.">alpha</span></a>
+  <details class="menu" data-menu open>
+    <summary>Menu</summary>
+    <nav class="app-nav" aria-label="Main">
+      {{ nav("/", "Workflow" if can("view.internal") else "Home") }}
+      {% if can("view.recruiting") %}{{ nav("/find", "Find a trial") }}{% endif %}
+      {% if can("view.internal") %}{{ nav("/sources", "Sources") }}{% endif %}
+      {% if can("view") %}
+      {{ nav("/trials", "Trials") }}
+      {{ nav("/sponsors", "Sponsors") }}
+      {{ nav("/prompts", "Prompts") }}
+      {{ nav("/requirements", "Requirements") }}
+      {% endif %}
+      {% if can("view.internal") %}{{ nav("/gold", "Gold") }}{% endif %}
+      {% if can("job.view") %}{{ nav("/admin/jobs", "Jobs") }}{% endif %}
+      {% if can("spend.view") %}{{ nav("/admin/spend", "Spend") }}{% endif %}
+      {% if can("user.manage") %}{{ nav("/admin/users", "Users") }}{% endif %}
+    </nav>
+  </details>
   {% block header_extra %}{% endblock %}
   <div class="who small">
     {% if user %}
@@ -74,13 +77,24 @@
   </div>
 </header>
 <main>
-{% if jobs_needing_attention %}<div class="alert warn" role="status"><a href="/admin/jobs?tab=attention">{{ jobs_needing_attention }} job{% if jobs_needing_attention != 1 %}s{% endif %} need{% if jobs_needing_attention == 1 %}s{% endif %} attention</a>: failed after every attempt, or held by the spending cap.</div>{% endif %}
+{% if jobs_needing_attention %}<div class="alert warn" role="status"><a href="/admin/jobs?tab=attention">{{ jobs_needing_attention }} job{% if jobs_needing_attention != 1 %}s{% endif %} need{% if jobs_needing_attention == 1 %}s{% endif %} attention</a>: failed, or held by the spending cap.</div>{% endif %}
 {% block content %}{% endblock %}
 </main>
 <footer class="app-footer small muted">
+  Alpha version: results and features may change or be wrong. ·
   Trial data: EU Clinical Trials Information System (CTIS), European Medicines Agency ·
   Medical concepts: MeSH, U.S. National Library of Medicine ·
   Place data © <a href="https://www.geonames.org">GeoNames</a>, CC BY 4.0
 </footer>
+<script>
+  // On phones the menu starts folded; without this script it stays open
+  (function () {
+    const menu = document.querySelector("[data-menu]");
+    const phone = window.matchMedia("(max-width: 640px)");
+    function fit() { menu.open = !phone.matches; }
+    fit();
+    phone.addEventListener("change", fit);
+  })();
+</script>
 </body>
 </html>

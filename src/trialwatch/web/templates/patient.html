@@ -20,9 +20,8 @@
 
 {# Always on search and recruiting trial pages #}
 {% macro disclaimer() -%}
-  <p class="disclaimer small muted">This is not medical advice. Whether you can take part is decided by the trial's team, from
-  its full eligibility criteria: talk to your doctor and contact a trial site. A trial's status here is what the EU register
-  (CTIS) says, by country, and can be out of date: the date it was last updated is shown with each trial.</p>
+  <p class="disclaimer small muted">Not medical advice. The trial's team decides who can take part: ask your doctor or a trial site.
+  Status comes from the EU register and can be out of date.</p>
 {%- endmacro %}
 
 {# The one search box (home page and /find) #}
@@ -46,16 +45,16 @@
     <p class="small why"><span class="muted">Why it is here:</span> {{ why | join(" · ") }}</p>{% endif %}
     <dl class="facts small">
       <dt>Where</dt>
-      <dd>{% if hit.distance_km is not none %}{% if hit.precision not in ("postcode", "source") and hit.distance_km < 3 %}<b>in {{ hit.site_city }}</b>{% else %}<b>{{ "%.0f" | format(hit.distance_km) }} km</b>{% if hit.precision not in ("postcode", "source") %} <span class="muted">(about: placed by its city)</span>{% endif %}{% endif %}:
+      <dd>{% if hit.distance_km is not none %}{% if hit.precision not in ("postcode", "source") and hit.distance_km < 3 %}<b>in {{ hit.site_city }}</b>{% else %}<b>{{ "%.0f" | format(hit.distance_km) }} km</b>{% if hit.precision not in ("postcode", "source") %} <span class="muted">(approximate, by city)</span>{% endif %}{% endif %}:
         {{ hit.site or "a site" }}{% if hit.site_city %}, {{ hit.site_city }}{% endif %}{% if hit.sites_near and hit.sites_near > 1 %} · {{ hit.sites_near }} sites{% if km %} within {{ km }} km{% endif %}{% endif %}<br>{% endif %}
         recruiting in {{ hit.recruiting_countries | country_names | join(", ") or "—" }}</dd>
       <dt>Who can join</dt>
       <dd>{% for group in hit.age_groups %}{{ age_words[group] }}{% if not loop.last %}, {% endif %}{% else %}ages not said{% endfor %}
         · {{ sexes(hit.female, hit.male) }} · {{ groups(hit.patients, hit.healthy_volunteers) }}{% if hit.rare %} · <span class="badge info">rare disease</span>{% endif %}</dd>
       {% if hit.phase %}<dt>Phase</dt><dd>{{ phase_words[hit.phase] or hit.phase }}</dd>{% endif %}
-      <dt>Updated</dt><dd>{% if hit.source_updated_on %}the register last changed it {{ hit.source_updated_on }}{% else %}—{% endif %}</dd>
+      <dt>Updated</dt><dd>{% if hit.source_updated_on %}{{ hit.source_updated_on }}{% else %}—{% endif %}</dd>
     </dl>
-    <p class="small card-links"><a href="/trials/{{ hit.trial_id }}">Who can join, and every site →</a>
+    <p class="small card-links"><a href="/trials/{{ hit.trial_id }}">Details and sites →</a>
       {% if url %} · <a href="{{ url }}" rel="noreferrer noopener" target="_blank">{{ hit.source_key }} on the EU register ↗</a>{% endif %}</p>
   </article>
 {%- endmacro %}
@@ -88,7 +87,7 @@
       <h3 class="panel-title">Status</h3>
       <p>{% if patient.recruiting %}<span class="badge full">recruiting</span>{% else %}<span class="badge none">not recruiting now</span>{% endif %}
         <span class="small muted">{{ read.status or "" }}</span></p>
-      <p class="small muted">{% if patient.updated_on %}The register last changed this trial {{ patient.updated_on }}.{% endif %}
+      <p class="small muted">{% if patient.updated_on %}Updated in the register {{ patient.updated_on }}.{% endif %}
         {% if patient.source_url %}Site contacts are on <a href="{{ patient.source_url }}" rel="noreferrer noopener" target="_blank">its page in {{ patient.source_name }} ↗</a>.{% endif %}</p>
     </section>
   </div>
@@ -103,8 +102,8 @@
   {% if patient.annotation %}{{ ai_tags(patient.annotation) }}{% endif %}
   {% if patient.concepts %}
   <details class="criteria">
-    <summary>How search finds it: the medical concepts in its conditions</summary>
-    <p class="small muted">Concepts of MeSH (U.S. National Library of Medicine) its conditions name, found without AI: each with the words of the registry it was found in.</p>
+    <summary>Medical concepts (MeSH)</summary>
+    <p class="small muted">Found without AI, each with the registry words it came from.</p>
     <ul class="small">{% for concept in patient.concepts %}<li><b>{{ concept.name }}</b> <span class="muted">({{ concept.ui }})</span>: “{{ concept.quote }}” <span class="muted">· {{ concept.field }} · {{ concept.method }}</span></li>{% endfor %}</ul>
   </details>
   {% endif %}
@@ -113,7 +112,7 @@
 
 {# "AI · model · day": every tag a model made is marked so #}
 {% macro ai_badge(annotation) -%}
-  <span class="badge info" title="tagged by a model; its quote was checked against the registry">AI · {{ annotation.served_by or annotation.model }} · {{ annotation.created_at.strftime("%Y-%m-%d") }}</span>
+  <span class="badge info" title="Tagged by a model; quote checked against the registry">AI · {{ annotation.served_by or annotation.model }} · {{ annotation.created_at.strftime("%Y-%m-%d") }}</span>
 {%- endmacro %}
 
 {# One tag with the words of the registry it was found in #}
@@ -126,10 +125,8 @@
   {% set facts = annotation.facts %}
   <details class="criteria">
     <summary>What AI read in the registry {{ ai_badge(annotation) }}</summary>
-    <p class="small muted">A model tagged this trial from its registry fields so the search finds it by more names. Each tag
-      quotes the field it came from, and was kept only because that quote is in the field, word for word
-      (dropped for not being there: {{ annotation.dropped | length }}).
-      <a href="/prompts?show=annotate#annotate">The prompt it was given</a>.</p>
+    <p class="small muted">Tags help search find this trial. Each was kept only if its quote is in the registry word for word
+      ({{ annotation.dropped | length }} dropped). <a href="/prompts?show=annotate#annotate">The prompt</a>.</p>
     <ul class="small">
       {% if facts.age_min %}{{ quoted("youngest: " ~ facts.age_min.value ~ " " ~ facts.age_min.unit, facts.age_min) }}{% endif %}
       {% if facts.age_max %}{{ quoted("oldest: " ~ facts.age_max.value ~ " " ~ facts.age_max.unit, facts.age_max) }}{% endif %}

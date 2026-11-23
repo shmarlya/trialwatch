@@ -1,0 +1,65 @@
+{#- The home page's charts: checked trials by result, one bar per country or sponsor.
+    Bars are SVG rects (widths as attributes, no style=); static/charts.js adds sorting, "show all"
+    and the details line. Without it the bars still show, and the table holds every number. -#}
+
+{% set SHOWN = 15 %}
+
+{# rows: overview.ReportedRow; filter: the home page's query parameter a bar's link sets (country, q) #}
+{% macro reported_bars(id, title, rows, filter, empty) %}
+<section class="panel bar-chart" id="{{ id }}" data-chart>
+  <div class="chart-head">
+    <h3 class="panel-title">{{ title }}</h3>
+    {% if rows %}
+    <div class="chart-controls" hidden>
+      <label class="small">Sort
+        <select data-sort aria-label="Sort {{ title | lower }}">
+          <option value="total">most trials</option>
+          <option value="reported">most reported</option>
+          <option value="unreported">least reported</option>
+          <option value="name">name</option>
+        </select>
+      </label>
+      {% if rows | length > SHOWN %}<button type="button" class="secondary small" data-more>Show all {{ rows | length }}</button>{% endif %}
+    </div>
+    {% endif %}
+  </div>
+  {% if rows %}
+  <ul class="legend small">
+    <li><span class="swatch full"></span>full results</li>
+    <li><span class="swatch not-full"></span>not full</li>
+    <li><span class="swatch undecided"></span>undecided</li>
+  </ul>
+  <ol class="bars" data-bars>
+    {% for row in rows %}
+    {% set full = 100 * row.full / row.total %}
+    {% set not_full = 100 * row.not_full / row.total %}
+    <li class="bar-row{% if loop.index > SHOWN %} extra{% endif %}" data-name="{{ row.name }}" data-total="{{ row.total }}"
+        data-reported="{{ '%.4f' | format(row.reported) }}"
+        data-detail="{{ row.name }}: {{ row.full }} full, {{ row.not_full }} not full, {{ row.undecided }} undecided">
+      <a href="/?{{ {filter: row.name} | urlencode }}#checked" title="{{ row.full }} full · {{ row.not_full }} not full · {{ row.undecided }} undecided">
+        <span class="bar-name">{{ row.name }}</span>
+        <svg class="bar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+          <rect class="full" x="0" y="0" height="10" width="{{ '%.2f' | format(full) }}"></rect>
+          <rect class="not-full" x="{{ '%.2f' | format(full) }}" y="0" height="10" width="{{ '%.2f' | format(not_full) }}"></rect>
+          <rect class="undecided" x="{{ '%.2f' | format(full + not_full) }}" y="0" height="10" width="{{ '%.2f' | format(100 - full - not_full) }}"></rect>
+        </svg>
+        <span class="bar-value"><b>{{ row.reported | round | int }}%</b> <span class="muted">of {{ row.total }}</span></span>
+      </a>
+    </li>
+    {% endfor %}
+  </ol>
+  <p class="small muted chart-detail" data-detail aria-live="polite">{% if rows | length > SHOWN %}Top {{ SHOWN }} of {{ rows | length }}. {% endif %}% = share with full results.</p>
+  <details class="small">
+    <summary>Table</summary>
+    <div class="table-wrap"><table>
+      <tr><th>{{ title }}</th><th>Trials</th><th>Full</th><th>Not full</th><th>Undecided</th><th>% full</th></tr>
+      {% for row in rows %}
+      <tr><td>{{ row.name }}</td><td>{{ row.total }}</td><td>{{ row.full }}</td><td>{{ row.not_full }}</td><td>{{ row.undecided }}</td><td>{{ row.reported | round | int }}%</td></tr>
+      {% endfor %}
+    </table></div>
+  </details>
+  {% else %}
+  <p class="small muted">{{ empty }}</p>
+  {% endif %}
+</section>
+{% endmacro %}

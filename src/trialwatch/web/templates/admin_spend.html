@@ -3,18 +3,18 @@
 {% block title %}Spend · TrialWatch{% endblock %}
 {% block content %}
 <h1>Spend</h1>
-<p class="sub">What TrialWatch spent on model calls: every billed call, priced at Anthropic's list prices (<code>src/trialwatch/prices.json</code>) when it was made. US dollars; months are UTC.</p>
+<p class="sub">Model calls at Anthropic's list prices, in US dollars.</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="grid">
   <div class="panel">
     <div class="stat"><span>This month</span><b>{{ dollars(totals.this_month) }}{% if cap is not none %} <span class="small muted">of {{ dollars(cap) }} cap</span>{% endif %}</b></div>
     <div class="stat"><span>Last 30 days</span><b>{{ dollars(totals.last_30_days) }}</b></div>
     <div class="stat"><span>All time</span><b>{{ dollars(totals.all_time) }}</b></div>
-    <div class="stat"><span>Billed calls</span><b>{{ "{:,}".format(totals.calls) }}{% if totals.unpriced_calls %} <span class="small muted">({{ totals.unpriced_calls }} on models not in the price list, not counted)</span>{% endif %}</b></div>
+    <div class="stat"><span>Billed calls</span><b>{{ "{:,}".format(totals.calls) }}{% if totals.unpriced_calls %} <span class="small muted">({{ totals.unpriced_calls }} unpriced, not counted)</span>{% endif %}</b></div>
   </div>
   <div class="panel">
     <h3 class="panel-title">Monthly cap for automatic checks</h3>
-    <p class="small">Checks TrialWatch starts by itself (the weekly refresh) are held once this month's spend reaches the cap, and go on by themselves next month or when the cap is raised. Checks a person starts always run.</p>
+    <p class="small">Scheduled checks pause at the cap until next month or a higher cap. Checks people start always run.</p>
     {% if can("spend.cap.set") %}
     <form method="post" action="/admin/spend/cap" class="inline">
       <label>US dollars <input name="cap" value="{% if cap is not none %}{{ cap }}{% endif %}" placeholder="no cap" class="short"></label>
@@ -25,7 +25,7 @@
   </div>
 </div>
 
-{% if can("ops.view") %}<p class="small">By month, model, operation and who it was for, over time: <a href="{{ grafana }}/d/trialwatch-spend">Grafana's Spend dashboard</a>.</p>{% endif %}
+{% if can("ops.view") %}<p class="small">Details over time: <a href="{{ grafana }}/d/trialwatch-spend">Grafana Spend dashboard</a>.</p>{% endif %}
 
 <h2>Costliest check runs</h2>
 {% if costliest %}

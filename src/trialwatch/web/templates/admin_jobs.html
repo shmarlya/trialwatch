@@ -8,7 +8,7 @@
 {%- endmacro %}
 {% block content %}
 <h1>Jobs</h1>
-<p class="sub">Everything the worker (<code>trialwatch worker</code>) runs: steps people start, and the weekly refresh TrialWatch starts by itself. A failed attempt is tried again later (sync and transfer 5 times, the others 3); a job that failed every attempt, or that the monthly spending cap holds, needs attention here.</p>
+<p class="sub">Everything the worker runs. Failed jobs are retried a few times; then they need attention here.</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <p class="tabs">
   {% for name, tab_info in tabs.items() %}
@@ -36,7 +36,7 @@
 {% else %}<p class="muted">None.</p>{% endif %}
 
 <h2 id="schedules">Schedules</h2>
-<p class="small muted">Times are UTC. Schedules start switched off. A scheduled job runs as TrialWatch itself; its checks count against the monthly cap on <a href="/admin/spend">Spend</a>. Stopping a schedule does not stop a job it already started: use Stop on that job's page.</p>
+<p class="small muted">Times are UTC. Scheduled checks count against the <a href="/admin/spend">monthly cap</a>. Stopping a schedule doesn't stop a job already running.</p>
 <div class="table-wrap"><table>
   <tr><th>Schedule</th><th>What</th><th>How often</th><th>Next</th><th>Last job</th><th></th></tr>
   {% for schedule in schedules %}

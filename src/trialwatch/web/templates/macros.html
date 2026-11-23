@@ -44,7 +44,7 @@
 
 {% macro evidence_state(state) -%}
   {%- if state == "complete" -%}<span class="badge full">complete</span>
-  {%- elif state == "stale" -%}<span class="badge undecided" title="transferred, but the source changed the trial since">stale</span>
+  {%- elif state == "stale" -%}<span class="badge undecided" title="Changed at the source since transfer">stale</span>
   {%- elif state == "failed" -%}<span class="badge not-full">failed</span>
   {%- else -%}<span class="badge none">{{ state }}</span>
   {%- endif -%}

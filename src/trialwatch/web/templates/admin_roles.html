@@ -2,7 +2,7 @@
 {% block title %}Roles · TrialWatch{% endblock %}
 {% block content %}
 <h1>Roles and actions</h1>
-<p class="sub">Who may do what, drawn from <code>src/trialwatch/auth/actions.py</code>, the one place it is decided (ADR-006). "public" is anyone not signed in. Every route that changes something checks this chart on the server.</p>
+<p class="sub">Who may do what. "public" is anyone not signed in.</p>
 <div class="table-wrap"><table class="chart">
   <tr><th>Action</th><th>What it lets you do</th>{% for column in columns %}<th>{{ column }}</th>{% endfor %}</tr>
   {% for action in chart %}

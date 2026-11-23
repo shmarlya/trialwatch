@@ -2,7 +2,7 @@
 {% block title %}Sponsors · TrialWatch{% endblock %}
 {% block content %}
 <h1>Sponsors</h1>
-<p class="sub">Every organisation that sponsors a trial we hold, stored once however many trials it sponsors, most trials first.</p>
+<p class="sub">Organisations sponsoring our trials, most trials first.</p>
 <form class="search" method="get" action="/sponsors">
   <input type="text" name="q" value="{{ q }}" placeholder="Search by name or organisation id">
   <button>Search</button>
@@ -19,7 +19,7 @@
     <td class="small muted">{{ row.created_at.strftime("%Y-%m-%d") }} · {{ who(row.created_by) }} · from {{ row.first_source }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="5" class="muted">No sponsors yet: they come in with trials synced from CTIS or added by hand.</td></tr>
+  <tr><td colspan="5" class="muted">No sponsors yet.</td></tr>
   {% endfor %}
 </table></div>
 {% endblock %}

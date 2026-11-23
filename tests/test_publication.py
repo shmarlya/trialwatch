@@ -73,14 +73,14 @@ def test_a_run_publishes_what_it_judged_and_a_withdrawn_one_stays_public_marked(
     # the trial page shows how the evidence was collected, step by step, but nothing of staff's work
     page = public.get(f"/trials/{trial}").text
     assert "How the evidence was collected" in page and QUOTE in page and "System prompt" in page
-    assert "Published by its run as it finished" in page and "gold items agreed" in page
+    assert "Published when its run finished" in page and "gold items agreed" in page
     assert "Withdraw" not in page
     assert "$0.42" not in page  # what a call cost stays with staff who see spending
     assert public.get(f"/runs/{run_id}").status_code == 200
 
     moderator = signed_in_client(app_conn, "moderator", "mona@test.example")
     staff_page = moderator.get(f"/trials/{trial}").text
-    assert "Withdraw" in staff_page and "Trace, start to finish" in staff_page
+    assert "Withdraw" in staff_page and ">Trace</h3>" in staff_page
     assert ">Publish<" not in staff_page and "not public" not in staff_page
     # a withdrawal needs a reason, because the public sees it
     refused = moderator.post(f"/trials/{trial}/judgements/{run_id}/withdraw", data={"note": " "}, follow_redirects=False)

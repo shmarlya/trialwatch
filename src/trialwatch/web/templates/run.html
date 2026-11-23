@@ -26,12 +26,12 @@
 </div>
 
 <details class="panel prompt">
-  <summary><b>System prompt</b> <span class="small muted">{{ run.prompt }}, as sent with every call of this run</span></summary>
+  <summary><b>System prompt</b> <span class="small muted">{{ run.prompt }}, sent with every call</span></summary>
   <pre>{{ prompt_text }}</pre>
 </details>
 
 <h2>Judgements</h2>
-{% if not can("view.internal") %}<p class="small muted">Every judgement of the run, published as it finished; a trial the check failed on has none.</p>{% endif %}
+{% if not can("view.internal") %}<p class="small muted">A trial the check failed on has no judgement.</p>{% endif %}
 <div class="table-wrap"><table>
   <tr><th>Trial</th><th>Label</th><th>Parts</th><th class="num">Tokens in</th>{% if can("spend.view") %}<th class="num">Cost</th>{% endif %}<th class="num">Time</th><th></th></tr>
   {% for j in judgements %}

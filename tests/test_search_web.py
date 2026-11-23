@@ -151,7 +151,7 @@ def test_the_home_page_offers_the_search_and_the_page_explains_itself(trials):
     home = public.get("/").text
     assert 'action="/find"' in home and "Find a trial that is recruiting" in home
     empty = public.get("/find").text
-    assert "diabetes Paris" in empty and "not medical advice" in empty and "GeoNames" in empty
+    assert "diabetes Paris" in empty and "Not medical advice" in empty and "GeoNames" in empty
     nothing = public.get("/find", params={"q": "zzzz Paris"}).text
     assert "No recruiting trial matches" in nothing
 

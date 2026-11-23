@@ -29,7 +29,7 @@
     <input type="hidden" name="back" value="/gold/{{ dataset.ref }}/{{ item.key }}">
     <button>Transfer evidence from CTIS</button>
   </form>
-  <span class="small muted">{% if trial_id is not none %}its evidence is not transferred completely yet{% else %}not in our database yet{% endif %}: brings in its record and documents and reads them, then you can check it</span>
+  <span class="small muted">{% if trial_id is not none %}its evidence is not transferred completely yet{% else %}not in our database yet{% endif %}: transfer it, then check it</span>
   {% elif trial_id is none and can("trial.create") %}
   <span class="small muted">Not in our database. Add it on the <a href="/trials/new">new trial page</a>.</span>
   {% endif %}
@@ -78,7 +78,7 @@
 {% if trial_id is none %}
 <p class="muted">Not in our database, so not checked.</p>
 {% else %}
-<p class="small muted">Every finished judgement of our trial {{ trial_id }} under {{ dataset.requirements }}, newest first. Our documents may differ from what the reviewers read: see the scope above and the documents below.</p>
+<p class="small muted">Our judgements under {{ dataset.requirements }}, newest first. Our documents may differ from the reviewers'.</p>
 <div class="table-wrap"><table>
   <tr><th>Run</th><th>Ours</th>{% for name in dataset.parts %}<th>{{ name }}</th>{% endfor %}<th>Label</th></tr>
   {% for judgement, comparison in compared %}
@@ -86,7 +86,7 @@
     <td><a href="/trials/{{ trial_id }}?run={{ judgement.run_id }}">run {{ judgement.run_id }}</a><br><span class="small muted">{{ judgement.model }} · {{ when(judgement.started_at) }}</span></td>
     <td>{{ label(judgement.label) }}</td>
     {% for name in dataset.parts %}<td class="small">{{ part(judgement.parts[name]) }}{% if comparison %} {{ outcome(comparison.parts[name]) }}{% endif %}</td>{% endfor %}
-    <td>{% if comparison %}{{ outcome(comparison.label) }}{% if comparison.false_accusation %} <span class="flag">false accusation</span>{% endif %}{% else %}<span class="muted" title="this judgement read a document posted after the reviewers read theirs">set aside</span>{% endif %}</td>
+    <td>{% if comparison %}{{ outcome(comparison.label) }}{% if comparison.false_accusation %} <span class="flag">false accusation</span>{% endif %}{% else %}<span class="muted" title="Read a newer document than the reviewers">set aside</span>{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="{{ 3 + dataset.parts | length }}" class="muted">Not checked yet under {{ dataset.requirements }}.</td></tr>{% endfor %}
 </table></div>

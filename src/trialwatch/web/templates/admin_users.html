@@ -3,7 +3,7 @@
 {% block title %}Users · TrialWatch{% endblock %}
 {% block content %}
 <h1>Users</h1>
-<p class="sub">Who can sign in, and their role. What each role may do is the <a href="/admin/roles">action chart</a>. A change of role or password, or disabling someone, signs them out everywhere. There is always at least one enabled admin.</p>
+<p class="sub">Who can sign in. See <a href="/admin/roles">what each role may do</a>.</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="table-wrap"><table>
   <tr><th>Email</th><th>Role</th><th>Added</th><th>Status</th><th>New password</th></tr>
@@ -37,7 +37,7 @@
 
 <h2>Add a user</h2>
 <form class="panel step narrow" method="post" action="/admin/users">
-  <label>Email (what they sign in with)<input type="email" name="email" autocomplete="off" required></label>
+  <label>Email<input type="email" name="email" autocomplete="off" required></label>
   <label>Password (at least {{ minimum }} characters)<input type="password" name="password" minlength="{{ minimum }}" autocomplete="new-password" required></label>
   <label>Role<select name="role">{% for role in roles %}<option>{{ role }}</option>{% endfor %}</select></label>
   <button>Add</button>

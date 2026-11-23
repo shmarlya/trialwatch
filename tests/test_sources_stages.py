@@ -440,7 +440,7 @@ def test_the_source_pages_render(admin_client):
     assert TestClient(web.app).get("/sources/ctis").status_code == 401
     client = admin_client
     page = client.get("/sources")
-    assert page.status_code == 200 and "Sync" in page.text and "/sources/ctis" in page.text
+    assert page.status_code == 200 and "List synced" in page.text and "/sources/ctis" in page.text
     source = client.get("/sources/ctis", params={"state": "failed"})
     assert source.status_code == 200 and "Transfer ticked" in source.text and "listing" in source.text
     assert client.get("/sources/nope").status_code == 404

@@ -2,8 +2,8 @@
 {% block title %}Requirements · TrialWatch{% endblock %}
 {% block content %}
 <h1>Requirements</h1>
-<p class="sub">What a trial must report, and how "enough" is decided: requirement sets in src/trialwatch/checks/requirement_sets/, read by the evidence check (ADR-004). The check's code and prompt name no registry or regulation; a set does. One current text per set while we build v1; every run stores the set it read, with its sha256.</p>
-<p class="small muted">Rule types the code provides: {% for rule in rule_types %}<code>{{ rule }}</code>{% if not loop.last %}, {% endif %}{% endfor %}. For every rule, "not found" means not reported only when the whole document was read; otherwise the question is undecided, for a person.</p>
+<p class="sub">What a trial must report, and how "enough" is decided.</p>
+<p class="small muted">Rule types: {% for rule in rule_types %}<code>{{ rule }}</code>{% if not loop.last %}, {% endif %}{% endfor %}. "Not found" means not reported only if the whole document was read; otherwise it is undecided.</p>
 
 {% for set in sets %}
 <details class="panel prompt" id="{{ set.name }}" {% if show == set.name or sets | length == 1 %}open{% endif %}>
@@ -11,7 +11,7 @@
     <span class="small muted">sha256 {{ set.sha256.hex()[:12] }}</span></summary>
   <p class="small">{{ set.description }}</p>
   <p class="small">Reads documents of kinds: {% for kind in set.document_kinds %}<code>{{ kind }}</code> {% endfor %}· evidence kinds meaning "not reported": {% for kind in set.not_reported_kinds | sort %}<code>{{ kind }}</code> {% endfor %}</p>
-  <table class="inner">
+  <div class="table-wrap"><table class="inner">
     <tr><th>Key</th><th>Question</th><th>Rule</th><th>Part</th><th>Searched with</th></tr>
     {% for requirement in set.requirements %}
     <tr>
@@ -22,7 +22,7 @@
       <td class="small">{{ requirement.search | join(", ") }}{% if requirement.search_from %}{% if requirement.search %} + {% endif %}the item's {{ requirement.search_from }}{% endif %}</td>
     </tr>
     {% endfor %}
-  </table>
+  </table></div>
   <h3 class="section">How parts combine into a label</h3>
   <ul class="small">
     {% for part, settings in set.parts.items() %}<li><b>{{ part }}</b>: {{ settings.combine }} of its questions (none: {{ settings.empty }})</li>{% endfor %}

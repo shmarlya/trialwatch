@@ -25,6 +25,19 @@
         "--reload"
       ],
       "port": 8010
+    },
+    {
+      "name": "web-8020",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "trialwatch",
+        "web",
+        "--port",
+        "8020",
+        "--no-worker"
+      ],
+      "port": 8020
     }
   ]
 }

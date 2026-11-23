@@ -3,7 +3,7 @@
 {% block title %}Trials · TrialWatch{% endblock %}
 {% block content %}
 <h1>Trials</h1>
-{% if can("view.internal") %}<p class="sub">Every trial in the central model, from any source, newest first. Evidence is its best state at any source: only trials with complete (or stale) evidence can be checked. Our label is the latest finished evidence run's.</p>{% else %}<p class="sub">Every trial we follow, newest first, with the result our team published for it, if any.</p>{% endif %}
+{% if can("view.internal") %}<p class="sub">Every trial from every source, newest first.</p>{% else %}<p class="sub">Every trial we follow, newest first.</p>{% endif %}
 <form class="search" method="get" action="/trials">
   <input type="text" name="q" value="{{ q }}" placeholder="Search by identifier, title or sponsor">
   {% if can("view.internal") %}<select name="evidence_state"><option value="">any evidence</option>{% for name in filters %}<option {% if name == evidence_state %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>{% endif %}
@@ -26,13 +26,13 @@
       {% if row.sponsor %}<br><span class="muted">{{ row.sponsor }}</span>{% endif %}</td>
     <td class="small">{{ row.status or "—" }}</td>
     {% if can("view.internal") %}<td>{{ evidence_state(row.evidence) }}</td>{% endif %}
-    <td>{{ label(row.label) }}{% if row.label_outdated %} <span class="flag" title="its documents or record changed since it was judged">outdated</span>{% endif %}{% if row.label_run %} <a class="small muted" href="/runs/{{ row.label_run }}">run {{ row.label_run }}</a>{% endif %}</td>
+    <td>{{ label(row.label) }}{% if row.label_outdated %} <span class="flag" title="Changed since judged">outdated</span>{% endif %}{% if row.label_run %} <a class="small muted" href="/runs/{{ row.label_run }}">run {{ row.label_run }}</a>{% endif %}</td>
     <td class="num">{{ row.documents }}</td>
     <td class="num">{% if row.pages and row.readable_pages < row.pages %}<span class="flag">{{ row.readable_pages }}</span>/{{ row.pages }}{% else %}{{ row.readable_pages }}{% endif %}</td>
     <td class="small muted">{{ row.created_at.strftime("%Y-%m-%d") }} · {{ who(row.created_by) }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="8" class="muted">No trials{% if q or evidence_state %} match{% elif can("view.internal") %} yet. Bring some in from <a href="/sources">a source</a>{% else %} yet{% endif %}.</td></tr>
+  <tr><td colspan="8" class="muted">No trials{% if q or evidence_state %} match{% elif can("view.internal") %} yet. Add some from <a href="/sources">a source</a>{% else %} yet{% endif %}.</td></tr>
   {% endfor %}
 </table></div>
 {{ pager() }}

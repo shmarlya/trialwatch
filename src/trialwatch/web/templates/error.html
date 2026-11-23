@@ -12,7 +12,7 @@
 </head>
 <body>
 <header class="app-header">
-  <a class="brand" href="/"><img src="/static/logo.svg" alt="" width="26" height="26">TrialWatch</a>
+  <a class="brand" href="/"><img src="/static/logo.svg" alt="" width="26" height="26">TrialWatch<span class="alpha" title="Early version: results and features may change or be wrong.">alpha</span></a>
   <nav class="app-nav" aria-label="Main">
     <a href="/">Home</a>
     <a href="/find">Find a trial</a>
@@ -21,7 +21,7 @@
 <main>
 <h1>{{ title }}</h1>
 <div class="alert" role="alert">{{ message }}</div>
-{% if reference %}<p class="small muted">If you tell us about it, give this reference: <code>{{ reference }}</code>.</p>{% endif %}
+{% if reference %}<p class="small muted">Reference: <code>{{ reference }}</code>.</p>{% endif %}
 <p><a href="/">Back to the home page</a></p>
 </main>
 </body>

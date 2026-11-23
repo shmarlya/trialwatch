@@ -3,7 +3,7 @@
 {% block title %}Gold datasets · TrialWatch{% endblock %}
 {% block content %}
 <h1>Gold datasets</h1>
-<p class="sub">Hand-checked answers we compare our checks against. Each version is a fixed set of files in {{ gold_dir }}, never stored in the database; ours is the newest finished judgement under the dataset's requirement set.</p>
+<p class="sub">Hand-checked answers we compare our checks against.</p>
 {% for problem in lock_problems %}<div class="alert">{{ problem }}</div>{% endfor %}
 {% if not dataset %}
 <p class="muted">No gold datasets yet. Build one with <code>trialwatch gold build bruckner</code>.</p>
@@ -42,7 +42,7 @@
     <div class="stat"><span>in our database · checked</span><b>{{ summary.synced }} · {{ summary.checked }}</b></div>
     <div class="stat"><span>label agrees · disagrees · ours open</span><b>{{ summary.agree }} · {{ summary.disagree }} · {{ summary.ours_open }}</b></div>
     <div class="stat"><span>false accusations</span><b>{% if summary.false_accusations %}<span class="flag">{{ summary.false_accusations }}</span>{% else %}0{% endif %}</b></div>
-    <div class="stat"><span>set aside (we read documents posted after the reviewers' day)</span><b>{{ summary.set_aside }}</b></div>
+    <div class="stat"><span>set aside (we read newer documents)</span><b>{{ summary.set_aside }}</b></div>
   </div>
 </div>
 
@@ -60,7 +60,7 @@
     <td class="small">{% if row.trial_id is none %}<span class="muted">not synced</span>
       {% elif row.judgement %}<a href="/trials/{{ row.trial_id }}?run={{ row.judgement.run_id }}">{{ label(row.judgement.label) }}</a> <span class="muted">run {{ row.judgement.run_id }}</span>
       {% else %}<a href="/trials/{{ row.trial_id }}">not checked</a>{% endif %}</td>
-    <td>{% if row.set_aside %}<span class="muted" title="our check read a document posted after the reviewers read theirs">set aside</span>{% elif row.comparison %}{{ outcome(row.comparison.label) }}{% if row.comparison.false_accusation %} <span class="flag">false accusation</span>{% endif %}{% endif %}</td>
+    <td>{% if row.set_aside %}<span class="muted" title="Our check read a newer document than the reviewers">set aside</span>{% elif row.comparison %}{{ outcome(row.comparison.label) }}{% if row.comparison.false_accusation %} <span class="flag">false accusation</span>{% endif %}{% endif %}</td>
   </tr>
   {% else %}
   <tr><td colspan="{{ 6 + dataset.parts | length }}" class="muted">Nothing matches.</td></tr>

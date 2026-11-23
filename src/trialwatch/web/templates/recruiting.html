@@ -8,7 +8,7 @@
 {% if patient %}{{ patient_sections(patient) }}{% endif %}
 
 <h2 id="where">Where it recruits</h2>
-<p class="small muted">The sites and countries the register lists, with the trial's status in each country (the register gives it by country, not by site). To take part, contact a site through the register, or ask your doctor.</p>
+<p class="small muted">To take part, contact a site or ask your doctor.</p>
 {% if locations %}
 <div class="table-wrap"><table class="locations">
   <tr><th>Country</th><th>Status there</th><th>Sites</th></tr>
@@ -27,6 +27,6 @@
   {% for identifier in identifiers %}<dt>{{ identifier.label }}</dt><dd>{{ identifier.value }}</dd>{% endfor %}
   <dt>Sponsors</dt><dd>{% for sponsor in sponsors %}{% if not sponsor.removed_at %}{{ sponsor.name }}{% if sponsor.is_primary %} (primary){% endif %}{% if not loop.last %}, {% endif %}{% endif %}{% else %}—{% endfor %}</dd>
 </dl>
-<p class="small muted">TrialWatch checks whether a trial's results are posted once it has ended; this trial is still recruiting, so there is nothing to check yet.</p>
+<p class="small muted">Still recruiting, so there are no results to check yet.</p>
 {{ disclaimer() }}
 {% endblock %}

@@ -685,6 +685,63 @@ def published_trial_countries(conn: psycopg.Connection, requirements: str) -> li
 
 
 @dataclass(frozen=True)
+class ReportedRow:
+    """A country or sponsor on the home page's charts: its checked trials by result."""
+
+    name: str
+    full: int
+    not_full: int
+    undecided: int
+    total: int
+
+    @property
+    def reported(self) -> float:
+        """The share of its checked trials that posted full results, 0 to 100."""
+        return 100 * self.full / self.total
+
+
+# A group's checked trials by result: each trial's current published result, withdrawn ones left out
+_RESULT_COUNTS = """count(*) FILTER (WHERE jc.label = 'full')::int AS full,
+       count(*) FILTER (WHERE jc.label = 'not full')::int AS not_full,
+       count(*) FILTER (WHERE jc.label = 'undecided')::int AS undecided,
+       count(*)::int AS total"""
+
+
+def reported_by_country(conn: psycopg.Connection, requirements: str) -> list[ReportedRow]:
+    """Checked trials by result in each country they run in (a trial counts once per country), most first."""
+    with conn.cursor(row_factory=class_row(ReportedRow)) as cur:
+        return cur.execute(
+            "SELECT places.country AS name, " + _RESULT_COUNTS + """
+            FROM core.trial t
+            JOIN checks.judgement_current jc ON jc.trial_id = t.id AND jc.requirements = %(requirements)s
+            JOIN LATERAL (SELECT DISTINCT l.country FROM core.trial_location l WHERE l.trial_id = t.id) places ON true
+            WHERE t.merged_into IS NULL AND jc.withdrawn_at IS NULL
+            GROUP BY places.country
+            ORDER BY total DESC, name
+            """,
+            {"requirements": requirements},
+        ).fetchall()
+
+
+def reported_by_sponsor(conn: psycopg.Connection, requirements: str, at_least: int = 3) -> list[ReportedRow]:
+    """Checked trials by result for each primary sponsor with at least `at_least` of them, most first."""
+    with conn.cursor(row_factory=class_row(ReportedRow)) as cur:
+        return cur.execute(
+            "SELECT o.name, " + _RESULT_COUNTS + """
+            FROM core.trial t
+            JOIN checks.judgement_current jc ON jc.trial_id = t.id AND jc.requirements = %(requirements)s
+            JOIN core.trial_sponsor s ON s.trial_id = t.id AND s.is_primary AND s.removed_at IS NULL
+            JOIN core.organisation o ON o.id = s.organisation_id
+            WHERE t.merged_into IS NULL AND jc.withdrawn_at IS NULL AND o.merged_into IS NULL
+            GROUP BY o.id, o.name
+            HAVING count(*) >= %(at_least)s
+            ORDER BY total DESC, o.name
+            """,
+            {"requirements": requirements, "at_least": at_least},
+        ).fetchall()
+
+
+@dataclass(frozen=True)
 class LocationRow:
     country: str
     city: str | None

@@ -175,7 +175,7 @@ def test_the_page_shows_the_tags_as_ai_made_with_their_quotes(app_conn, recruiti
     page = TestClient(web.app).get(f"/trials/{recruiting[CT]}").text
     assert "What AI read in the registry" in page and "AI · claude-haiku-5-5" in page
     assert "sugar diabetes" in page and "“aged 18 to 75 years” (inclusion-1)" in page
-    assert "dropped for not being there: 5" in page
+    assert "(5 dropped)" in page
 
 
 def no_sources(conn, capability):

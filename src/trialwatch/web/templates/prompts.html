@@ -3,7 +3,7 @@
 {% block title %}Prompts · TrialWatch{% endblock %}
 {% block content %}
 <h1>Prompts</h1>
-<p class="sub">The system prompts in src/trialwatch/checks/prompts/, exactly as they are sent. There is one current text per prompt (nothing is versioned before production); every run stores the text it sent, and its sha256, so an earlier run always shows its own text below. The evidence check also sends a message per trial (its pages and questions), shown in each trial's trace.</p>
+<p class="sub">The system prompts, exactly as sent. Each run keeps the text it used.</p>
 
 <h2>Prompt files now</h2>
 {% for prompt in current %}

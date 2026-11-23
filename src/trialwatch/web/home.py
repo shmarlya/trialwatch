@@ -75,6 +75,8 @@ def public_home(
         rows = overview.published_trial_rows(
             conn, defaults.requirements, found, offset=(page - 1) * TRIALS_PER_PAGE, limit=TRIALS_PER_PAGE
         )
+        by_country = overview.reported_by_country(conn, defaults.requirements)
+        by_sponsor = overview.reported_by_sponsor(conn, defaults.requirements)
         times = jobs_db.schedule_times(conn)
         spend = costs_db.spend_totals(conn)
     shown = {
@@ -99,6 +101,8 @@ def public_home(
         "defaults": defaults,
         "times": times,
         "spend": spend,
+        "by_country": by_country,
+        "by_sponsor": by_sponsor,
     }
     return TEMPLATES.TemplateResponse(request, "home.html", context)
 

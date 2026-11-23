@@ -143,9 +143,11 @@ every app session use TimeZone UTC. All SQL lives in `src/trialwatch/db/` (psyco
 if SQL appears anywhere else): `connect()` opens a connection in UTC and names who is writing; one module per
 schema, and `db/overview.py` for the web interface's read-only pages.
 
-On 2026-11-21 the earlier migrations were squashed into `db/migrations/20261121120000_init.sql`; a database made
-with the migrations from before that is not migrated: reset it with `docker compose down -v` (this deletes its
-data) and run `migrate` again. New changes get new files.
+Everything up to 2026-11-23 is one migration, `db/migrations/20261121120000_init.sql`, organised by schema. It
+keeps the version the first squash had, and the schema it makes is the one the sixteen earlier migrations made
+(checked by dumping a database built each way), so a database made with those keeps its data: delete the later
+versions from `public.schema_migrations` and nothing else (`DELETE FROM public.schema_migrations WHERE version >
+'20261121120000'`). New changes get new files; they are folded into the init again before the first deploy.
 
 The tables are described with each part: [sources and gold](sources-and-gold.md#central-model-tables) (`core`),
 [checks](checks.md#tables) (`checks`), [search](search.md#tables) (`search`, `geo`, `vocab`). Sign-in, jobs and

@@ -1,5 +1,5 @@
 """Read-only queries for the web interface, on the central model (ADR-003) and the evidence check's
-results. See db/migrations/*_core_*.sql and *_checks_on_core.sql."""
+results. See db/migrations/*_init.sql."""
 
 from dataclasses import dataclass
 from datetime import date, datetime

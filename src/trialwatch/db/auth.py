@@ -1,5 +1,5 @@
 """Queries on the auth schema: the people who can sign in to the web interface, and their sessions
-(see db/migrations/*_auth.sql and ADR-006). What a role may do is the chart in trialwatch.auth.actions,
+(see the auth section of db/migrations/*_init.sql and ADR-006). What a role may do is the chart in trialwatch.auth.actions,
 not data. Users sign in with their email. Each user is also a core.actor (a person named by the email), so the audit log records their
 writes under their own name."""
 

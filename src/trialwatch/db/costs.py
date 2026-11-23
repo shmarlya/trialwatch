@@ -1,5 +1,5 @@
 """Queries on what TrialWatch spends on paid APIs (core.api_call) and its spending cap
-(core.app_setting), see db/migrations/*_spend.sql. Money is US dollars, as Decimal."""
+(core.app_setting), see the spend section of db/migrations/*_init.sql. Money is US dollars, as Decimal."""
 
 from dataclasses import dataclass
 from datetime import datetime

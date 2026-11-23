@@ -1,5 +1,5 @@
-"""Queries on the jobs schema: the job queue, its progress lines and schedules (see
-db/migrations/*_jobs.sql). The worker (src/trialwatch/jobs/) claims jobs, the web interface adds them
+"""Queries on the jobs schema: the job queue, its progress lines and schedules (see the jobs
+section of db/migrations/*_init.sql). The worker (src/trialwatch/jobs/) claims jobs, the web interface adds them
 and shows them."""
 
 from dataclasses import dataclass

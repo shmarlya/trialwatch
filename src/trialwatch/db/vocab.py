@@ -8,20 +8,6 @@ import psycopg
 from psycopg.rows import class_row
 
 
-def start_load(conn: psycopg.Connection, vocabulary: str, version: str, file: str, sha256: str, license: str) -> int:
-    row = conn.execute(
-        "INSERT INTO vocab.load_run (vocabulary, version, file, sha256, license, created_by) "
-        "VALUES (%s, %s, %s, %s, %s, current_setting('trialwatch.actor')::bigint) RETURNING id",
-        (vocabulary, version, file, sha256, license),
-    ).fetchone()
-    return row[0]
-
-
-def finish_load(conn: psycopg.Connection, run_id: int, descriptors: int, terms: int) -> None:
-    conn.execute("UPDATE vocab.load_run SET descriptors = %s, terms = %s, finished_at = clock_timestamp() WHERE id = %s",
-                 (descriptors, terms, run_id))
-
-
 def clear_mesh(conn: psycopg.Connection) -> None:
     conn.execute("DELETE FROM vocab.mesh_descriptor")
 

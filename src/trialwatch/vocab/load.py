@@ -1,6 +1,5 @@
 """Loading MeSH into the vocab schema (ADR-008): one transaction, so a failed load leaves the earlier data."""
 
-import hashlib
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -9,6 +8,8 @@ from pathlib import Path
 
 import psycopg
 
+from trialwatch import reference
+from trialwatch.db import reference as reference_db
 from trialwatch.db import vocab as vocab_db
 from trialwatch.vocab import mesh
 
@@ -21,17 +22,6 @@ class LoadSummary:
     version: str
     descriptors: int
     terms: int
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        while True:
-            chunk = file.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _version_of(path: Path, fallback: str) -> str:
@@ -80,7 +70,7 @@ def load_mesh(conn: psycopg.Connection, year: int | None, from_file: Path | None
         if progress is not None:
             progress(f"reading {origin}")
         with conn.transaction():
-            run_id = vocab_db.start_load(conn, "mesh", version, origin, _sha256(path), mesh.LICENSE)
+            run_id = reference_db.start_load(conn, "mesh", mesh.LICENSE, {})
             vocab_db.clear_mesh(conn)
             descriptors = []
             terms = []
@@ -89,5 +79,7 @@ def load_mesh(conn: psycopg.Connection, year: int | None, from_file: Path | None
                 for term in descriptor.terms:
                     terms.append((descriptor.ui, term))
             stored_terms = vocab_db.add_descriptors(conn, descriptors, terms)
-            vocab_db.finish_load(conn, run_id, len(descriptors), stored_terms)
+            files = [{"name": path.name, "from": origin, "sha256": reference.sha256_of(path)}]
+            reference_db.finish_load(conn, run_id, files, {"descriptors": len(descriptors), "terms": stored_terms},
+                                     version)
     return LoadSummary(run_id, version, len(descriptors), stored_terms)

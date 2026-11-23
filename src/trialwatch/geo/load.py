@@ -13,12 +13,12 @@ code: the city wins. An address none of these finds is kept as 'none', and never
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from math import asin, cos, radians, sin, sqrt
 from pathlib import Path
 
 import psycopg
 
 from trialwatch.db import geo as geo_db
+from trialwatch.db import reference as reference_db
 from trialwatch.geo import geonames
 
 POSTCODE_CITY_KM = 40
@@ -50,7 +50,8 @@ def load(conn: psycopg.Connection, countries: list[str], from_dir: Path | None =
     new data. One transaction: a load that fails leaves the earlier data."""
     with geonames.work_folder() as work, conn.transaction():
         work_dir = Path(work)
-        summary = LoadSummary(run_id=geo_db.start_load(conn, countries))
+        summary = LoadSummary(run_id=reference_db.start_load(conn, "geonames", geonames.LICENSE,
+                                                             {"countries": list(countries)}))
         files = []
 
         country_file = _required(geonames.COUNTRY_INFO, from_dir, work_dir)
@@ -98,7 +99,8 @@ def load(conn: psycopg.Connection, countries: list[str], from_dir: Path | None =
             summary.postcodes += held
             _report(progress, f"postcodes {country}: {held}")
 
-        geo_db.finish_load(conn, summary.run_id, files, summary.places, summary.postcodes)
+        reference_db.finish_load(conn, summary.run_id, files, {"places": summary.places,
+                                                                "postcodes": summary.postcodes})
         geo_db.forget_points(conn)
     return summary
 
@@ -169,14 +171,6 @@ def _postcode_point(conn: psycopg.Connection, iso2: str, postcode_key: str, city
     return None
 
 
-def _distance_km(first: geo_db.Point, second: geo_db.Point) -> float:
-    """Great-circle distance (haversine), as geo.distance_km in SQL."""
-    half_latitude = radians(second.latitude - first.latitude) / 2
-    half_longitude = radians(second.longitude - first.longitude) / 2
-    a = sin(half_latitude) ** 2 + cos(radians(first.latitude)) * cos(radians(second.latitude)) * sin(half_longitude) ** 2
-    return 2 * 6371 * asin(min(1.0, sqrt(a)))
-
-
 def geocode_address(conn: psycopg.Connection, address: geo_db.Address) -> str:
     """Find and store where one site address is; returns the precision it was found by."""
     iso2 = geo_db.country_code(conn, address.country)
@@ -194,7 +188,11 @@ def geocode_address(conn: psycopg.Connection, address: geo_db.Address) -> str:
         city_text = city
     postcode_point = _postcode_point(conn, iso2, address.postcode_key, city_text)
     if postcode_point is not None:
-        if city_point is not None and _distance_km(postcode_point, city_point) > POSTCODE_CITY_KM:
+        apart = None
+        if city_point is not None:
+            apart = geo_db.distance_km(conn, postcode_point.latitude, postcode_point.longitude, city_point.latitude,
+                                       city_point.longitude)
+        if apart is not None and apart > POSTCODE_CITY_KM:
             geo_db.save_point(conn, address, iso2, city_point, "city")
             return "city"
         geo_db.save_point(conn, address, iso2, postcode_point, "postcode")

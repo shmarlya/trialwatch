@@ -9,26 +9,8 @@ from dataclasses import dataclass
 
 import psycopg
 from psycopg.rows import class_row
-from psycopg.types.json import Jsonb
 
-# --- loading reference data ----------------------------------------------------------------------
-
-
-def start_load(conn: psycopg.Connection, countries: Sequence[str]) -> int:
-    row = conn.execute(
-        "INSERT INTO geo.load_run (countries, created_by) VALUES (%s, current_setting('trialwatch.actor')::bigint) "
-        "RETURNING id",
-        (list(countries),),
-    ).fetchone()
-    return row[0]
-
-
-def finish_load(conn: psycopg.Connection, run_id: int, files: list[dict], places: int, postcodes: int) -> None:
-    conn.execute(
-        "UPDATE geo.load_run SET files = %s, places = %s, postcodes = %s, finished_at = clock_timestamp() WHERE id = %s",
-        (Jsonb(files), places, postcodes, run_id),
-    )
-
+# --- loading reference data (core.reference_load records each load: db/reference.py) ----------------
 
 def replace_countries(conn: psycopg.Connection, countries: Sequence[tuple[str, str, str, list[str], bool]],
                       names: Sequence[tuple[str, str]]) -> None:
@@ -340,6 +322,14 @@ def postcode_places(conn: psycopg.Connection, postcode: str) -> list[PostcodePla
             """,
             (postcode,),
         ).fetchall()
+
+
+def distance_km(conn: psycopg.Connection, latitude: float, longitude: float, other_latitude: float,
+                other_longitude: float) -> float:
+    """The great-circle distance between two points, as searches measure it (geo.distance_km)."""
+    row = conn.execute("SELECT geo.distance_km(%s, %s, %s, %s)",
+                       (latitude, longitude, other_latitude, other_longitude)).fetchone()
+    return row[0]
 
 
 def loaded(conn: psycopg.Connection) -> bool:

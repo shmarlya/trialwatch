@@ -80,6 +80,10 @@ def test_mesh_loads_diseases_with_their_synonyms_and_hierarchy(conn, tmp_path):
     core.act_as(conn, "test-person")
     summary = load_mesh(conn, tmp_path)
     assert (summary.version, summary.descriptors) == ("2026", 18)
+    # the load is recorded with the file it read
+    load = conn.execute("SELECT name, version, files->0->>'name', length(files->0->>'sha256'), counts->>'descriptors' "
+                        "FROM core.reference_load WHERE id = %s", (summary.run_id,)).fetchone()
+    assert load == ("mesh", "2026", "desc2026.xml", 64, "18")
     assert [match.ui for match in vocab_db.terms_named(conn, ["heart attack"])] == ["D009203"]
     # a qualifier's name is no term
     assert vocab_db.terms_named(conn, ["therapy"]) == []

@@ -59,6 +59,12 @@ flowchart LR
   (`src/trialwatch/search/query.py`, `lexicon.json`, `categories.json`). The page shows the reading ("diabetes ·
   near Paris, France · within 50 km") with a form to change it, other readings as links, counts at each distance,
   and "did you mean" when a word is in no recruiting trial.
+- **Why each result is there.** Every card says why the search found the trial, asked of the database for the
+  page's hits only, the way the search matched them (`src/trialwatch/search/why.py`): each condition word and the
+  part of the trial it is in (its condition, quoted; another name of it, a translation or synonym; its title; what
+  it tests or its main objective; its inclusion criteria), or the category a word names; and, when the words alone
+  didn't find it, the MeSH concept that did, the trial's own or a broader one ("its condition “Cardiogenic shock”
+  is a kind of “Myocardial Infarction”"). The distance is on the card already.
 - **AI tags, each with a checked quote.** `trialwatch search annotate` (and the refresh) has a model
   (`search/configs/annotate.json`, prompt `checks/prompts/annotate.md`) tag each recruiting trial: categories, the
   kind of medicine, the purpose, synonyms of its conditions in English and its countries' languages, MeSH concepts
@@ -116,8 +122,13 @@ Other commands: `source profiles ctis`, `geo geocode`, `geo find NAME`, `search 
 | `search/evaluate.py` | `search eval` |
 | `geo/` | GeoNames load; sites geocoded |
 | `vocab/` | MeSH load |
-| `web/search.py`, `web/privacy.py` | `/find` and the recruiting trial page; request logs without query strings |
-| `db/search.py`, `db/geo.py`, `db/vocab.py` | their SQL |
+| `reference.py`, `db/reference.py` | downloading a reference file and its sha256; recording each load |
+| `search/find.py` | the one entry point, `find`: read the query, search, and say what would find something when nothing is found (`/find` and `search eval` both use it) |
+| `search/why.py` | why each result is there, in words, on its card |
+| `search/constants.py` | what search shares: age groups and phases in words, the distances, the tokens a document holds besides words |
+| `search/routes.py`, `search/views.py` | `/find` and what the trial page shows someone looking for a trial to join |
+| `web/privacy.py` | request logs without query strings |
+| `db/search.py`, `db/geo.py`, `db/vocab.py` | their SQL (distances only in SQL: `geo.distance_km`) |
 
 ## Tables
 
@@ -158,7 +169,7 @@ erDiagram
 | `geo.place`, `geo.place_name` | places with 1000+ people of the loaded countries and their point; every name of a place (trigram index) |
 | `geo.postcode` | postal codes with a point |
 | `geo.address_point` | where each distinct site address is; precision postcode, city, city-fuzzy or none (never in a distance search) |
-| `geo.load_run`, `vocab.load_run` | each load: the files and their sha256, counts, licence (both audited) |
+| `core.reference_load` | each load of GeoNames or MeSH: what it was asked, the files and their sha256, the rows it holds, licence (audited) |
 | `vocab.mesh_descriptor`, `vocab.mesh_term`, `vocab.mesh_tree` | MeSH diseases (C) and mental disorders (F03): descriptor (D003920 Diabetes Mellitus), entry terms (Heart Attack), tree numbers (C18.452.394.750) |
 
 ## External data
@@ -176,7 +187,7 @@ GET /zip/<CC>.zip           postal codes per country
   country, postal code, place name, admin names, latitude, longitude,
   accuracy   (404: none, e.g. GR)
 → geo.country, geo.country_name, geo.place, geo.place_name, geo.postcode;
-  geo.load_run keeps each file's sha256.
+  core.reference_load keeps each file's sha256.
 
 MeSH — nlmpubs.nlm.nih.gov/projects/mesh/   (U.S. NLM; trialwatch vocab load)
 GET /MESH_FILES/xmlmesh/desc<year>.gz   ~17 MB gzip
@@ -186,7 +197,7 @@ DescriptorRecord: DescriptorUI (D003920), DescriptorName/String,
   ConceptList/…/Term/String (entry terms: NIDDM, Heart Attack, …)
 Kept: diseases (C) and mental disorders (F03)
 → vocab.mesh_descriptor, vocab.mesh_term, vocab.mesh_tree;
-  vocab.load_run keeps the sha256.
+  core.reference_load keeps the sha256.
 ```
 
 What a trial's profile reads from CTIS's `GET /retrieve` (`sources/ctis.py`, `trial_profile`):

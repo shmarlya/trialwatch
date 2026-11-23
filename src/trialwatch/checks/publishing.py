@@ -93,7 +93,6 @@ def calibrate(conn: psycopg.Connection, requirements: str, before_run: int | Non
     label_rules = requirement_sets.load(requirements).labels
     for dataset in _newest_versions(requirements):
         used.append(dataset.ref)
-        read_day = compare.evidence_day(dataset)
         trial_by_item = {}
         for item in dataset.items:
             if item.expected_label is None:
@@ -115,8 +114,7 @@ def calibrate(conn: psycopg.Connection, requirements: str, before_run: int | Non
                 if check in seen_checks:
                     continue
                 seen_checks.add(check)
-                posted = judgement.latest_published_at
-                if read_day is not None and posted is not None and posted.date() >= read_day:
+                if compare.set_aside(dataset, judgement.latest_published_at):
                     continue
                 outcome = datasets.compare(item, dataset.parts, {}, judgement.label, label_rules).label
                 if outcome not in (datasets.AGREE, datasets.DISAGREE):

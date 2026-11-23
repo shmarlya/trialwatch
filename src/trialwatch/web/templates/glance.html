@@ -1,0 +1,29 @@
+{% from "macros.html" import when, run_status %}
+{# The schedule and the money: on the home page for everyone #}
+{% macro at_a_glance(times, spend) %}
+<div class="grid glance">
+  <div class="panel">
+    <h3 class="panel-title">Last scheduled run</h3>
+    {% if times.last_name %}
+      <p class="figure">{{ when(times.last_finished_at or times.last_started_at) }} <span class="small muted">UTC</span></p>
+      <p class="small muted">{{ times.last_name }} · {{ run_status(times.last_status) }}</p>
+    {% else %}
+      <p class="figure">—</p><p class="small muted">No scheduled run yet.</p>
+    {% endif %}
+  </div>
+  <div class="panel">
+    <h3 class="panel-title">Next scheduled run</h3>
+    {% if times.next_run_at %}
+      <p class="figure">{{ when(times.next_run_at) }} <span class="small muted">UTC</span></p>
+      <p class="small muted">{{ times.next_name }}</p>
+    {% else %}
+      <p class="figure">—</p><p class="small muted">No schedule is switched on.</p>
+    {% endif %}
+  </div>
+  <div class="panel">
+    <h3 class="panel-title">Spent on AI so far</h3>
+    <p class="figure">{{ dollars(spend.all_time) }}</p>
+    <p class="small muted">{{ dollars(spend.this_month) }} this month · {{ "{:,}".format(spend.calls) }} model calls</p>
+  </div>
+</div>
+{% endmacro %}

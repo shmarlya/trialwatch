@@ -13,7 +13,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
+from trialwatch import reference
+
 
 MESH_FILES = "https://nlmpubs.nlm.nih.gov/projects/mesh/MESH_FILES/xmlmesh"
 LICENSE = "MeSH, U.S. National Library of Medicine (https://www.nlm.nih.gov/mesh/)"
@@ -29,13 +30,8 @@ def download(year: int, path: Path) -> str:
     """Download a year's descriptor file to `path`; returns the address it came from. NLM answers a file
     it doesn't have (next year's, before it is out) with a redirect to an error page: FileNotFoundError."""
     url = url_of(year)
-    with httpx.stream("GET", url, timeout=httpx.Timeout(120.0), follow_redirects=False) as response:
-        if response.status_code != 200:
-            raise FileNotFoundError(f"{url}: HTTP {response.status_code}")
-        with path.open("wb") as file:
-            # the bytes as served: a .gz file may come with Content-Encoding gzip, which must not be undone
-            for chunk in response.iter_raw():
-                file.write(chunk)
+    if not reference.download(url, path, timeout=120.0, follow_redirects=False):
+        raise FileNotFoundError(f"{url}: no such file")
     return url
 
 

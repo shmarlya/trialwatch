@@ -16,6 +16,8 @@ from trialwatch.checks import requirements
 from trialwatch.gold import datasets
 from trialwatch.gold.converters import bruckner
 from trialwatch.web import app as web
+from trialwatch.db import overview
+from trialwatch.gold import views as gold_views
 
 # what each label means next to a gold label: the requirement set's labels
 LABELS = requirements.load("eu-ctr-results").labels
@@ -114,13 +116,13 @@ def test_the_gold_page_puts_our_latest_judgement_next_to_the_item(conn, tmp_path
     trial = seed(conn)
     ev.run(conn, FakeClient(GOOD), [trial], default_settings({"method": "files"}), PROMPT)
     datasets.write_version(tmp_path, a_meta(), [an_item(), an_item(key="1999-000000-00-99", label=None)])
-    rows = web._gold_rows(conn, datasets.load("test/v1", tmp_path))
+    rows = gold_views.gold_rows(conn, datasets.load("test/v1", tmp_path))
     assert rows[0].trial_id == trial
     # GOOD says endpoint 12 was not analysed: "not full" where the gold label is "full"
     assert (rows[0].judgement.label, rows[0].comparison.label) == ("not full", "disagree")
     assert rows[0].comparison.false_accusation
     assert (rows[1].trial_id, rows[1].comparison) == (None, None)
-    summary = web._gold_summary(rows)
+    summary = gold_views.gold_summary(rows)
     assert (summary.items, summary.labelled, summary.synced, summary.checked) == (2, 1, 1, 1)
     assert summary.false_accusations == 1
 
@@ -132,13 +134,13 @@ def test_a_judgement_that_read_a_document_posted_after_the_reviewers_day_is_set_
     ev.run(conn, FakeClient(GOOD), [trial], default_settings({"method": "files"}), PROMPT)
     datasets.write_version(tmp_path, a_meta(as_of="2025-11-10"), [an_item()])
     dataset = datasets.load("test/v1", tmp_path)
-    rows = web._gold_rows(conn, dataset)
+    rows = gold_views.gold_rows(conn, dataset)
     assert (rows[0].trial_id, rows[0].set_aside, rows[0].comparison) == (trial, True, None)
-    summary = web._gold_summary(rows)
+    summary = gold_views.gold_summary(rows)
     assert (summary.synced, summary.set_aside, summary.checked, summary.false_accusations) == (1, 1, 0, 0)
-    assert not web.set_aside(dataset, None)
-    assert not web.set_aside(dataset, datetime(2025, 11, 9, 23, 59, tzinfo=UTC))
-    assert web.set_aside(dataset, datetime(2025, 11, 10, 0, 0, tzinfo=UTC))
+    assert not gold_views.set_aside(dataset, None)
+    assert not gold_views.set_aside(dataset, datetime(2025, 11, 9, 23, 59, tzinfo=UTC))
+    assert gold_views.set_aside(dataset, datetime(2025, 11, 10, 0, 0, tzinfo=UTC))
 
 
 def test_the_gold_pages_render_and_unknown_items_are_404(admin_client, monkeypatch):
@@ -167,10 +169,10 @@ def test_a_trial_page_lists_the_gold_items_naming_it(conn, tmp_path, monkeypatch
                              input_tokens=0, output_tokens=0, duration_ms=0, error=None)
     datasets.write_version(tmp_path, a_meta(), [an_item(), an_item(key="1999-000000-00-99")])
     monkeypatch.setenv("TRIALWATCH_GOLD_DIR", str(tmp_path))
-    identifiers = web.overview.trial_identifiers(conn, trial)
-    judgements = web.overview.trial_judgements(conn, trial)
+    identifiers = overview.trial_identifiers(conn, trial)
+    judgements = overview.trial_judgements(conn, trial)
     assert (judgements[0].run_id, judgements[0].run_status) == (running, "running")
-    found = web._gold_items_for(identifiers, judgements)
+    found = gold_views.gold_items_for(identifiers, judgements)
     assert len(found) == 1
     dataset, item, comparison = found[0]
     assert (dataset.ref, item.key, comparison.label) == ("test/v1", CT, "disagree")

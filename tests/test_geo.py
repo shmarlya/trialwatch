@@ -34,7 +34,8 @@ def test_loading_reads_countries_places_with_their_names_and_postcodes(conn, tmp
     # places of the countries asked for only: Lyme Regis is in the UK
     assert (summary.countries, summary.places, summary.postcodes) == (6, 11, 8)
     assert summary.missing == []
-    run = conn.execute("SELECT countries, places, jsonb_array_length(files), license FROM geo.load_run").fetchone()
+    run = conn.execute("SELECT params->'countries', (counts->>'places')::int, jsonb_array_length(files), license "
+                       "FROM core.reference_load WHERE name = 'geonames'").fetchone()
     assert run[0] == ["FR", "DE", "AT", "BE", "ES"] and run[1:3] == (11, 7) and "CC BY 4.0" in run[3]
     # a place by any of its names, accents and case aside
     vienna = geo_db.places_named(conn, ["WIEN"])

@@ -9,7 +9,6 @@ Files (https://download.geonames.org/export/):
 - zip/<CC>.zip: a country's postal codes, each with a place name and a point
 """
 
-import hashlib
 import io
 import json
 import tempfile
@@ -18,7 +17,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
+from trialwatch import reference
+
 
 GEONAMES = "https://download.geonames.org/export"
 COUNTRY_INFO = "countryInfo.txt"
@@ -89,30 +89,6 @@ class SourceFile:
 
 # --- getting the files -------------------------------------------------------------------------
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        while True:
-            chunk = file.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _download(url: str, path: Path) -> bool:
-    """Download to `path`; False when GeoNames has no such file (it has no postal codes for Greece)."""
-    with httpx.stream("GET", url, timeout=httpx.Timeout(60.0), follow_redirects=True) as response:
-        if response.status_code == 404:
-            return False
-        response.raise_for_status()
-        with path.open("wb") as file:
-            # the bytes as served: a .gz file may come with Content-Encoding gzip, which must not be undone
-            for chunk in response.iter_raw():
-                file.write(chunk)
-    return True
-
-
 def get_file(name: str, from_dir: Path | None, work_dir: Path) -> SourceFile | None:
     """The file from `from_dir` when given (a .zip may also be there as its .txt), else downloaded into
     `work_dir`. None when there is no such file (a country with no postal code file)."""
@@ -122,13 +98,14 @@ def get_file(name: str, from_dir: Path | None, work_dir: Path) -> SourceFile | N
             candidates.append(from_dir / (name[:-4] + ".txt"))
         for path in candidates:
             if path.exists():
-                return SourceFile(name, str(path), path, _sha256(path))
+                return SourceFile(name, str(path), path, reference.sha256_of(path))
         return None
     url = url_of(name)
     path = work_dir / name
-    if not _download(url, path):
+    # False: GeoNames has no such file (it has no postal codes for Greece)
+    if not reference.download(url, path, timeout=60.0):
         return None
-    return SourceFile(name, url, path, _sha256(path))
+    return SourceFile(name, url, path, reference.sha256_of(path))
 
 
 def work_folder() -> tempfile.TemporaryDirectory:

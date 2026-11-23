@@ -2,7 +2,9 @@
 recruiting in Villejuif, not the one in Lyon; ended trials are never found; a recruiting trial's page
 is public with no people on it; searches are private."""
 
+import html
 import json
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -85,6 +87,27 @@ def test_who_can_join_narrows_the_search(trials):
 def test_a_misspelled_word_is_read_as_the_known_one(trials):
     page = TestClient(web.app).get("/find", params={"q": "diabtes Paris"}).text
     assert shown(page) == {NEAR_PARIS} and "searched for <b>diabetes</b> instead" in page
+
+
+def why_lines(page):
+    """The "Why it is here" line of each result card."""
+    found = []
+    for line in re.findall(r'<p class="small why"><span class="muted">Why it is here:</span> (.*?)</p>', page):
+        found.append(html.unescape(line))
+    return found
+
+
+def test_each_result_says_why_it_is_here(trials):
+    public = TestClient(web.app)
+    # a word of its condition
+    assert why_lines(public.get("/find", params={"q": "diabetes Paris"}).text) == [
+        "“diabetes” in its condition “Type 2 Diabetes Mellitus”"]
+    # the same word in one trial's title, and in what the others test
+    assert sorted(why_lines(public.get("/find", params={"q": "semaglutide"}).text)) == [
+        "“semaglutide” in its title"] + ["“semaglutide” in what it tests or its main objective"] * 2
+    # no trial has the word: a MeSH entry term found the concept its condition was filed under
+    assert why_lines(public.get("/find", params={"q": "NIDDM"}).text) == [
+        "its condition “Type 2 Diabetes Mellitus” is the medical term “Diabetes Mellitus, Type 2” (MeSH)"] * 2
 
 
 def test_a_recruiting_trial_has_a_public_page_without_people(trials):

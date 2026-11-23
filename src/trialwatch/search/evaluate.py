@@ -8,15 +8,13 @@ a query needs judged trials (recall, nDCG), the next step.
 
 import json
 from dataclasses import dataclass, field
-from math import asin, cos, radians, sin, sqrt
 from pathlib import Path
 
 import psycopg
 
+from trialwatch.db import geo as geo_db
 from trialwatch.db import search as search_db
-from trialwatch.search import query
-from trialwatch.search.lookups import DatabaseLookups
-from trialwatch.web import search as web_search
+from trialwatch.search import find, query
 
 NEAR_KM = 30
 FIELDS = ("condition", "near", "country", "age", "age_group", "healthy_volunteers", "sex", "phase")
@@ -39,14 +37,7 @@ def load_queries(path: Path) -> list[QueryCase]:
     return found
 
 
-def _km(first: tuple[float, float], second: tuple[float, float]) -> float:
-    half_latitude = radians(second[0] - first[0]) / 2
-    half_longitude = radians(second[1] - first[1]) / 2
-    a = sin(half_latitude) ** 2 + cos(radians(first[0])) * cos(radians(second[0])) * sin(half_longitude) ** 2
-    return 2 * 6371 * asin(min(1.0, sqrt(a)))
-
-
-def wrong_fields(reading: query.Interpretation, expected: dict) -> list[str]:
+def wrong_fields(conn: psycopg.Connection, reading: query.Interpretation, expected: dict) -> list[str]:
     """The expected fields the reading got wrong, in words."""
     wrong = []
     for name in FIELDS:
@@ -61,7 +52,7 @@ def wrong_fields(reading: query.Interpretation, expected: dict) -> list[str]:
             if reading.place is None:
                 wrong.append("no place")
             else:
-                distance = _km((reading.place.latitude, reading.place.longitude), (want[0], want[1]))
+                distance = geo_db.distance_km(conn, reading.place.latitude, reading.place.longitude, want[0], want[1])
                 if distance > NEAR_KM:
                     wrong.append(f"place {reading.place.name}, {reading.place.country_name} ({distance:.0f} km off)")
         elif name == "country":
@@ -90,17 +81,19 @@ class CaseResult:
 
 
 def run_case(conn: psycopg.Connection, case: QueryCase) -> CaseResult:
-    reading = query.parse(case.text, DatabaseLookups(conn))
-    wrong = wrong_fields(reading, case.expected)
+    # read as /find reads its one box, then searched as /find searches (find.find, in two steps: the
+    # reading is measured before a search corrects a misspelled word in it)
+    reading = find.read(conn, find.SearchParams(q=case.text))
+    wrong = wrong_fields(conn, reading, case.expected)
     described = query.describe(reading)
-    page = web_search.run(conn, reading, 1)
+    page = find.search(conn, reading, 1)
     near = None
     in_country = None
     country_name = None
     if reading.place is not None:
         near = page.total
         country_name = reading.place.country_name
-        everywhere = web_search.search_filter(reading, query.tsquery_text(reading))
+        everywhere = find.search_filter(reading, query.tsquery_text(reading))
         everywhere.latitude = None
         everywhere.longitude = None
         everywhere.radius_km = None
@@ -110,7 +103,7 @@ def run_case(conn: psycopg.Connection, case: QueryCase) -> CaseResult:
     elif reading.country is not None:
         in_country = page.total
         country_name = reading.country[1]
-    anywhere_filter = web_search.search_filter(reading, query.tsquery_text(reading))
+    anywhere_filter = find.search_filter(reading, query.tsquery_text(reading))
     anywhere_filter.latitude = None
     anywhere_filter.longitude = None
     anywhere_filter.radius_km = None

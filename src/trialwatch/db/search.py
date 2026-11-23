@@ -17,12 +17,13 @@ import psycopg
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
+from trialwatch.search.constants import RADII, TOKENS, age_group_of
 from trialwatch.db.overview import like_text
 
 # ts_rank_cd's weights for D, C, B, A words (A: conditions; see search/index.py)
 RANK_WEIGHTS = [0.1, 0.2, 0.6, 1.0]
 # lexemes that are not words people type, kept out of "did you mean"
-NOT_WORDS = "^(zmesh|zcat|zmeddra)"
+NOT_WORDS = "^(" + "|".join(TOKENS) + ")"
 # how alike a word must be to a known one to be suggested instead
 SUGGEST_SIMILARITY = 0.45
 
@@ -169,7 +170,7 @@ class SearchFilter:
     # the country's name as the reading gave it: for showing, and for the eval's plain-text baseline
     country_name: str | None = None
     age: int | None = None
-    # an age group ("0-17", "18-64", "65+") when no age is given
+    # an age group (search/constants.py) when no age is given
     age_group: str | None = None
     # female | male
     sex: str | None = None
@@ -185,6 +186,8 @@ class SearchHit:
     trial_id: int
     source: str
     source_key: str | None
+    # the adapter that reads the source, for the trial's page there
+    source_adapter: str | None
     title: str | None
     conditions: list[str]
     categories: list[str]
@@ -208,14 +211,6 @@ class SearchHit:
     sites_near: int | None = None
     # how many trials the search finds in all
     total: int = 0
-
-
-def age_group_of(age: int) -> str:
-    if age < 18:
-        return "0-17"
-    if age < 65:
-        return "18-64"
-    return "65+"
 
 
 def _conditions(f: SearchFilter, params: dict) -> list[str]:
@@ -303,7 +298,7 @@ def _query_parts(f: SearchFilter, box_km: float | None) -> tuple[str, dict]:
 
 
 _HIT_COLUMNS = """
-    m.trial_id, s.code AS source,
+    m.trial_id, s.code AS source, s.adapter AS source_adapter,
     (SELECT ts.source_key FROM core.trial_source ts WHERE ts.trial_id = m.trial_id AND ts.source_id = m.source_id
      ORDER BY ts.source_key LIMIT 1) AS source_key,
     m.title, m.conditions, m.categories, m.phase, m.age_groups, m.female, m.male, m.healthy_volunteers, m.patients,
@@ -366,10 +361,6 @@ def _page_of_hits(conn: psycopg.Connection, sql: str, params: dict, offset: int,
         return cur.execute(sql, page_params).fetchall()
 
 
-# the distances a search offers, in km; their counts tell a person how far to go
-RADII = (10, 25, 50, 100, 200)
-
-
 def radius_counts(conn: psycopg.Connection, f: SearchFilter) -> dict[str, int]:
     """With a place: how many trials the search finds within each of RADII, and in the place's country
     (`country`) and anywhere (`anywhere`), whatever the filter's own radius."""
@@ -421,6 +412,77 @@ def suggestion(conn: psycopg.Connection, word: str) -> str | None:
     return row[0]
 
 
+@dataclass(frozen=True)
+class TermFound:
+    """Where in one trial's search document one term of a search is (search/why.py)."""
+
+    trial_id: int
+    # the term's place in the list asked about, from 1
+    position: int
+    found: bool
+    # for a word, the strongest part it is in: a (conditions and their other names), b (title), c (what it
+    # tests, main objective), d (inclusion criteria). Tokens (concepts, categories) have no position, so
+    # no weight: None
+    weight: str | None
+    # the trial's conditions it is in, as the source names them (with an a)
+    conditions: list[str]
+
+
+def terms_found(conn: psycopg.Connection, trial_ids: list[int], tsqueries: list[str]) -> list[TermFound]:
+    """For each of these trials and each tsquery: whether the trial's document matches it, and for a word
+    the strongest weight it matches in."""
+    with conn.cursor(row_factory=class_row(TermFound)) as cur:
+        return cur.execute(
+            """
+            SELECT d.trial_id, t.position::int AS position, d.tsv @@ q.query AS found,
+                   CASE WHEN ts_filter(d.tsv, '{a}') @@ q.query THEN 'a'
+                        WHEN ts_filter(d.tsv, '{b}') @@ q.query THEN 'b'
+                        WHEN ts_filter(d.tsv, '{c}') @@ q.query THEN 'c'
+                        WHEN ts_filter(d.tsv, '{d}') @@ q.query THEN 'd' END AS weight,
+                   ARRAY(SELECT c FROM unnest(d.conditions) c
+                          WHERE to_tsvector('search.trialwatch', c) @@ q.query) AS conditions
+            FROM search.document d
+            CROSS JOIN LATERAL unnest(%(queries)s::text[]) WITH ORDINALITY AS t(text, position)
+            CROSS JOIN LATERAL (SELECT to_tsquery('search.trialwatch', t.text) AS query) q
+            WHERE d.trial_id = ANY(%(trials)s)
+            """,
+            {"queries": tsqueries, "trials": trial_ids},
+        ).fetchall()
+
+
+@dataclass(frozen=True)
+class ConceptFound:
+    """The trial's own MeSH concept that is a concept a search names, or under it in the tree."""
+
+    trial_id: int
+    # the concept the search names
+    ui: str
+    # the trial's own concept: the same, or a narrower one
+    own_ui: str
+    own_name: str
+    # the words of the trial it was found in
+    quote: str
+
+
+def concepts_found(conn: psycopg.Connection, trial_ids: list[int], uis: list[str]) -> list[ConceptFound]:
+    """For each trial and concept: the trial's own concept that is it, else the nearest one under it."""
+    with conn.cursor(row_factory=class_row(ConceptFound)) as cur:
+        return cur.execute(
+            """
+            SELECT DISTINCT ON (tc.trial_id, asked.ui) tc.trial_id, asked.ui, tc.ui AS own_ui, d.name AS own_name,
+                   tc.quote
+            FROM search.trial_concept tc
+            JOIN vocab.mesh_tree own ON own.ui = tc.ui
+            JOIN vocab.mesh_tree asked ON asked.ui = ANY(%(uis)s)
+                 AND (own.tree_number = asked.tree_number OR own.tree_number LIKE asked.tree_number || '.%%')
+            JOIN vocab.mesh_descriptor d ON d.ui = tc.ui
+            WHERE tc.trial_id = ANY(%(trials)s)
+            ORDER BY tc.trial_id, asked.ui, tc.ui = asked.ui DESC, length(own.tree_number), tc.field
+            """,
+            {"uis": uis, "trials": trial_ids},
+        ).fetchall()
+
+
 @dataclass
 class IndexCounts:
     documents: int = 0
@@ -428,6 +490,11 @@ class IndexCounts:
     concepts: int = 0
     terms: int = 0
     by_method: dict[str, int] = field(default_factory=dict)
+
+
+def recruiting_count(conn: psycopg.Connection) -> int:
+    """How many trials search can find (they recruit now)."""
+    return conn.execute("SELECT count(*) FROM search.document WHERE recruiting").fetchone()[0]
 
 
 def index_counts(conn: psycopg.Connection) -> IndexCounts:

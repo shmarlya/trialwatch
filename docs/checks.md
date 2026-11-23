@@ -155,6 +155,7 @@ why. With no trial left, no run is started.
 | `checks/prompts/` | the system prompts and loading them |
 | `llm.py` (shared) | the model call and its cost |
 | `checks/publishing.py` | publication and its gold agreement |
+| `checks/routes.py`, `checks/views.py` | the run, prompts and requirements pages, withdrawing a judgement; the trace as the trial page shows it |
 | `gold/converters/due_date.py` | due-date rules (the Bruckner converter uses them) |
 | `db/checks.py` | their SQL |
 

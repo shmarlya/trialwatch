@@ -15,8 +15,13 @@ from trialwatch.db import core
 from trialwatch.sources import ctis
 from trialwatch.trials import ingest
 from trialwatch.web import app as web
+from trialwatch.checks import views as checks_views
+from trialwatch.db import overview
+from trialwatch.jobs import routes as jobs_routes
+from trialwatch.trials import routes as trials_routes
+from trialwatch.search import find as finding
 from trialwatch.db import jobs as jobs_db
-from trialwatch.web.jobs import JobRequest, check_request
+from trialwatch.jobs.routes import JobRequest, check_request
 
 
 def error_of(response):
@@ -46,9 +51,9 @@ def text_of_pdf(content):
 
 
 def test_quote_is_marked_across_line_breaks_and_case():
-    pieces = web.highlighted("Overall 24\nparticipants were randomised.", "24 Participants were")
+    pieces = trials_routes.highlighted("Overall 24\nparticipants were randomised.", "24 Participants were")
     assert pieces == [("Overall ", False), ("24\nparticipants were", True), (" randomised.", False)]
-    assert web.highlighted("text", None) == [("text", False)]
+    assert trials_routes.highlighted("text", None) == [("text", False)]
 
 
 def test_only_requests_addressed_to_this_machine_are_answered(monkeypatch):
@@ -152,7 +157,7 @@ def test_form_posts_are_taken_only_from_the_interfaces_own_pages(admin_client):
     # following a link from elsewhere changes nothing: reading is answered
     assert client.get("/requirements", headers={"referer": "https://evil.example/"}).status_code == 200
     # and a form only ever sends the browser back to one of the interface's own pages
-    assert web._redirect_back("https://evil.example/x", "no").headers["location"] == "/?error=no"
+    assert jobs_routes.redirect_back("https://evil.example/x", "no").headers["location"] == "/?error=no"
 
 
 def test_a_stored_pdf_is_shown_and_anything_else_is_downloaded(app_conn, admin_client):
@@ -262,8 +267,8 @@ def test_job_requests_are_checked_before_anything_runs(monkeypatch):
 
 
 def test_the_trace_names_files_by_their_document():
-    steps = [web.overview.StepRow(1, "pages", None, None, {"documents": [{"doc": 1, "file": "ab", "title": "T"}]})]
-    assert web._files_by_hex(steps) == {"ab": {"doc": 1, "file": "ab", "title": "T"}}
+    steps = [overview.StepRow(1, "pages", None, None, {"documents": [{"doc": 1, "file": "ab", "title": "T"}]})]
+    assert checks_views.files_by_hex(steps) == {"ab": {"doc": 1, "file": "ab", "title": "T"}}
 
 
 def test_a_browser_gets_an_error_page_and_a_script_the_same_answer_as_before(admin_client):
@@ -280,7 +285,7 @@ def fails_quoting_the_search(*args):
 
 
 def test_an_unhandled_error_is_logged_with_the_reference_the_page_shows(app_conn, monkeypatch, caplog):
-    monkeypatch.setattr(web.web_search, "params_from", fails_quoting_the_search)
+    monkeypatch.setattr(finding, "params_from", fails_quoting_the_search)
     client = TestClient(web.app, raise_server_exceptions=False)
     with caplog.at_level("ERROR", logger="trialwatch.web"):
         page = client.get("/find", params={"q": "private-marker"}, headers={"accept": "text/html"})

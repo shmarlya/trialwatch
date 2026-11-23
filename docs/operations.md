@@ -142,7 +142,8 @@ runs. Everything it does, and what TrialWatch publishes by itself, is recorded a
 
 | Where | What |
 |---|---|
-| `web/app.py`, `web/jobs.py` | the web interface's routes; queuing jobs and their live progress |
+| `web/app.py`, `web/deps.py`, `web/home.py` | the app (hosts, form origins, error pages, health) and what every route shares (templates, sign-in, the action guard, `with_error`); the home page, public or staff |
+| `<part>/routes.py` | each part's pages and forms: `trials/`, `checks/`, `search/`, `gold/`, `sources/`, `jobs/` (queuing jobs, their live progress, schedules, spend), `auth/` (sign-in, users, the chart) |
 | `web/templates/`, `web/static/` | pages, and the brand and UI components ([STYLE.md](../STYLE.md), UI) |
 | `auth/` | accounts, passwords, sessions, the action chart |
 | `jobs/tasks.py`, `worker.py`, `steps.py`, `refresh.py`, `retry.py` | every kind of job, the worker, what each kind does, the refresh, retries |

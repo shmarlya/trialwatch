@@ -24,15 +24,19 @@ import unicodedata
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
-from typing import Protocol
 
+import psycopg
+
+from trialwatch.db import geo as geo_db
+from trialwatch.db import vocab as vocab_db
 from trialwatch.search import categories, concepts
+from trialwatch.search.constants import (AGE_GROUP_WORDS, CHILDREN, DEFAULT_RADIUS_KM,
+                                         OLDER)
 
 LEXICON_FILE = Path(__file__).with_name("lexicon.json")
 MAX_CHARACTERS = 200
 MAX_WORDS = 15
 MAX_PLACE_WORDS = 3
-DEFAULT_RADIUS_KM = 50
 # a place is taken for what it names when it has this many people, or a place hint comes before it
 BIG_PLACE = 15000
 SMALL_PLACE = 1000
@@ -54,20 +58,6 @@ def lexicon() -> dict[str, list[str]]:
         if name != "about":
             words[name] = items
     return words
-
-
-class Lookups(Protocol):
-    """What reading a query looks up (search/lookups.py: the database; tests: a fake)."""
-
-    def places(self, names: list[str]) -> list: ...
-
-    def countries(self, names: list[str]) -> list: ...
-
-    def postcodes(self, code: str) -> list: ...
-
-    def concepts(self, words: list[str]) -> list[tuple[str, str]]: ...
-
-    def condition_names(self, names: list[str]) -> list[str]: ...
 
 
 @dataclass(frozen=True)
@@ -240,15 +230,15 @@ def _take_phase(words: list[str | None], interpretation: Interpretation) -> None
 
 # --- places --------------------------------------------------------------------------------------
 
-def _take_postcode(words: list[str | None], lookups: Lookups, interpretation: Interpretation) -> None:
+def _take_postcode(words: list[str | None], conn: psycopg.Connection, interpretation: Interpretation) -> None:
     for position in range(len(words)):
         word = words[position]
         if word is None or not POSTCODE.fullmatch(word):
             continue
-        found = lookups.postcodes(word)
+        found = geo_db.postcode_places(conn, word)
         if not found:
             continue
-        # the likeliest first (lookups order them), or the one in the country the query names; up to
+        # the likeliest first (the database orders them), or the one in the country the query names; up to
         # three others are offered
         chosen = found[0]
         if interpretation.country is not None:
@@ -278,7 +268,7 @@ def _candidates(words: list[str | None]) -> list[tuple[int, int, str]]:
     return found
 
 
-def _take_country(words: list[str | None], lookups: Lookups, interpretation: Interpretation) -> None:
+def _take_country(words: list[str | None], conn: psycopg.Connection, interpretation: Interpretation) -> None:
     candidates = _candidates(words)
     names = []
     for _start, _length, phrase in candidates:
@@ -286,7 +276,7 @@ def _take_country(words: list[str | None], lookups: Lookups, interpretation: Int
     if not names:
         return
     by_name = {}
-    for country in lookups.countries(names):
+    for country in geo_db.countries_named(conn, names):
         if country.name_key not in by_name:
             by_name[country.name_key] = country
     for start, length, phrase in candidates:
@@ -324,7 +314,7 @@ def _best_place(matches: list, country_hint: str | None, phrase: str, least: int
     return None
 
 
-def _take_place(words: list[str | None], original: list[str], lookups: Lookups,
+def _take_place(words: list[str | None], original: list[str], conn: psycopg.Connection,
                 interpretation: Interpretation) -> None:
     candidates = _candidates(words)
     names = []
@@ -333,11 +323,11 @@ def _take_place(words: list[str | None], original: list[str], lookups: Lookups,
     if not names:
         return
     by_name = {}
-    for place in lookups.places(names):
+    for place in geo_db.places_named(conn, names):
         if place.name_key not in by_name:
             by_name[place.name_key] = []
         by_name[place.name_key].append(place)
-    condition_names = lookups.condition_names(names)
+    condition_names = _condition_names(conn, names)
     country_hint = None
     if interpretation.country is not None:
         country_hint = interpretation.country[0]
@@ -379,9 +369,9 @@ def _take_filters(words: list[str | None], interpretation: Interpretation) -> No
     if _take_phrases(words, lexicon()["healthy_volunteers"]):
         interpretation.healthy_volunteers = True
     if _take_phrases(words, lexicon()["children"]):
-        interpretation.age_group = "0-17"
+        interpretation.age_group = CHILDREN
     if _take_phrases(words, lexicon()["older"]):
-        interpretation.age_group = "65+"
+        interpretation.age_group = OLDER
     if _take_phrases(words, lexicon()["female"]):
         interpretation.sex = "female"
     if _take_phrases(words, lexicon()["male"]):
@@ -403,56 +393,56 @@ def _condition_words(words: list[str | None]) -> list[str]:
     return found
 
 
-def parse(text: str, lookups: Lookups) -> Interpretation:
-    """Read a query typed in one box."""
+def parse(what: str, conn: psycopg.Connection, where: str | None = None) -> Interpretation:
+    """Read a query: typed in one box (`what` alone: its place is read from it too), or in two (the
+    condition in `what`, no place read from it, and the place in `where`)."""
+    text = what
+    if where is not None:
+        text = f"{what} {where}".strip()
     interpretation = Interpretation(text=text)
-    original = words_of(text)
-    words: list[str | None] = []
-    for word in original:
-        words.append(word)
+    original = words_of(what)
+    words: list[str | None] = list(original)
     _take_age(words, interpretation)
     _take_phase(words, interpretation)
     _take_filters(words, interpretation)
-    _take_country(words, lookups, interpretation)
-    _take_postcode(words, lookups, interpretation)
+    if where is None:
+        _read_place(words, original, conn, interpretation)
+    else:
+        place_original = words_of(where)
+        place_words: list[str | None] = list(place_original)
+        if place_words:
+            _read_place(place_words, place_original, conn, interpretation)
+            left = _condition_words(place_words)
+            if left and interpretation.place is None and interpretation.country is None:
+                interpretation.notes.append(f"no place called “{' '.join(left)}” in the EU/EEA")
+    _read_conditions(_condition_words(words), conn, interpretation)
+    _settle_place(interpretation)
+    return interpretation
+
+
+def _read_place(words: list[str | None], original: list[str], conn: psycopg.Connection,
+                interpretation: Interpretation) -> None:
+    """A country, a postal code, else a place, taken from the words."""
+    _take_country(words, conn, interpretation)
+    _take_postcode(words, conn, interpretation)
     if interpretation.place is None:
-        _take_place(words, original, lookups, interpretation)
-    _read_conditions(_condition_words(words), lookups, interpretation)
-    _settle_place(interpretation)
-    return interpretation
+        _take_place(words, original, conn, interpretation)
 
 
-def parse_parts(what: str, where: str, lookups: Lookups) -> Interpretation:
-    """Read a query given in two boxes: the condition (no place read from it) and the place."""
-    interpretation = Interpretation(text=f"{what} {where}".strip())
-    words: list[str | None] = []
-    for word in words_of(what):
-        words.append(word)
-    _take_age(words, interpretation)
-    _take_phase(words, interpretation)
-    _take_filters(words, interpretation)
-    place_words: list[str | None] = []
-    original = words_of(where)
-    for word in original:
-        place_words.append(word)
-    if place_words:
-        _take_country(place_words, lookups, interpretation)
-        _take_postcode(place_words, lookups, interpretation)
-        if interpretation.place is None:
-            _take_place(place_words, original, lookups, interpretation)
-        left = _condition_words(place_words)
-        if left and interpretation.place is None and interpretation.country is None:
-            interpretation.notes.append(f"no place called “{' '.join(left)}” in the EU/EEA")
-    _read_conditions(_condition_words(words), lookups, interpretation)
-    _settle_place(interpretation)
-    return interpretation
+def _condition_names(conn: psycopg.Connection, names: list[str]) -> list[str]:
+    """The names that are a MeSH entry term of a condition (so a word like "marburg" is read as one)."""
+    found = []
+    for match in vocab_db.terms_named(conn, names):
+        if match.key not in found:
+            found.append(match.key)
+    return found
 
 
-def _read_conditions(words: list[str], lookups: Lookups, interpretation: Interpretation) -> None:
+def _read_conditions(words: list[str], conn: psycopg.Connection, interpretation: Interpretation) -> None:
     interpretation.condition_words = words
     if not words:
         return
-    interpretation.concepts = lookups.concepts(words)
+    interpretation.concepts = concepts.for_query(conn, words)
     for word in words:
         for slug in categories.for_word(word):
             if slug not in interpretation.categories:
@@ -498,7 +488,7 @@ def _word_operand(word: str) -> str | None:
     return "(" + " | ".join(alternatives) + ")"
 
 
-def _carries_meaning(word: str) -> bool:
+def carries_meaning(word: str) -> bool:
     """A word that can find trials by itself: not a number or a short word ("type 2", "typ", "de")."""
     letters = 0
     for character in word:
@@ -513,7 +503,7 @@ def tsquery_text(interpretation: Interpretation, relaxed: bool = False) -> str |
     (every recruiting trial)."""
     operands = []
     for word in interpretation.condition_words:
-        if relaxed and not _carries_meaning(word):
+        if relaxed and not carries_meaning(word):
             continue
         operand = _word_operand(word)
         if operand is not None:
@@ -530,6 +520,37 @@ def tsquery_text(interpretation: Interpretation, relaxed: bool = False) -> str |
     if concept_tokens:
         text = f"({text}) | {' | '.join(concept_tokens)}"
     return text
+
+
+@dataclass(frozen=True)
+class Term:
+    """One thing a search looks for, as tsquery_text puts it in the tsquery: a condition word, a category
+    a word names, or a MeSH concept the words name."""
+
+    # word | category | concept
+    kind: str
+    # as the page names it: the word, the category's name, the concept's name
+    label: str
+    tsquery: str
+    # the word a category term comes from; a concept's id
+    word: str | None = None
+    ui: str | None = None
+
+
+def terms(interpretation: Interpretation) -> list[Term]:
+    """What the search's tsquery is made of, one term at a time (to say why a trial was found)."""
+    found = []
+    for word in interpretation.condition_words:
+        lexeme = _lexeme(word)
+        if lexeme is None:
+            continue
+        found.append(Term("word", word, lexeme))
+        for slug in categories.for_word(word):
+            category = categories.by_slug(slug)
+            found.append(Term("category", category.name, categories.token(slug), word=word))
+    for ui, name in interpretation.concepts:
+        found.append(Term("concept", name, concepts.token(ui), ui=ui))
+    return found
 
 
 def describe(interpretation: Interpretation) -> list[str]:
@@ -553,10 +574,8 @@ def describe(interpretation: Interpretation) -> list[str]:
         parts.append("healthy volunteers")
     if interpretation.age is not None:
         parts.append(f"age {interpretation.age}")
-    elif interpretation.age_group == "0-17":
-        parts.append("children (0–17)")
-    elif interpretation.age_group == "65+":
-        parts.append("older people (65+)")
+    elif interpretation.age_group in AGE_GROUP_WORDS:
+        parts.append(AGE_GROUP_WORDS[interpretation.age_group])
     if interpretation.sex is not None:
         parts.append(interpretation.sex)
     if interpretation.phase is not None:

@@ -40,7 +40,7 @@
 
 <p class="small muted">{{ "{:,}".format(result.total) }} trial{% if result.total != 1 %}s{% endif %} recruiting{% if result.pages > 1 %} · page {{ result.page }} of {{ result.pages }}{% endif %}</p>
 {% for hit in result.hits %}
-  {{ trial_card(hit, urls[hit.trial_id], reading.radius_km, phase_words, age_words) }}
+  {{ trial_card(hit, urls[hit.trial_id], reading.radius_km, phase_words, age_words, why.get(hit.trial_id)) }}
 {% else %}
   <div class="panel"><p>No recruiting trial matches.{% if reading.place and result.counts and result.counts.anywhere %} {{ result.counts.anywhere }} recruit further away: choose a larger distance above.{% else %} Try fewer words, the condition's everyday name, or another place.{% endif %}</p></div>
 {% endfor %}

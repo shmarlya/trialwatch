@@ -10,7 +10,7 @@ is "full": a false accusation.
 """
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 import psycopg
@@ -76,6 +76,15 @@ def evidence_day(dataset: Dataset) -> date | None:
     return date.fromisoformat(as_of)
 
 
+def set_aside(dataset: Dataset, published_at: datetime | None) -> bool:
+    """Our judgement read a document posted on or after the day the dataset's reviewers read theirs:
+    ours and theirs may be different documents, so the two are not compared."""
+    read_day = evidence_day(dataset)
+    if read_day is None or published_at is None:
+        return False
+    return published_at.date() >= read_day
+
+
 def trial_of_item(conn: psycopg.Connection, item: datasets.Item) -> int | None:
     """The trial (after merges) one of the item's identifiers belongs to, if any."""
     wanted = []
@@ -104,7 +113,6 @@ def compare_run(conn: psycopg.Connection, run_id: int, dataset: Dataset) -> Scor
         scored.parts_open[part] = 0
     judgements = checks_db.judgements(conn, run_id)
     billed = costs_db.trial_spend(conn, run_id)
-    read_day = evidence_day(dataset)
     for item in dataset.items:
         if item.expected_label is None:
             continue
@@ -124,8 +132,7 @@ def compare_run(conn: psycopg.Connection, run_id: int, dataset: Dataset) -> Scor
         if judgement.error:
             scored.errors[item.key] = judgement.error
             continue
-        posted = judgement.latest_published_at
-        if read_day is not None and posted is not None and posted.date() >= read_day:
+        if set_aside(dataset, judgement.latest_published_at):
             scored.set_aside.append(item.key)
             continue
         scored.compared += 1

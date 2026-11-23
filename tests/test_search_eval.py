@@ -21,10 +21,10 @@ CASES = {"queries": [
 ]}
 
 
-def test_wrong_fields_says_what_was_misread():
+def test_wrong_fields_says_what_was_misread(conn):
     reading = query.Interpretation(text="x", condition_words=["diabetes"], age_group="0-17")
-    assert evaluate.wrong_fields(reading, {"condition": "diabetes", "age_group": "0-17"}) == []
-    assert evaluate.wrong_fields(reading, {"condition": "asthma", "near": [48.86, 2.35], "country": "FR"}) == [
+    assert evaluate.wrong_fields(conn, reading, {"condition": "diabetes", "age_group": "0-17"}) == []
+    assert evaluate.wrong_fields(conn, reading, {"condition": "asthma", "near": [48.86, 2.35], "country": "FR"}) == [
         "condition “diabetes”, not “asthma”", "no place", "country None, not FR"]
 
 

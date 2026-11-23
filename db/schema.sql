@@ -1080,6 +1080,46 @@ ALTER TABLE core.possible_duplicate ALTER COLUMN id ADD GENERATED ALWAYS AS IDEN
 
 
 --
+-- Name: reference_load; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.reference_load (
+    id bigint NOT NULL,
+    name text NOT NULL,
+    version text,
+    params jsonb DEFAULT '{}'::jsonb NOT NULL,
+    files jsonb DEFAULT '[]'::jsonb NOT NULL,
+    counts jsonb DEFAULT '{}'::jsonb NOT NULL,
+    license text NOT NULL,
+    started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    finished_at timestamp with time zone,
+    created_by bigint NOT NULL,
+    CONSTRAINT reference_load_name_check CHECK ((name = ANY (ARRAY['geonames'::text, 'mesh'::text])))
+);
+
+
+--
+-- Name: TABLE reference_load; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.reference_load IS 'each load of reference data: GeoNames (geo load), MeSH (vocab load)';
+
+
+--
+-- Name: reference_load_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.reference_load ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.reference_load_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: source; Type: TABLE; Schema: core; Owner: -
 --
 
@@ -1343,44 +1383,6 @@ CREATE TABLE geo.country_name (
 --
 
 COMMENT ON TABLE geo.country_name IS 'every name we know a country by (English, its own languages, CTIS''s spellings), keyed by geo.name_key';
-
-
---
--- Name: load_run; Type: TABLE; Schema: geo; Owner: -
---
-
-CREATE TABLE geo.load_run (
-    id bigint NOT NULL,
-    files jsonb DEFAULT '[]'::jsonb NOT NULL,
-    countries text[] NOT NULL,
-    places integer,
-    postcodes integer,
-    license text DEFAULT 'GeoNames, CC BY 4.0 (https://www.geonames.org)'::text NOT NULL,
-    started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    finished_at timestamp with time zone,
-    created_by bigint NOT NULL
-);
-
-
---
--- Name: TABLE load_run; Type: COMMENT; Schema: geo; Owner: -
---
-
-COMMENT ON TABLE geo.load_run IS 'each load of GeoNames reference data (trialwatch geo load)';
-
-
---
--- Name: load_run_id_seq; Type: SEQUENCE; Schema: geo; Owner: -
---
-
-ALTER TABLE geo.load_run ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
-    SEQUENCE NAME geo.load_run_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1
-);
 
 
 --
@@ -1742,46 +1744,6 @@ COMMENT ON TABLE search.trial_concept IS 'the MeSH descriptors a trial''s condit
 
 
 --
--- Name: load_run; Type: TABLE; Schema: vocab; Owner: -
---
-
-CREATE TABLE vocab.load_run (
-    id bigint NOT NULL,
-    vocabulary text NOT NULL,
-    version text NOT NULL,
-    file text NOT NULL,
-    sha256 text NOT NULL,
-    descriptors integer,
-    terms integer,
-    license text NOT NULL,
-    started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    finished_at timestamp with time zone,
-    created_by bigint NOT NULL
-);
-
-
---
--- Name: TABLE load_run; Type: COMMENT; Schema: vocab; Owner: -
---
-
-COMMENT ON TABLE vocab.load_run IS 'each load of a vocabulary (trialwatch vocab load)';
-
-
---
--- Name: load_run_id_seq; Type: SEQUENCE; Schema: vocab; Owner: -
---
-
-ALTER TABLE vocab.load_run ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
-    SEQUENCE NAME vocab.load_run_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1
-);
-
-
---
 -- Name: mesh_descriptor; Type: TABLE; Schema: vocab; Owner: -
 --
 
@@ -2053,6 +2015,14 @@ ALTER TABLE ONLY core.possible_duplicate
 
 
 --
+-- Name: reference_load reference_load_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.reference_load
+    ADD CONSTRAINT reference_load_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: source source_adapter_key; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -2173,14 +2143,6 @@ ALTER TABLE ONLY geo.country
 
 
 --
--- Name: load_run load_run_pkey; Type: CONSTRAINT; Schema: geo; Owner: -
---
-
-ALTER TABLE ONLY geo.load_run
-    ADD CONSTRAINT load_run_pkey PRIMARY KEY (id);
-
-
---
 -- Name: place_name place_name_pkey; Type: CONSTRAINT; Schema: geo; Owner: -
 --
 
@@ -2282,14 +2244,6 @@ ALTER TABLE ONLY search.term
 
 ALTER TABLE ONLY search.trial_concept
     ADD CONSTRAINT trial_concept_pkey PRIMARY KEY (trial_id, ui, field);
-
-
---
--- Name: load_run load_run_pkey; Type: CONSTRAINT; Schema: vocab; Owner: -
---
-
-ALTER TABLE ONLY vocab.load_run
-    ADD CONSTRAINT load_run_pkey PRIMARY KEY (id);
 
 
 --
@@ -2723,6 +2677,13 @@ CREATE TRIGGER possible_duplicate_audit AFTER INSERT OR DELETE OR UPDATE ON core
 
 
 --
+-- Name: reference_load reference_load_audit; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER reference_load_audit AFTER INSERT OR DELETE OR UPDATE ON core.reference_load FOR EACH ROW EXECUTE FUNCTION core.audit('id');
+
+
+--
 -- Name: source source_audit; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -2793,13 +2754,6 @@ CREATE TRIGGER trial_sponsor_audit AFTER INSERT OR DELETE OR UPDATE ON core.tria
 
 
 --
--- Name: load_run load_run_audit; Type: TRIGGER; Schema: geo; Owner: -
---
-
-CREATE TRIGGER load_run_audit AFTER INSERT OR DELETE OR UPDATE ON geo.load_run FOR EACH ROW EXECUTE FUNCTION core.audit('id');
-
-
---
 -- Name: job job_audit; Type: TRIGGER; Schema: jobs; Owner: -
 --
 
@@ -2818,13 +2772,6 @@ CREATE TRIGGER schedule_audit AFTER INSERT OR DELETE OR UPDATE ON jobs.schedule 
 --
 
 CREATE TRIGGER annotation_run_audit AFTER INSERT OR DELETE OR UPDATE ON search.annotation_run FOR EACH ROW EXECUTE FUNCTION core.audit('id', 'prompt_text');
-
-
---
--- Name: load_run load_run_audit; Type: TRIGGER; Schema: vocab; Owner: -
---
-
-CREATE TRIGGER load_run_audit AFTER INSERT OR DELETE OR UPDATE ON vocab.load_run FOR EACH ROW EXECUTE FUNCTION core.audit('id');
 
 
 --
@@ -3188,6 +3135,14 @@ ALTER TABLE ONLY core.possible_duplicate
 
 
 --
+-- Name: reference_load reference_load_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.reference_load
+    ADD CONSTRAINT reference_load_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
+
+
+--
 -- Name: source source_created_by_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -3452,14 +3407,6 @@ ALTER TABLE ONLY geo.country_name
 
 
 --
--- Name: load_run load_run_created_by_fkey; Type: FK CONSTRAINT; Schema: geo; Owner: -
---
-
-ALTER TABLE ONLY geo.load_run
-    ADD CONSTRAINT load_run_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
-
-
---
 -- Name: place_name place_name_geonameid_fkey; Type: FK CONSTRAINT; Schema: geo; Owner: -
 --
 
@@ -3556,14 +3503,6 @@ ALTER TABLE ONLY search.trial_concept
 
 
 --
--- Name: load_run load_run_created_by_fkey; Type: FK CONSTRAINT; Schema: vocab; Owner: -
---
-
-ALTER TABLE ONLY vocab.load_run
-    ADD CONSTRAINT load_run_created_by_fkey FOREIGN KEY (created_by) REFERENCES core.actor(id);
-
-
---
 -- Name: mesh_term mesh_term_ui_fkey; Type: FK CONSTRAINT; Schema: vocab; Owner: -
 --
 
@@ -3596,4 +3535,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261124110000'),
     ('20261124120000'),
     ('20261124130000'),
-    ('20261124140000');
+    ('20261124140000'),
+    ('20261124150000');

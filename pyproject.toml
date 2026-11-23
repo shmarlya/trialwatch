@@ -63,12 +63,13 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # FastAPI copies a parameter's default for every request, so a list default in a route is safe
 "src/trialwatch/web/*.py" = ["B006"]
+"src/trialwatch/*/routes.py" = ["B006"]
 
 [tool.ruff.lint.flake8-bugbear]
 # Called in parameter defaults by design: FastAPI and Typer read them as declarations, once
 extend-immutable-calls = [
     "fastapi.Depends", "fastapi.Form", "fastapi.File", "fastapi.Query", "fastapi.Header", "fastapi.Cookie",
-    "fastapi.Body", "fastapi.Path", "typer.Option", "typer.Argument", "trialwatch.web.app.Requires",
+    "fastapi.Body", "fastapi.Path", "typer.Option", "typer.Argument", "trialwatch.web.deps.Requires",
 ]
 
 [tool.ruff.format]
@@ -118,8 +119,6 @@ exclude = [
     "src/trialwatch/sources/snapshot.py",
     "src/trialwatch/sources/stages.py",
     "src/trialwatch/vocab/load.py",
-    "src/trialwatch/web/app.py",
-    "src/trialwatch/web/search.py",
     "tests/places.py",
     "tests/recruiting_trials.py",
     "tests/test_annotate.py",

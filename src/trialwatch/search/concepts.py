@@ -16,10 +16,10 @@ from dataclasses import dataclass
 import psycopg
 
 from trialwatch.db import vocab as vocab_db
+from trialwatch.search.constants import MESH_TOKEN
 from trialwatch.sources import profile
 from trialwatch.vocab import mesh
 
-TOKEN_PREFIX = "zmesh"
 # a MeSH descriptor's id (its UI), e.g. D003924
 MESH_UI = re.compile(r"D[0-9]+")
 MIN_WORD_LETTERS = 5
@@ -45,7 +45,7 @@ class Concept:
 
 
 def token(ui: str) -> str:
-    return TOKEN_PREFIX + ui.lower()
+    return MESH_TOKEN + ui.lower()
 
 
 def condition_fields(read: profile.TrialProfile) -> list[tuple[str, str]]:

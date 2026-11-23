@@ -2,87 +2,9 @@
 {% from "macros.html" import when, run_status, setup_select, label %}
 {% from "components.html" import stat %}
 {% from "patient.html" import search_box %}
-
-{# The schedule and the money: on the home page for everyone #}
-{% macro at_a_glance(times, spend) %}
-<div class="grid glance">
-  <div class="panel">
-    <h3 class="panel-title">Last scheduled run</h3>
-    {% if times.last_name %}
-      <p class="figure">{{ when(times.last_finished_at or times.last_started_at) }} <span class="small muted">UTC</span></p>
-      <p class="small muted">{{ times.last_name }} · {{ run_status(times.last_status) }}</p>
-    {% else %}
-      <p class="figure">—</p><p class="small muted">No scheduled run yet.</p>
-    {% endif %}
-  </div>
-  <div class="panel">
-    <h3 class="panel-title">Next scheduled run</h3>
-    {% if times.next_run_at %}
-      <p class="figure">{{ when(times.next_run_at) }} <span class="small muted">UTC</span></p>
-      <p class="small muted">{{ times.next_name }}</p>
-    {% else %}
-      <p class="figure">—</p><p class="small muted">No schedule is switched on.</p>
-    {% endif %}
-  </div>
-  <div class="panel">
-    <h3 class="panel-title">Spent on AI so far</h3>
-    <p class="figure">{{ dollars(spend.all_time) }}</p>
-    <p class="small muted">{{ dollars(spend.this_month) }} this month · {{ "{:,}".format(spend.calls) }} model calls</p>
-  </div>
-</div>
-{% endmacro %}
-{% block title %}{% if can("view.internal") %}Workflow · {% endif %}TrialWatch{% endblock %}
+{% from "glance.html" import at_a_glance %}
+{% block title %}Workflow · TrialWatch{% endblock %}
 {% block content %}
-{% if not can("view.internal") %}
-<h1>TrialWatch</h1>
-<p class="sub">We follow clinical trials in the EU register and check whether their sponsors posted the results the law requires. A model reads each trial's results documents and quotes what it finds, and every quote is checked against the document's page before it counts.</p>
-<section class="panel find-panel">
-  <h2 class="panel-title">Find a trial that is recruiting</h2>
-  <p class="small muted">Trials of medicines in the EU register looking for participants now, by condition and place, in any EU language.</p>
-  {{ search_box() }}
-</section>
-{{ at_a_glance(times, spend) }}
-
-<h2>Checked trials</h2>
-<p class="sub">Every trial our check has looked at, with what it decided, the newest first: every check is published as it finishes, whatever it found. Open one to see how its evidence was collected: the questions, the pages the model read, what it was sent and answered, the quotes checked against the page, and the rules that decided.</p>
-<form class="search public-filter" method="get" action="/">
-  <input type="text" name="q" value="{{ shown.q }}" placeholder="Search by identifier, title or sponsor">
-  <select name="result" aria-label="Result"><option value="">any result</option>{% for name in results %}<option {% if name == shown.result %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>
-  {% if countries %}<select name="country" aria-label="Country"><option value="">any country</option>{% for name in countries %}<option {% if name == shown.country %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>{% endif %}
-  <input type="text" name="city" value="{{ shown.city }}" placeholder="City" aria-label="City" class="city">
-  {% if statuses %}<select name="status" aria-label="Registry status"><option value="">any status</option>{% for name in statuses %}<option {% if name == shown.status %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>{% endif %}
-  <label class="small">checked from <input type="date" name="checked_from" value="{{ shown.checked_from }}"></label>
-  <label class="small">to <input type="date" name="checked_to" value="{{ shown.checked_to }}"></label>
-  <button>Filter</button>
-  {% if filtered %}<a class="small" href="/">clear</a>{% endif %}
-</form>
-{% macro public_pager() %}{% set keep = shown | urlencode %}<div class="pager small">
-  {% if page > 1 %}<a href="/?{{ keep }}&page={{ page - 1 }}">← previous</a>{% endif %}
-  <span class="muted">{{ "{:,}".format(total) }} trial{% if total != 1 %}s{% endif %} · page {{ page }} of {{ pages }}</span>
-  {% if page < pages %}<a href="/?{{ keep }}&page={{ page + 1 }}">next →</a>{% endif %}
-</div>{% endmacro %}
-{{ public_pager() }}
-<div class="table-wrap"><table class="checked-trials">
-  <tr><th>Trial</th><th>Title</th><th>Status</th><th>Where</th><th>Result</th><th>Checked</th><th>Published</th><th>Model</th><th></th></tr>
-  {% for row in rows %}
-  <tr>
-    <td><a href="/trials/{{ row.id }}">{{ row.name }}</a></td>
-    <td class="small">{{ (row.title or "")[:140] }}{% if row.title and row.title | length > 140 %}…{% endif %}
-      {% if row.sponsor %}<br><span class="muted">{{ row.sponsor }}</span>{% endif %}</td>
-    <td class="small">{{ row.status or "—" }}</td>
-    <td class="small">{% if row.cities %}<b>{{ row.cities | join(", ") }}</b><br>{% endif %}{% if row.countries %}{% set listed = ([shown.country] if shown.country in row.countries else []) + (row.countries | reject("equalto", shown.country) | list) %}<span class="muted" title="{{ row.countries | join(", ") }}">{{ listed[:4] | join(", ") }}{% if listed | length > 4 %} +{{ listed | length - 4 }} more{% endif %}</span>{% else %}—{% endif %}</td>
-    <td>{{ label(row.label) }}{% if row.withdrawn_at %} <span class="badge error">withdrawn</span><br><span class="small muted">{{ row.withdrawn_note }}</span>{% endif %}{% if row.outdated %} <span class="flag" title="its documents or record changed since it was checked; a new check is pending">outdated</span>{% endif %}</td>
-    <td class="small">{{ row.checked_at.strftime("%Y-%m-%d") }}</td>
-    <td class="small">{{ row.published_at.strftime("%Y-%m-%d") }}</td>
-    <td class="small">{{ row.model }}</td>
-    <td class="small"><a href="/trials/{{ row.id }}?run={{ row.run_id }}">evidence →</a></td>
-  </tr>
-  {% else %}
-  <tr><td colspan="9" class="muted">{% if filtered %}No trials match.{% else %}No published results yet.{% endif %}</td></tr>
-  {% endfor %}
-</table></div>
-{% if pages > 1 %}{{ public_pager() }}{% endif %}
-{% else %}
 <h1>Workflow</h1>
 <p class="sub">Sync a source's list → transfer the evidence of the trials you want (or add a trial by hand) → check each trial against every results document linked to it. Only trials whose evidence came in completely can be checked.{% if user %} Changes are recorded as <b>{{ user.email }}</b>.{% else %} <a href="/login">Sign in</a> to start a step.{% endif %}</p>
 
@@ -205,5 +127,4 @@
 </table></div>
 <p class="small"><a href="/admin/jobs">All jobs, failures and schedules →</a></p>
 {% else %}<p class="muted">No jobs yet.</p>{% endif %}
-{% endif %}
 {% endblock %}

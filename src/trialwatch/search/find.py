@@ -1,6 +1,7 @@
-"""The public search page (/find, ADR-008): read a query, search recruiting trials, and when nothing is
-found, say what would find something (any of the words, a word spelled as trials spell it, a wider
-distance).
+"""Patient search's one entry point (ADR-008): `find(conn, params)` reads a query and searches the
+trials that recruit now; when nothing is found, it says what would find something (any of the words, a
+word spelled as trials spell it, a wider distance). /find (search/routes.py) and `trialwatch search
+eval` (evaluate.py) both search through it.
 
 A query comes from the home page's one box (`q`), or from the refine form's boxes (`what`, `where`)
 and filters (`km`, `age`, `sex`, `hv`, `phase`, `cat`), which override what the box was read as.
@@ -12,25 +13,11 @@ from urllib.parse import urlencode
 import psycopg
 
 from trialwatch.db import search as search_db
-from trialwatch.search import categories, query
-from trialwatch.search.lookups import DatabaseLookups
+from trialwatch.search import categories, concepts, query, why
+from trialwatch.search.constants import DISTANCES, FILTER_PHASES, RADII
+from trialwatch.sources import registry
 
 RESULTS_PER_PAGE = 20
-# what the distance menu offers; 0: the whole country
-DISTANCES = (10, 25, 50, 100, 200, 0)
-PHASES = ("1", "2", "3", "4")
-# phases in plain words (CTIS's phases, ADR-008)
-PHASE_WORDS = {
-    "1": "phase 1: first tests in people, mostly about safety",
-    "1-2": "phase 1–2: safety and first signs it works",
-    "2": "phase 2: does it work, and at what dose",
-    "2-3": "phase 2–3: does it work, compared with usual care",
-    "3": "phase 3: compared with usual care in many people",
-    "3-4": "phase 3–4: an approved medicine, compared further",
-    "4": "phase 4: an approved medicine, studied further",
-}
-AGE_GROUP_WORDS = {"in-utero": "before birth", "0-17": "children (0–17)", "18-64": "adults (18–64)",
-                   "65+": "older people (65+)"}
 
 
 @dataclass
@@ -62,10 +49,12 @@ def _number(text: str, least: int, most: int) -> int | None:
     return number
 
 
-def params_from(q: str, what: str, where: str, km: str, age: str, sex: str, hv: str, phase: str, cat: str,
-                page: int) -> SearchParams:
-    params = SearchParams(q=q[:query.MAX_CHARACTERS], what=what[:query.MAX_CHARACTERS],
-                          where=where[:query.MAX_CHARACTERS])
+def params_from(
+    q: str, what: str, where: str, km: str, age: str, sex: str, hv: str, phase: str, cat: str, page: int
+) -> SearchParams:
+    params = SearchParams(
+        q=q[: query.MAX_CHARACTERS], what=what[: query.MAX_CHARACTERS], where=where[: query.MAX_CHARACTERS]
+    )
     distance = _number(km, 0, 200)
     if distance is not None and distance in DISTANCES:
         params.km = distance
@@ -76,7 +65,7 @@ def params_from(q: str, what: str, where: str, km: str, age: str, sex: str, hv: 
         params.healthy_volunteers = True
     if hv == "no":
         params.healthy_volunteers = False
-    if phase in PHASES:
+    if phase in FILTER_PHASES:
         params.phase = phase
     if categories.by_slug(cat) is not None:
         params.category = cat
@@ -85,13 +74,19 @@ def params_from(q: str, what: str, where: str, km: str, age: str, sex: str, hv: 
     return params
 
 
-def interpret(conn: psycopg.Connection, params: SearchParams) -> query.Interpretation:
-    """How the page reads the query: the one box, or the two boxes; then the filters chosen on the page."""
-    lookups = DatabaseLookups(conn)
+def find(conn: psycopg.Connection, params: SearchParams) -> "SearchPage":
+    """Read the query, then search with it, and say why it found each trial on the page."""
+    page = search(conn, read(conn, params), params.page)
+    page.why = why.explain(conn, page.reading, page.hits)
+    return page
+
+
+def read(conn: psycopg.Connection, params: SearchParams) -> query.Interpretation:
+    """How the query is read: the one box, or the two boxes; then the filters chosen on the page."""
     if params.what.strip() or params.where.strip():
-        reading = query.parse_parts(params.what, params.where, lookups)
+        reading = query.parse(params.what, conn, params.where)
     else:
-        reading = query.parse(params.q, lookups)
+        reading = query.parse(params.q, conn)
     if params.km is not None and reading.place is not None:
         if params.km == 0:
             reading.radius_km = None
@@ -113,8 +108,13 @@ def interpret(conn: psycopg.Connection, params: SearchParams) -> query.Interpret
 
 def search_filter(reading: query.Interpretation, tsquery: str | None) -> search_db.SearchFilter:
     found = search_db.SearchFilter(
-        tsquery=tsquery, age=reading.age, age_group=reading.age_group, sex=reading.sex,
-        healthy_volunteers=reading.healthy_volunteers, phase=reading.phase, category=reading.category,
+        tsquery=tsquery,
+        age=reading.age,
+        age_group=reading.age_group,
+        sex=reading.sex,
+        healthy_volunteers=reading.healthy_volunteers,
+        phase=reading.phase,
+        category=reading.category,
         rare=reading.rare,
     )
     if reading.place is not None:
@@ -145,6 +145,10 @@ class SearchPage:
     relaxed: bool = False
     # word -> the known word it was read as ("diabtes" -> "diabetes")
     corrected: dict[str, str] = field(default_factory=dict)
+    # trial id -> its page at its source, if the source has public pages
+    urls: dict[int, str | None] = field(default_factory=dict)
+    # trial id -> why the search found it, in words (search/why.py)
+    why: dict[int, list[str]] = field(default_factory=dict)
 
 
 def _corrections(conn: psycopg.Connection, words: list[str]) -> dict[str, str]:
@@ -160,7 +164,7 @@ def _corrections(conn: psycopg.Connection, words: list[str]) -> dict[str, str]:
     return found
 
 
-def run(conn: psycopg.Connection, reading: query.Interpretation, page: int) -> SearchPage:
+def search(conn: psycopg.Connection, reading: query.Interpretation, page: int) -> SearchPage:
     """Search with the reading; if nothing has every condition word, read misspelled words as the
     known word most like them, then try any of the words."""
     result = SearchPage(reading=reading, page=page)
@@ -177,7 +181,7 @@ def run(conn: psycopg.Connection, reading: query.Interpretation, page: int) -> S
                 else:
                     words.append(word)
             reading.condition_words = words
-            reading.concepts = DatabaseLookups(conn).concepts(words)
+            reading.concepts = concepts.for_query(conn, words)
             result.corrected = corrected
             found = search_filter(reading, query.tsquery_text(reading))
             hits, total = search_db.search_hits(conn, found, offset, RESULTS_PER_PAGE)
@@ -186,13 +190,23 @@ def run(conn: psycopg.Connection, reading: query.Interpretation, page: int) -> S
         hits, total = search_db.search_hits(conn, found, offset, RESULTS_PER_PAGE)
         result.relaxed = total > 0
     result.hits = hits
+    for hit in hits:
+        result.urls[hit.trial_id] = source_url(hit)
     result.total = total
     result.pages = max(1, -(-total // RESULTS_PER_PAGE))
     result.counts = search_db.radius_counts(conn, found)
     return result
 
 
+def source_url(hit: search_db.SearchHit) -> str | None:
+    """The trial's page at its source, from the adapter the hit names (no query per hit)."""
+    if hit.source_key is None or not hit.source_adapter:
+        return None
+    return registry.adapter_class(hit.source_adapter)().public_url(hit.source_key)
+
+
 # --- links the page offers ---------------------------------------------------------------------
+
 
 def _where_of(reading: query.Interpretation) -> str:
     if reading.place is not None:
@@ -219,8 +233,17 @@ def kept_params(params: SearchParams) -> dict:
         healthy = "yes"
     if params.healthy_volunteers is False:
         healthy = "no"
-    return {"q": params.q, "what": params.what, "where": params.where, "km": params.km, "age": params.age,
-            "sex": params.sex, "hv": healthy, "phase": params.phase, "cat": params.category}
+    return {
+        "q": params.q,
+        "what": params.what,
+        "where": params.where,
+        "km": params.km,
+        "age": params.age,
+        "sex": params.sex,
+        "hv": healthy,
+        "phase": params.phase,
+        "cat": params.category,
+    }
 
 
 @dataclass
@@ -243,7 +266,7 @@ def links(params: SearchParams, result: SearchPage) -> Links:
             values[name] = value
         found.alternatives.append((alternative.label, _href(values)))
     if reading.place is not None and result.counts:
-        for km in search_db.RADII:
+        for km in RADII:
             values = kept_params(params)
             values["q"] = ""
             values["what"] = what

@@ -6,11 +6,10 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
+from trialwatch.search.constants import CATEGORY_TOKEN
 from trialwatch.sources import profile
 
 CATEGORIES_FILE = Path(__file__).with_name("categories.json")
-# a category's lexeme in a search document: one word the text parser never splits
-TOKEN_PREFIX = "zcat"
 
 
 @dataclass(frozen=True)
@@ -42,7 +41,7 @@ def by_slug(slug: str) -> Category | None:
 
 
 def token(slug: str) -> str:
-    return TOKEN_PREFIX + slug
+    return CATEGORY_TOKEN + slug
 
 
 def for_areas(areas: tuple[profile.Area, ...]) -> list[str]:

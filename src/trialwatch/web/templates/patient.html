@@ -38,10 +38,12 @@
 {%- endmacro %}
 
 {# One search result #}
-{% macro trial_card(hit, url, km, phase_words, age_words) -%}
+{% macro trial_card(hit, url, km, phase_words, age_words, why=none) -%}
   <article class="result-card">
     <h3><a href="/trials/{{ hit.trial_id }}">{{ hit.title or "A clinical trial" }}</a></h3>
     {% if hit.conditions %}<p class="conditions">{{ hit.conditions | join(" · ") }}</p>{% endif %}
+    {%- if why %}
+    <p class="small why"><span class="muted">Why it is here:</span> {{ why | join(" · ") }}</p>{% endif %}
     <dl class="facts small">
       <dt>Where</dt>
       <dd>{% if hit.distance_km is not none %}{% if hit.precision not in ("postcode", "source") and hit.distance_km < 3 %}<b>in {{ hit.site_city }}</b>{% else %}<b>{{ "%.0f" | format(hit.distance_km) }} km</b>{% if hit.precision not in ("postcode", "source") %} <span class="muted">(about: placed by its city)</span>{% endif %}{% endif %}:

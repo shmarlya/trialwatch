@@ -145,6 +145,7 @@ fetching anything.
 | `trials/ingest.py` | sync, transfer, saving what an adapter read |
 | `trials/readiness.py` | `not_ready`: may a check read it? |
 | `trials/pages.py` | page text |
+| `trials/routes.py`, `sources/routes.py` | the trials' pages (one trial gathers its judgements, search view and gold items), adding trials by hand, the stored files; the sources' pages |
 | `db/core.py` | the central model's SQL |
 
 ## Central model tables
@@ -411,4 +412,5 @@ for any source.
 | `gold/converters/` | the converters, one per benchmark (`bruckner.py`: their CSVs → `data/gold/`) |
 | `gold/compare.py` | scoring a run against a dataset |
 | `gold/evaluate.py` | `gold eval`: the whole workflow on a gold dataset |
+| `gold/routes.py`, `gold/views.py` | the gold pages; a dataset's items next to our judgements (also on a trial's page) |
 | `sources/snapshot.py` | recording and replaying the frozen snapshot |

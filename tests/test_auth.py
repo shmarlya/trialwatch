@@ -13,6 +13,8 @@ from trialwatch.auth import accounts, actions, passwords, sessions
 from trialwatch.db import auth as auth_db
 from trialwatch.db import core
 from trialwatch.web import app as web
+from trialwatch.auth import routes as auth_routes
+from trialwatch.web import deps
 from trialwatch.db import jobs as jobs_db
 
 CHANGING = ("POST", "PUT", "PATCH", "DELETE")
@@ -46,13 +48,13 @@ def test_an_unknown_action_is_a_mistake_not_a_refusal():
     with pytest.raises(KeyError):
         actions.allowed("admin", "trial.delete")
     with pytest.raises(KeyError):
-        web.Requires("no.such.action")
+        deps.Requires("no.such.action")
 
 
-def guards_of(route: APIRoute) -> list[web.Requires]:
+def guards_of(route: APIRoute) -> list[deps.Requires]:
     found = []
     for dependency in route.dependant.dependencies:
-        if isinstance(dependency.call, web.Requires):
+        if isinstance(dependency.call, deps.Requires):
             found.append(dependency.call)
     return found
 
@@ -136,9 +138,9 @@ def test_the_sign_in_page_sets_a_cookie_and_goes_only_to_our_pages(app_conn):
 
 def test_too_many_wrong_passwords_block_sign_in_for_a_while(app_conn, monkeypatch):
     add(app_conn, "mona@test.example", "moderator")
-    monkeypatch.setattr(web, "login_throttle", web.LoginThrottle())
+    monkeypatch.setattr(auth_routes, "login_throttle", auth_routes.LoginThrottle())
     client = TestClient(web.app)
-    for attempt in range(web.LoginThrottle.FAILURES):
+    for attempt in range(auth_routes.LoginThrottle.FAILURES):
         client.post("/login", data={"email": "mona@test.example", "password": f"wrong-{attempt}-xxxxx"})
     blocked = client.post("/login", data={"email": "mona@test.example", "password": TEST_PASSWORD}, follow_redirects=False)
     assert "too many wrong tries" in blocked.headers["location"].replace("%20", " ")

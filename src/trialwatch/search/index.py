@@ -22,9 +22,8 @@ import psycopg
 from trialwatch.db import search as search_db
 from trialwatch.geo import countries
 from trialwatch.search import categories, concepts
+from trialwatch.search.constants import MEDDRA_TOKEN
 from trialwatch.sources import profile
-
-MEDDRA_PREFIX = "zmeddra"
 
 Progress = Callable[[str], None] | None
 
@@ -110,7 +109,7 @@ def document_for(trial_id: int, source: str, read: profile.TrialProfile, profile
     for term in read.coded_terms:
         _add_text(a, term.name)
         if term.system == "meddra":
-            _add_lexeme(lexemes_a, MEDDRA_PREFIX + term.code)
+            _add_lexeme(lexemes_a, MEDDRA_TOKEN + term.code)
     for concept in found:
         _add_lexeme(lexemes_a, concepts.token(concept.ui))
 

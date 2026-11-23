@@ -64,6 +64,7 @@
       {% if can("job.view") %}{{ nav("/admin/jobs", "Jobs") }}{% endif %}
       {% if can("spend.view") %}{{ nav("/admin/spend", "Spend") }}{% endif %}
       {% if can("user.manage") %}{{ nav("/admin/users", "Users") }}{% endif %}
+      {% if can("ops.view") %}<a href="{{ grafana }}/" title="Dashboards and alerts (server setup only)">Grafana</a>{% endif %}
     </nav>
   </details>
   {% block header_extra %}{% endblock %}

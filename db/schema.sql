@@ -1080,6 +1080,7 @@ CREATE TABLE core.page (
     text text NOT NULL,
     extractor text NOT NULL,
     tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, text)) STORED,
+    letters integer GENERATED ALWAYS AS (length(regexp_replace(text, '[^[:alpha:]]'::text, ''::text, 'g'::text))) STORED,
     CONSTRAINT page_page_no_check CHECK ((page_no >= 1))
 );
 
@@ -3759,4 +3760,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261124150000'),
     ('20261124160000'),
     ('20261124170000'),
-    ('20261124180000');
+    ('20261124180000'),
+    ('20261124190000');

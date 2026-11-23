@@ -11,7 +11,7 @@ from psycopg.rows import class_row
 from trialwatch.db import core
 
 # A page the model could have read: at least 200 letters in its text layer (checks/verify.py MIN_LETTERS)
-_READABLE = "length(regexp_replace(p.text, '[^[:alpha:]]', '', 'g')) >= 200"
+_READABLE = "p.letters >= 200"
 
 
 def like_text(search: str | None) -> str | None:

@@ -220,6 +220,38 @@ sign-in page first; anyone else is refused), and Grafana believes that header an
 login form and anonymous access are off; caddy drops the header from a browser). Only admins have the action
 `ops.view`; moderators see `/admin/jobs` and `/admin/spend` but not Grafana.
 
+### Opening it
+
+Grafana runs only in the server setup; `uv run trialwatch web` alone has none.
+
+1. In `.env`: `OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318` and a `GRAFANA_DB_PASSWORD`. On your own machine
+   leave `TRIALWATCH_DOMAIN` empty: caddy then serves `https://localhost` with a certificate of its own (the
+   browser warns once).
+2. `docker compose --profile server up -d`.
+3. Sign in to TrialWatch as an admin (`https://<domain>/login`), then click **Grafana** in the menu, or open
+   `https://<domain>/grafana/`. Dashboards → folder **TrialWatch**.
+
+Only the `web` and `worker` containers send telemetry there: a `uv run trialwatch web` on the host does not reach
+`lgtm` (no port of it is published).
+
+### What to watch
+
+Once a day, or when an alert fires.
+
+| Dashboard | Look at | Worry when |
+|---|---|---|
+| **Jobs** | Worker's last heartbeat; Failed, held, or queued over an hour | heartbeat over 5 minutes; any row in the table (retry or cancel it on `/admin/jobs`) |
+| **Spend** | This month; Of the monthly cap; Costliest check runs | the cap above 80% (at 100% automatic checks and tags stop); one run costing far more than the others |
+| **HTTP** | Requests by status; 95th percentile latency by route; Warnings and errors | any 5xx (over 1% for 10 minutes alerts); a route over about 1 s; new error lines (each opens its trace) |
+| **Checks** | Judgements per day by label; Measured agreement with gold labels; Model calls by outcome | agreement dropping after a prompt, model or requirement change; model calls failing; no judgements after a refresh |
+| **Sources** | Sources (last sync, last transfer, failed transfers); Records fetched by outcome | last sync older than the schedule (a week); failed transfers or fetch errors growing (CTIS changed or is down) |
+| **Search** | Searches by outcome; Found nothing, last 24 hours; duration | errors; the share finding nothing rising; 95th percentile over about 1 s |
+
+To follow one slow page or failed job: **Explore** → Tempo, search by trace id (a job's page links its own; an
+error page shows its id), or Loki for its log lines.
+
+### What is there
+
 - **Dashboards** (folder TrialWatch, `ops/grafana/dashboards/`, changed only there): HTTP (requests, server
   errors, latency by route, warning and error logs), Jobs (heartbeat, queue, attempts, durations, what waits for a
   person), Spend (this month and the cap, per day by model and operation, the costliest runs), Checks (judgements by

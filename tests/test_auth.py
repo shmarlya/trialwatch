@@ -328,6 +328,9 @@ def test_grafana_opens_for_admins_only_through_trialwatchs_sign_in(app_conn):
     allowed = admin.get("/auth/grafana")
     assert allowed.status_code == 200 and allowed.headers["x-webauth-user"] == "admin@test.example"
     assert "x-webauth-user" not in moderator.get("/auth/grafana").headers
+    # the menu links to it for admins only
+    assert '<a href="/grafana/"' in admin.get("/admin/jobs").text
+    assert '<a href="/grafana/"' not in moderator.get("/admin/jobs").text
 
 
 def test_grafana_reads_the_report_views_and_nothing_else(conn):

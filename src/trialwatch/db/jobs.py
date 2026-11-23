@@ -39,6 +39,8 @@ class Job:
     finished_at: datetime | None
     # the creator's actor name (an email, or trialwatch)
     actor: str
+    # the trace of its latest attempt, when tracing is on (telemetry.py)
+    trace_id: str | None = None
 
     @property
     def ended(self) -> bool:
@@ -48,7 +50,7 @@ class Job:
 _JOB_COLUMNS = """
     j.id, j.kind, j.params, j.automatic, j.schedule_id, j.priority, j.status, j.attempts,
     j.max_attempts, j.run_after, j.cancel_requested, j.last_error, j.result, j.locked_by, j.heartbeat_at,
-    j.created_by, j.created_at, j.started_at, j.finished_at, a.name AS actor
+    j.created_by, j.created_at, j.started_at, j.finished_at, a.name AS actor, j.trace_id
 """
 _JOBS = f"SELECT {_JOB_COLUMNS} FROM jobs.job j JOIN core.actor a ON a.id = j.created_by"
 
@@ -127,6 +129,11 @@ def work_for_job(conn: psycopg.Connection, job_id: int) -> None:
     conn.execute("SELECT set_config('trialwatch.job', %s, false)", (str(job_id),))
 
 
+def set_trace_id(conn: psycopg.Connection, job_id: int, trace_id: str) -> None:
+    """The trace the job's attempt runs in now."""
+    conn.execute("UPDATE jobs.job SET trace_id = %s WHERE id = %s", (trace_id, job_id))
+
+
 def heartbeat(conn: psycopg.Connection, job_id: int, worker: str) -> None:
     conn.execute("UPDATE jobs.job SET heartbeat_at = clock_timestamp() WHERE id = %s AND locked_by = %s "
                  "AND status = 'running'", (job_id, worker))
@@ -142,6 +149,15 @@ class JobLine:
     attempt: int
     at: datetime
     line: str
+
+
+def forget_lines(conn: psycopg.Connection, older_than: timedelta) -> int:
+    """Delete the progress lines of jobs that ended longer ago than `older_than`; returns how many."""
+    cursor = conn.execute(
+        "DELETE FROM jobs.job_line l USING jobs.job j WHERE j.id = l.job_id AND j.finished_at < clock_timestamp() - %s",
+        (older_than,),
+    )
+    return cursor.rowcount
 
 
 def lines(conn: psycopg.Connection, job_id: int, after: int = 0) -> list[JobLine]:
@@ -246,14 +262,14 @@ def retry_now(conn: psycopg.Connection, job_id: int) -> bool:
 
 def job_cost(conn: psycopg.Connection, job_id: int) -> Decimal:
     """What the job's billed calls cost."""
-    row = conn.execute("SELECT coalesce(sum(cost_usd), 0) FROM core.api_call WHERE job_id = %s", (job_id,)).fetchone()
+    row = conn.execute("SELECT coalesce(sum(cost_usd), 0) FROM core.llm_call WHERE job_id = %s", (job_id,)).fetchone()
     return row[0]
 
 
 def job_costs(conn: psycopg.Connection, job_ids: list[int]) -> dict[int, Decimal]:
     """Job id -> what it cost."""
     rows = conn.execute(
-        "SELECT j.id, (SELECT coalesce(sum(c.cost_usd), 0) FROM core.api_call c WHERE c.job_id = j.id) "
+        "SELECT j.id, (SELECT coalesce(sum(c.cost_usd), 0) FROM core.llm_call c WHERE c.job_id = j.id) "
         "FROM jobs.job j WHERE j.id = ANY(%s)",
         (job_ids,),
     ).fetchall()

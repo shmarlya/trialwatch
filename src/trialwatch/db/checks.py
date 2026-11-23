@@ -16,7 +16,6 @@ from trialwatch.db.core import ABANDONED, LOCK_CHECK_RUN, lock, try_lock, unlock
 @dataclass(frozen=True)
 class RunConfig:
     id: int
-    check_name: str
     model: str
     effort: str
     prompt: str
@@ -24,17 +23,17 @@ class RunConfig:
     status: str
 
 
-def start_run(conn: psycopg.Connection, *, check_name: str, model: str, effort: str, prompt: str,
+def start_run(conn: psycopg.Connection, *, model: str, effort: str, prompt: str,
               prompt_sha256: bytes, prompt_text: str, requirements: str, requirements_sha256: bytes,
               requirements_text: str, params: dict) -> int:
     """Open a run as the session's actor, with the exact prompt and requirement set it uses. The
     session holds the run's lock until finish_run, so close_abandoned_runs can tell it is alive."""
     with conn.transaction():
         cursor = conn.execute(
-            "INSERT INTO checks.run (check_name, actor_id, model, effort, prompt, prompt_sha256, prompt_text, "
+            "INSERT INTO checks.run (actor_id, model, effort, prompt, prompt_sha256, prompt_text, "
             "requirements, requirements_sha256, requirements_text, params) "
-            "VALUES (%s, current_setting('trialwatch.actor')::bigint, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (check_name, model, effort, prompt, prompt_sha256, prompt_text, requirements, requirements_sha256,
+            "VALUES (current_setting('trialwatch.actor')::bigint, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (model, effort, prompt, prompt_sha256, prompt_text, requirements, requirements_sha256,
              requirements_text, Jsonb(params)),
         )
         row = cursor.fetchone()
@@ -43,16 +42,14 @@ def start_run(conn: psycopg.Connection, *, check_name: str, model: str, effort: 
     return run_id
 
 
-def finish_run(conn: psycopg.Connection, run_id: int, *, status: str, error: str | None, trials: int, errors: int,
-               input_tokens: int, output_tokens: int, cache_write_tokens: int = 0, cache_read_tokens: int = 0) -> None:
-    """Close the run; its cost is the sum of its billed calls (core.api_call)."""
+def finish_run(conn: psycopg.Connection, run_id: int, *, status: str, error: str | None, trials: int,
+               errors: int) -> None:
+    """Close the run (its tokens and cost are its calls', core.llm_call)."""
     with conn.transaction():
         conn.execute(
-            "UPDATE checks.run SET status = %s, error = %s, finished_at = clock_timestamp(), trials = %s, errors = %s, "
-            "input_tokens = %s, output_tokens = %s, cache_write_tokens = %s, cache_read_tokens = %s, "
-            "cost_usd = (SELECT coalesce(sum(cost_usd), 0) FROM core.api_call WHERE check_run_id = %s) WHERE id = %s",
-            (status, error, trials, errors, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-             run_id, run_id),
+            "UPDATE checks.run SET status = %s, error = %s, finished_at = clock_timestamp(), trials = %s, errors = %s "
+            "WHERE id = %s",
+            (status, error, trials, errors, run_id),
         )
     unlock(conn, LOCK_CHECK_RUN, run_id)
 
@@ -73,11 +70,7 @@ def close_abandoned_runs(conn: psycopg.Connection) -> list[int]:
                 """
                 UPDATE checks.run r SET status = 'failed', error = %s, finished_at = clock_timestamp(),
                     trials = (SELECT count(*) FROM checks.judgement j WHERE j.run_id = r.id),
-                    errors = (SELECT count(*) FROM checks.judgement j WHERE j.run_id = r.id AND j.error IS NOT NULL),
-                    input_tokens = (SELECT coalesce(sum(j.input_tokens), 0) FROM checks.judgement j WHERE j.run_id = r.id),
-                    output_tokens = (SELECT coalesce(sum(j.output_tokens), 0) FROM checks.judgement j
-                                     WHERE j.run_id = r.id),
-                    cost_usd = (SELECT coalesce(sum(c.cost_usd), 0) FROM core.api_call c WHERE c.check_run_id = r.id)
+                    errors = (SELECT count(*) FROM checks.judgement j WHERE j.run_id = r.id AND j.error IS NOT NULL)
                 WHERE r.id = %s AND r.status = 'running'
                 """,
                 (ABANDONED, run_id),
@@ -92,7 +85,7 @@ def close_abandoned_runs(conn: psycopg.Connection) -> list[int]:
 def run_config(conn: psycopg.Connection, run_id: int) -> RunConfig | None:
     with conn.cursor(row_factory=class_row(RunConfig)) as cur:
         return cur.execute(
-            "SELECT id, check_name, model, effort, prompt, requirements, status FROM checks.run WHERE id = %s",
+            "SELECT id, model, effort, prompt, requirements, status FROM checks.run WHERE id = %s",
             (run_id,),
         ).fetchone()
 
@@ -135,20 +128,12 @@ def save_answer(conn: psycopg.Connection, run_id: int, trial_id: int, key: str, 
 
 
 def save_judgement(conn: psycopg.Connection, run_id: int, trial_id: int, *, parts: dict, label: str | None,
-                   trace: dict | None, served_by: list[str], record_id: int | None, document_versions: list[int],
-                   input_tokens: int, output_tokens: int, duration_ms: int, error: str | None,
-                   cache_write_tokens: int = 0, cache_read_tokens: int = 0, cost_usd: Decimal | None = None) -> None:
-    # An empty or missing trace is stored as NULL, not as an empty JSON object
-    trace_json = None
-    if trace:
-        trace_json = Jsonb(trace)
+                   served_by: list[str], record_id: int | None, document_versions: list[int], duration_ms: int,
+                   error: str | None) -> None:
     conn.execute(
-        "INSERT INTO checks.judgement (run_id, trial_id, parts, label, trace, served_by, trial_record_id, "
-        "document_versions, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, "
-        "duration_ms, error) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-        (run_id, trial_id, Jsonb(parts), label, trace_json, served_by, record_id, list(document_versions),
-         input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, duration_ms, error),
+        "INSERT INTO checks.judgement (run_id, trial_id, parts, label, served_by, trial_record_id, document_versions, "
+        "duration_ms, error) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (run_id, trial_id, Jsonb(parts), label, served_by, record_id, list(document_versions), duration_ms, error),
     )
 
 
@@ -183,10 +168,14 @@ def judgements(conn: psycopg.Connection, run_id: int) -> dict[int, RunJudgement]
     with conn.cursor(row_factory=class_row(RunJudgement)) as cur:
         rows = cur.execute(
             """
-            SELECT j.trial_id, j.parts, j.label, j.error, j.input_tokens, j.output_tokens, j.cost_usd,
+            SELECT j.trial_id, j.parts, j.label, j.error, c.input_tokens, c.output_tokens, c.cost_usd,
                    (SELECT max(v.published_at) FROM core.document_version v WHERE v.id = ANY(j.document_versions))
                        AS latest_published_at
-            FROM checks.judgement j WHERE j.run_id = %s
+            FROM checks.judgement j
+            CROSS JOIN LATERAL (SELECT sum(input_tokens)::int AS input_tokens, sum(output_tokens)::int AS output_tokens,
+                                       sum(cost_usd) AS cost_usd FROM core.llm_call
+                                 WHERE check_run_id = j.run_id AND trial_id = j.trial_id) c
+            WHERE j.run_id = %s
             """,
             (run_id,),
         ).fetchall()

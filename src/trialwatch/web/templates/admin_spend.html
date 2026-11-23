@@ -3,7 +3,7 @@
 {% block title %}Spend · TrialWatch{% endblock %}
 {% block content %}
 <h1>Spend</h1>
-<p class="sub">What TrialWatch spent on paid APIs: every billed model call, priced at Anthropic's list prices (<code>src/trialwatch/prices.json</code>) when it was made. US dollars; months are UTC.</p>
+<p class="sub">What TrialWatch spent on model calls: every billed call, priced at Anthropic's list prices (<code>src/trialwatch/prices.json</code>) when it was made. US dollars; months are UTC.</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="grid">
   <div class="panel">
@@ -25,19 +25,7 @@
   </div>
 </div>
 
-{% for group, title in (("month", "By month"), ("model", "By model"), ("actor", "By who it was for"), ("operation", "By operation")) %}
-<h2>{{ title }}</h2>
-{% if groups[group] %}
-<div class="table-wrap"><table>
-  <tr><th>{% if group == "actor" %}Actor{% else %}{{ group | capitalize }}{% endif %}</th><th class="num">Calls</th><th class="num">Tokens in</th><th class="num">Tokens out</th><th class="num">Cost</th></tr>
-  {% for row in groups[group] %}
-  <tr><td>{% if group == "actor" %}{{ who(row.name.split(":", 1)[1]) }}{% else %}{{ row.name }}{% endif %}</td><td class="num">{{ "{:,}".format(row.calls) }}</td>
-      <td class="num">{{ "{:,}".format(row.input_tokens) }}</td><td class="num">{{ "{:,}".format(row.output_tokens) }}</td>
-      <td class="num">{{ dollars(row.cost_usd) }}{% if row.unpriced_calls %} <span class="small muted">+{{ row.unpriced_calls }} unpriced</span>{% endif %}</td></tr>
-  {% endfor %}
-</table></div>
-{% else %}<p class="muted">Nothing spent yet.</p>{% endif %}
-{% endfor %}
+{% if can("ops.view") %}<p class="small">By month, model, operation and who it was for, over time: <a href="{{ grafana }}/d/trialwatch-spend">Grafana's Spend dashboard</a>.</p>{% endif %}
 
 <h2>Costliest check runs</h2>
 {% if costliest %}

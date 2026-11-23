@@ -23,8 +23,11 @@ from contextlib import contextmanager
 from datetime import timedelta
 
 import psycopg
+from opentelemetry.trace import StatusCode
 
-from trialwatch import db
+from trialwatch import db, telemetry
+from trialwatch.auth import sessions
+from trialwatch.db import auth as auth_db
 from trialwatch.db import core
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
@@ -37,6 +40,9 @@ HEARTBEAT = timedelta(seconds=30)
 STALLED = timedelta(minutes=5)
 # How often the worker looks for due schedules, stalled jobs and held jobs it may resume
 HOUSEKEEPING = timedelta(minutes=1)
+# How often it forgets what is kept for a while only, and how long: ended jobs' progress lines
+PURGE = timedelta(days=1)
+JOB_LINES_KEPT = timedelta(days=90)
 # How long it sleeps when nothing is queued
 IDLE = 5.0
 LONGEST_ERROR = 4000
@@ -82,6 +88,8 @@ class Heartbeat:
             with db.connect_system() as conn:
                 while not self._stop.wait(HEARTBEAT.total_seconds()):
                     jobs_db.heartbeat(conn, self.job_id, self.worker)
+                    # the worker itself is alive too, while a long job runs
+                    telemetry.heartbeat()
         except Exception:  # a missed heartbeat only means another worker may take the job over later
             log.exception("heartbeat of job %s stopped", self.job_id)
 
@@ -100,7 +108,27 @@ def failures_text(failed: dict[str, str]) -> str:
 
 
 def run_one(queue: psycopg.Connection, job: Job, worker: str) -> str:
-    """Run a claimed job's attempt and record how it went; returns the job's status after."""
+    """Run a claimed job's attempt and record how it went; returns the job's status after. The attempt
+    is one trace (span jobs.run), which the job's page names."""
+    started = time.monotonic()
+    with telemetry.tracer.start_as_current_span("jobs.run") as span:
+        span.set_attribute("trialwatch.job.id", job.id)
+        span.set_attribute("trialwatch.job.kind", job.kind)
+        span.set_attribute("trialwatch.job.attempt", job.attempts)
+        trace_id = telemetry.trace_id()
+        if trace_id is not None:
+            jobs_db.set_trace_id(queue, job.id, trace_id)
+        status = _attempt(queue, job, worker)
+        span.set_attribute("trialwatch.job.status", status)
+        if status in ("failed", "queued"):
+            span.set_status(StatusCode.ERROR, f"the attempt failed; the job is {status}")
+    labels = {"kind": job.kind, "status": status}
+    telemetry.jobs_finished.add(1, labels)
+    telemetry.jobs_duration.record(time.monotonic() - started, labels)
+    return status
+
+
+def _attempt(queue: psycopg.Connection, job: Job, worker: str) -> str:
     task = tasks.TASKS.get(job.kind)
     ctx = JobContext(queue, job, capped=task is not None and task.capped)
     ctx.add(f"attempt {job.attempts} of {job.max_attempts} on {worker}")
@@ -122,8 +150,9 @@ def run_one(queue: psycopg.Connection, job: Job, worker: str) -> str:
     return _record(queue, ctx, job, outcome, error, permanent)
 
 
-def _record(queue: psycopg.Connection, ctx: JobContext, job: Job, outcome: Outcome | None, error: str | None,
-            permanent: bool) -> str:
+def _record(
+    queue: psycopg.Connection, ctx: JobContext, job: Job, outcome: Outcome | None, error: str | None, permanent: bool
+) -> str:
     result = job.result
     if outcome is not None:
         result = outcome.result
@@ -157,6 +186,15 @@ def _minutes(delay: timedelta) -> str:
     return f"{minutes / 60:.1f} h"
 
 
+def purge(queue: psycopg.Connection) -> None:
+    """Forget what is kept for a while only: progress lines of jobs ended JOB_LINES_KEPT ago (the job
+    and its result stay), and ended sign-in sessions."""
+    forgotten = jobs_db.forget_lines(queue, JOB_LINES_KEPT)
+    auth_db.drop_expired_sessions(queue, sessions.now() - sessions.IDLE)
+    if forgotten:
+        log.info("forgot %s progress lines of jobs ended %s days ago", forgotten, JOB_LINES_KEPT.days)
+
+
 def housekeeping(queue: psycopg.Connection) -> None:
     """Queue again the jobs of dead workers, start the jobs of due schedules, and resume held jobs once
     the spending cap allows (a new month, or a raised or removed cap)."""
@@ -179,8 +217,15 @@ def start_due_schedules(queue: psycopg.Connection) -> list[int]:
             if schedule is None:
                 return started
             max_attempts = tasks.TASKS[schedule.kind].max_attempts
-            job_id = jobs_db.enqueue(queue, schedule.kind, schedule.params, max_attempts=max_attempts, automatic=True,
-                                     schedule_id=schedule.id, priority=PRIORITY_AUTOMATIC)
+            job_id = jobs_db.enqueue(
+                queue,
+                schedule.kind,
+                schedule.params,
+                max_attempts=max_attempts,
+                automatic=True,
+                schedule_id=schedule.id,
+                priority=PRIORITY_AUTOMATIC,
+            )
         log.info("schedule %s started job %s", schedule.name, job_id)
         started.append(job_id)
 
@@ -190,14 +235,19 @@ def run(once: bool = False, should_stop: Callable[[], bool] | None = None) -> in
     worker = worker_name()
     ran = 0
     last_housekeeping = None
+    last_purge = None
     with db.connect_system() as queue:
         while True:
             if should_stop is not None and should_stop():
                 return ran
+            telemetry.heartbeat()
             now = time.monotonic()
             if last_housekeeping is None or now - last_housekeeping >= HOUSEKEEPING.total_seconds():
                 housekeeping(queue)
                 last_housekeeping = now
+            if last_purge is None or now - last_purge >= PURGE.total_seconds():
+                purge(queue)
+                last_purge = now
             job = jobs_db.claim_next(queue, worker)
             if job is None:
                 if once:

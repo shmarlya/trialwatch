@@ -1,0 +1,18 @@
+# TrialWatch's database for Grafana: the report views only, read by grafana_ro (db/migrations/*_report.sql),
+# whose password compose's grafana-role service sets from GRAFANA_DB_PASSWORD. Prometheus, Tempo and Loki
+# are the image's own data sources (uids prometheus, tempo, loki).
+apiVersion: 1
+
+datasources:
+  - name: TrialWatch
+    type: grafana-postgresql-datasource
+    uid: trialwatch-db
+    url: db:5432
+    user: grafana_ro
+    editable: false
+    jsonData:
+      database: ${POSTGRES_DB}
+      sslmode: disable
+      postgresVersion: 1800
+    secureJsonData:
+      password: ${GRAFANA_DB_PASSWORD}

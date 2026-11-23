@@ -145,12 +145,15 @@ def test_a_run_records_its_prompt_and_cost_and_the_search_uses_the_kept_tags(app
     request = model.requests[0]
     assert request["model"] == "claude-haiku-5-5" and request["system"].startswith("You tag one clinical trial")
     assert "[condition-1] Type 2 Diabetes Mellitus" in request["messages"][0]["content"]
-    run = app_conn.execute("SELECT status, trials, prompt, length(prompt_text) > 0, cost_usd > 0 FROM "
+    run = app_conn.execute("SELECT status, trials, prompt, length(prompt_text) > 0 FROM "
                            "search.annotation_run WHERE id = %s", (summary.run_id,)).fetchone()
-    assert run == ("succeeded", 1, "annotate", True, True)
-    calls = app_conn.execute("SELECT operation, trial_id, input_tokens FROM core.api_call WHERE annotation_run_id = %s",
+    assert run == ("succeeded", 1, "annotate", True)
+    # the call: the request as sent (without the system prompt and schema), the answer, its cost
+    calls = app_conn.execute("SELECT operation, trial_id, input_tokens, cost_usd > 0, request ? 'system', "
+                             "request ? 'messages', response, stop_reason FROM core.llm_call WHERE annotation_run_id = %s",
                              (summary.run_id,)).fetchall()
-    assert calls == [("annotate", recruiting[CT], 4000)]
+    assert calls == [("annotate", recruiting[CT], 4000, True, False, True, json.dumps(ANSWER), "end_turn")]
+    assert summary.cost_usd > 0
     # a synonym only the AI gave finds the trial; the exact age limit narrows it
     hits, _total = search_db.search_hits(app_conn, search_db.SearchFilter(tsquery="sugar:* & diabete:*"), 0, 10)
     assert [hit.trial_id for hit in hits] == [recruiting[CT]]

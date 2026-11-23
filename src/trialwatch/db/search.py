@@ -526,31 +526,26 @@ def start_annotation_run(conn: psycopg.Connection, *, model: str, effort: str, p
 
 
 def finish_annotation_run(conn: psycopg.Connection, run_id: int, status: str, error: str | None) -> None:
-    """Close the run with its totals, summed from its annotations."""
+    """Close the run with how many trials it tagged (its tokens and cost are its calls', core.llm_call)."""
     conn.execute(
         """
         UPDATE search.annotation_run r SET status = %(status)s, error = %(error)s, finished_at = clock_timestamp(),
-            trials = (SELECT count(*) FROM search.annotation a WHERE a.run_id = r.id),
-            input_tokens = (SELECT coalesce(sum(a.input_tokens), 0) FROM search.annotation a WHERE a.run_id = r.id),
-            output_tokens = (SELECT coalesce(sum(a.output_tokens), 0) FROM search.annotation a WHERE a.run_id = r.id),
-            cost_usd = (SELECT coalesce(sum(c.cost_usd), 0) FROM core.api_call c WHERE c.annotation_run_id = r.id)
+            trials = (SELECT count(*) FROM search.annotation a WHERE a.run_id = r.id)
         WHERE r.id = %(run)s
         """,
         {"status": status, "error": error, "run": run_id},
     )
 
 
-def save_annotation(conn: psycopg.Connection, *, run_id: int, trial_id: int, profile_hash: bytes, served_by: str | None,
-                    facts: dict, dropped: list, request: dict | None, raw_answer: str | None, error: str | None,
-                    input_tokens: int, output_tokens: int, cost_usd, duration_ms: int) -> int:
+def save_annotation(conn: psycopg.Connection, *, run_id: int, trial_id: int, profile_hash: bytes, facts: dict,
+                    dropped: list, error: str | None) -> int:
+    """One trial's AI tags in a run (its call is core.llm_call's, by run and trial)."""
     row = conn.execute(
         """
-        INSERT INTO search.annotation (run_id, trial_id, profile_hash, served_by, facts, dropped, request, raw_answer,
-                                       error, input_tokens, output_tokens, cost_usd, duration_ms)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+        INSERT INTO search.annotation (run_id, trial_id, profile_hash, facts, dropped, error)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
         """,
-        (run_id, trial_id, profile_hash, served_by, Jsonb(facts), Jsonb(dropped), Jsonb(request), raw_answer, error,
-         input_tokens, output_tokens, cost_usd, duration_ms),
+        (run_id, trial_id, profile_hash, Jsonb(facts), Jsonb(dropped), error),
     ).fetchone()
     return row[0]
 
@@ -571,8 +566,9 @@ def latest_annotation(conn: psycopg.Connection, trial_id: int, profile_hash: byt
     with conn.cursor(row_factory=class_row(Annotation)) as cur:
         return cur.execute(
             """
-            SELECT a.id, a.run_id, r.model, a.served_by, a.facts, a.dropped, a.created_at
+            SELECT a.id, a.run_id, r.model, c.served_by, a.facts, a.dropped, a.created_at
             FROM search.annotation a JOIN search.annotation_run r ON r.id = a.run_id
+            LEFT JOIN core.llm_call c ON c.annotation_run_id = a.run_id AND c.trial_id = a.trial_id
             WHERE a.trial_id = %s AND a.profile_hash = %s AND a.error IS NULL
             ORDER BY a.id DESC LIMIT 1
             """,
@@ -585,9 +581,10 @@ def document_annotation(conn: psycopg.Connection, trial_id: int) -> Annotation |
     with conn.cursor(row_factory=class_row(Annotation)) as cur:
         return cur.execute(
             """
-            SELECT a.id, a.run_id, r.model, a.served_by, a.facts, a.dropped, a.created_at
+            SELECT a.id, a.run_id, r.model, c.served_by, a.facts, a.dropped, a.created_at
             FROM search.document d JOIN search.annotation a ON a.id = d.annotation_id
             JOIN search.annotation_run r ON r.id = a.run_id
+            LEFT JOIN core.llm_call c ON c.annotation_run_id = a.run_id AND c.trial_id = a.trial_id
             WHERE d.trial_id = %s
             """,
             (trial_id,),

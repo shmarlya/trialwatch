@@ -28,3 +28,6 @@ ENTRYPOINT ["trialwatch"]
 # The web interface, without a worker of its own (compose runs one); `docker compose run` takes other commands
 EXPOSE 8010
 CMD ["web", "--host", "0.0.0.0", "--no-worker"]
+# Healthy while /healthz answers (the worker's compose service has a healthcheck of its own)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/healthz', timeout=3)"]

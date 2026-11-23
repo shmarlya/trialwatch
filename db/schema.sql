@@ -51,6 +51,20 @@ CREATE SCHEMA jobs;
 
 
 --
+-- Name: report; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA report;
+
+
+--
+-- Name: SCHEMA report; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON SCHEMA report IS 'what Grafana reads (role grafana_ro): queue, spend, checks, sources, backups';
+
+
+--
 -- Name: search; Type: SCHEMA; Schema: -; Owner: -
 --
 
@@ -384,17 +398,11 @@ CREATE TABLE checks.judgement (
     trial_id bigint NOT NULL,
     label text,
     parts jsonb DEFAULT '{}'::jsonb NOT NULL,
-    trace jsonb,
     trial_record_id bigint,
     document_versions bigint[] DEFAULT '{}'::bigint[] NOT NULL,
     served_by text[],
-    input_tokens integer,
-    output_tokens integer,
     duration_ms integer,
     error text,
-    cache_write_tokens integer,
-    cache_read_tokens integer,
-    cost_usd numeric(14,6),
     agreement jsonb,
     withdrawn_at timestamp with time zone,
     withdrawn_by bigint,
@@ -431,7 +439,6 @@ COMMENT ON COLUMN checks.judgement.withdrawn_reason IS 'why staff withdrew it: s
 
 CREATE TABLE checks.run (
     id bigint NOT NULL,
-    check_name text NOT NULL,
     actor_id bigint NOT NULL,
     model text NOT NULL,
     effort text NOT NULL,
@@ -448,11 +455,6 @@ CREATE TABLE checks.run (
     finished_at timestamp with time zone,
     trials integer DEFAULT 0 NOT NULL,
     errors integer DEFAULT 0 NOT NULL,
-    input_tokens bigint DEFAULT 0 NOT NULL,
-    output_tokens bigint DEFAULT 0 NOT NULL,
-    cache_write_tokens bigint DEFAULT 0 NOT NULL,
-    cache_read_tokens bigint DEFAULT 0 NOT NULL,
-    cost_usd numeric(14,6) DEFAULT 0 NOT NULL,
     job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint,
     CONSTRAINT run_check CHECK (((status = 'running'::text) = (finished_at IS NULL))),
     CONSTRAINT run_prompt_sha256_check CHECK ((length(prompt_sha256) = 32)),
@@ -613,12 +615,9 @@ CREATE VIEW checks.judgement_current AS
     j.trial_id,
     j.label,
     j.parts,
-    j.trace,
     j.trial_record_id,
     j.document_versions,
     j.served_by,
-    j.input_tokens,
-    j.output_tokens,
     j.duration_ms,
     r.model,
     r.prompt,
@@ -707,53 +706,6 @@ ALTER TABLE core.actor ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
 
 
 --
--- Name: api_call; Type: TABLE; Schema: core; Owner: -
---
-
-CREATE TABLE core.api_call (
-    id bigint NOT NULL,
-    at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    actor_id bigint NOT NULL,
-    provider text DEFAULT 'anthropic'::text NOT NULL,
-    model text NOT NULL,
-    operation text NOT NULL,
-    check_run_id bigint,
-    trial_id bigint,
-    call_number integer,
-    input_tokens bigint DEFAULT 0 NOT NULL,
-    output_tokens bigint DEFAULT 0 NOT NULL,
-    cache_write_tokens bigint DEFAULT 0 NOT NULL,
-    cache_read_tokens bigint DEFAULT 0 NOT NULL,
-    cost_usd numeric(14,6),
-    prices jsonb,
-    request_id text,
-    job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint,
-    annotation_run_id bigint
-);
-
-
---
--- Name: TABLE api_call; Type: COMMENT; Schema: core; Owner: -
---
-
-COMMENT ON TABLE core.api_call IS 'every billed call to a paid API, with its tokens and cost: the source of all spend totals';
-
-
---
--- Name: api_call_id_seq; Type: SEQUENCE; Schema: core; Owner: -
---
-
-ALTER TABLE core.api_call ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
-    SEQUENCE NAME core.api_call_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1
-);
-
-
---
 -- Name: app_setting; Type: TABLE; Schema: core; Owner: -
 --
 
@@ -788,6 +740,39 @@ CREATE TABLE core.audit_log (
 
 ALTER TABLE core.audit_log ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
     SEQUENCE NAME core.audit_log_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: backup; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.backup (
+    id bigint NOT NULL,
+    at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    file text NOT NULL,
+    bytes bigint NOT NULL
+);
+
+
+--
+-- Name: TABLE backup; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.backup IS 'each nightly pg_dump (compose service backup), for the backup alert';
+
+
+--
+-- Name: backup_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.backup ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.backup_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -975,6 +960,60 @@ CREATE TABLE core.ingest_run (
 
 ALTER TABLE core.ingest_run ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
     SEQUENCE NAME core.ingest_run_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: llm_call; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.llm_call (
+    id bigint NOT NULL,
+    at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    actor_id bigint NOT NULL,
+    provider text DEFAULT 'anthropic'::text NOT NULL,
+    operation text NOT NULL,
+    model text NOT NULL,
+    served_by text,
+    check_run_id bigint,
+    trial_id bigint,
+    call_number integer,
+    annotation_run_id bigint,
+    job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint,
+    request jsonb DEFAULT '{}'::jsonb NOT NULL,
+    response text,
+    stop_reason text,
+    latency_ms integer,
+    error text,
+    request_id text,
+    attempts jsonb DEFAULT '[]'::jsonb NOT NULL,
+    input_tokens bigint DEFAULT 0 NOT NULL,
+    output_tokens bigint DEFAULT 0 NOT NULL,
+    cache_write_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cost_usd numeric(14,6),
+    unpriced_attempts integer DEFAULT 0 NOT NULL
+);
+
+
+--
+-- Name: TABLE llm_call; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.llm_call IS 'every model call: the request as sent, the answer, how it ended, its billed attempts priced; the source of all spend totals';
+
+
+--
+-- Name: llm_call_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.llm_call ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.llm_call_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -1468,11 +1507,19 @@ CREATE TABLE jobs.job (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     started_at timestamp with time zone,
     finished_at timestamp with time zone,
+    trace_id text,
     CONSTRAINT job_check CHECK (((status = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text])) = (finished_at IS NOT NULL))),
     CONSTRAINT job_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text, 'annotate'::text]))),
     CONSTRAINT job_max_attempts_check CHECK ((max_attempts >= 1)),
     CONSTRAINT job_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'held'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
 );
+
+
+--
+-- Name: COLUMN job.trace_id; Type: COMMENT; Schema: jobs; Owner: -
+--
+
+COMMENT ON COLUMN jobs.job.trace_id IS 'the trace of its latest attempt (32 hex digits), when tracing is on';
 
 
 --
@@ -1575,6 +1622,175 @@ CREATE TABLE public.schema_migrations (
 
 
 --
+-- Name: backups; Type: VIEW; Schema: report; Owner: -
+--
+
+CREATE VIEW report.backups AS
+ SELECT at,
+    file,
+    bytes
+   FROM core.backup;
+
+
+--
+-- Name: check_runs; Type: VIEW; Schema: report; Owner: -
+--
+
+CREATE VIEW report.check_runs AS
+ SELECT id,
+    started_at,
+    finished_at,
+    status,
+    model,
+    effort,
+    prompt,
+    requirements,
+    trials,
+    errors,
+    job_id,
+    ( SELECT COALESCE(sum(c.cost_usd), (0)::numeric) AS "coalesce"
+           FROM core.llm_call c
+          WHERE (c.check_run_id = r.id)) AS cost_usd
+   FROM checks.run r;
+
+
+--
+-- Name: ingest_runs; Type: VIEW; Schema: report; Owner: -
+--
+
+CREATE VIEW report.ingest_runs AS
+ SELECT i.id,
+    s.code AS source,
+    i.kind,
+    i.status,
+    i.started_at,
+    i.finished_at,
+    i.counts,
+    ( SELECT count(*) AS count
+           FROM jsonb_object_keys(COALESCE(i.errors, '{}'::jsonb)) jsonb_object_keys(jsonb_object_keys)) AS errors
+   FROM (core.ingest_run i
+     JOIN core.source s ON ((s.id = i.source_id)));
+
+
+--
+-- Name: jobs; Type: VIEW; Schema: report; Owner: -
+--
+
+CREATE VIEW report.jobs AS
+ SELECT id,
+    kind,
+    status,
+    automatic,
+    attempts,
+    max_attempts,
+    created_at,
+    started_at,
+    finished_at,
+    run_after,
+    last_error,
+    trace_id,
+    EXTRACT(epoch FROM (finished_at - started_at)) AS seconds
+   FROM jobs.job j;
+
+
+--
+-- Name: judgements; Type: VIEW; Schema: report; Owner: -
+--
+
+CREATE VIEW report.judgements AS
+ SELECT j.run_id,
+    j.trial_id,
+    r.finished_at AS at,
+    r.requirements,
+    r.model,
+    j.label,
+    (j.error IS NOT NULL) AS failed,
+    ((j.error IS NULL) AND (r.status <> 'running'::text)) AS published,
+    ((j.agreement ->> 'confidence'::text))::real AS confidence,
+    (j.withdrawn_at IS NOT NULL) AS withdrawn
+   FROM (checks.judgement j
+     JOIN checks.run r ON ((r.id = j.run_id)));
+
+
+--
+-- Name: llm_calls; Type: VIEW; Schema: report; Owner: -
+--
+
+CREATE VIEW report.llm_calls AS
+ SELECT id,
+    at,
+    operation,
+    model,
+    served_by,
+    check_run_id,
+    annotation_run_id,
+    job_id,
+    input_tokens,
+    output_tokens,
+    cache_write_tokens,
+    cache_read_tokens,
+    cost_usd,
+    unpriced_attempts,
+    latency_ms,
+    stop_reason,
+    (error IS NOT NULL) AS failed,
+    split_part(error, ':'::text, 1) AS error_type
+   FROM core.llm_call c;
+
+
+--
+-- Name: sources; Type: VIEW; Schema: report; Owner: -
+--
+
+CREATE VIEW report.sources AS
+ SELECT code,
+    enabled,
+    ( SELECT max(i.finished_at) AS max
+           FROM core.ingest_run i
+          WHERE ((i.source_id = s.id) AND (i.kind = 'list'::text) AND (i.status = 'succeeded'::text))) AS last_sync,
+    ( SELECT max(i.finished_at) AS max
+           FROM core.ingest_run i
+          WHERE ((i.source_id = s.id) AND (i.kind = 'transfer'::text))) AS last_transfer,
+    ( SELECT count(*) AS count
+           FROM core.evidence_transfer e
+          WHERE ((e.source_id = s.id) AND (e.status = 'failed'::text))) AS failed_transfers
+   FROM core.source s;
+
+
+--
+-- Name: spend; Type: VIEW; Schema: report; Owner: -
+--
+
+CREATE VIEW report.spend AS
+ SELECT c.at,
+    c.operation,
+    a.model,
+    a.input_tokens,
+    a.output_tokens,
+    a.cost_usd,
+        CASE
+            WHEN (p.kind = 'process'::text) THEN p.name
+            ELSE 'a person'::text
+        END AS made_for
+   FROM ((core.llm_call c
+     JOIN core.actor p ON ((p.id = c.actor_id)))
+     CROSS JOIN LATERAL jsonb_to_recordset(c.attempts) a(model text, input_tokens bigint, output_tokens bigint, cost_usd numeric(14,6)));
+
+
+--
+-- Name: spend_cap; Type: VIEW; Schema: report; Owner: -
+--
+
+CREATE VIEW report.spend_cap AS
+ SELECT ( SELECT ((app_setting.value #>> '{}'::text[]))::numeric AS "numeric"
+           FROM core.app_setting
+          WHERE (app_setting.key = 'spend.monthly_cap_usd'::text)) AS cap_usd,
+    ( SELECT COALESCE(sum(llm_call.cost_usd), (0)::numeric) AS "coalesce"
+           FROM core.llm_call
+          WHERE (llm_call.at >= date_trunc('month'::text, now()))) AS this_month_usd;
+
+
+--
 -- Name: annotation; Type: TABLE; Schema: search; Owner: -
 --
 
@@ -1583,20 +1799,12 @@ CREATE TABLE search.annotation (
     run_id bigint CONSTRAINT annotation_run_id_not_null1 NOT NULL,
     trial_id bigint NOT NULL,
     profile_hash bytea NOT NULL,
-    served_by text,
     facts jsonb DEFAULT '{}'::jsonb NOT NULL,
     dropped jsonb DEFAULT '[]'::jsonb NOT NULL,
-    request jsonb,
-    raw_answer text,
     error text,
-    input_tokens integer DEFAULT 0 NOT NULL,
-    output_tokens integer DEFAULT 0 NOT NULL,
-    cost_usd numeric(14,6),
-    duration_ms integer,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT annotation_profile_hash_check CHECK ((length(profile_hash) = 32))
 );
-ALTER TABLE ONLY search.annotation ALTER COLUMN request SET COMPRESSION lz4;
 
 
 --
@@ -1635,9 +1843,6 @@ CREATE TABLE search.annotation_run (
     status text DEFAULT 'running'::text NOT NULL,
     error text,
     trials integer DEFAULT 0 NOT NULL,
-    input_tokens bigint DEFAULT 0 NOT NULL,
-    output_tokens bigint DEFAULT 0 NOT NULL,
-    cost_usd numeric(14,6) DEFAULT 0 NOT NULL,
     job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint,
     started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     finished_at timestamp with time zone,
@@ -1887,14 +2092,6 @@ ALTER TABLE ONLY core.actor
 
 
 --
--- Name: api_call api_call_pkey; Type: CONSTRAINT; Schema: core; Owner: -
---
-
-ALTER TABLE ONLY core.api_call
-    ADD CONSTRAINT api_call_pkey PRIMARY KEY (id);
-
-
---
 -- Name: app_setting app_setting_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -1908,6 +2105,14 @@ ALTER TABLE ONLY core.app_setting
 
 ALTER TABLE ONLY core.audit_log
     ADD CONSTRAINT audit_log_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: backup backup_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.backup
+    ADD CONSTRAINT backup_pkey PRIMARY KEY (id);
 
 
 --
@@ -1972,6 +2177,14 @@ ALTER TABLE ONLY core.identifier_scheme
 
 ALTER TABLE ONLY core.ingest_run
     ADD CONSTRAINT ingest_run_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: llm_call llm_call_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_call
+    ADD CONSTRAINT llm_call_pkey PRIMARY KEY (id);
 
 
 --
@@ -2299,27 +2512,6 @@ CREATE INDEX run_job_idx ON checks.run USING btree (job_id);
 
 
 --
--- Name: api_call_at_idx; Type: INDEX; Schema: core; Owner: -
---
-
-CREATE INDEX api_call_at_idx ON core.api_call USING btree (at);
-
-
---
--- Name: api_call_job_idx; Type: INDEX; Schema: core; Owner: -
---
-
-CREATE INDEX api_call_job_idx ON core.api_call USING btree (job_id);
-
-
---
--- Name: api_call_run_idx; Type: INDEX; Schema: core; Owner: -
---
-
-CREATE INDEX api_call_run_idx ON core.api_call USING btree (check_run_id, trial_id);
-
-
---
 -- Name: audit_log_actor_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -2366,6 +2558,34 @@ CREATE INDEX ingest_run_job_idx ON core.ingest_run USING btree (job_id);
 --
 
 CREATE INDEX ingest_run_source_idx ON core.ingest_run USING btree (source_id, started_at DESC);
+
+
+--
+-- Name: llm_call_annotation_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX llm_call_annotation_idx ON core.llm_call USING btree (annotation_run_id, trial_id);
+
+
+--
+-- Name: llm_call_at_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX llm_call_at_idx ON core.llm_call USING btree (at);
+
+
+--
+-- Name: llm_call_job_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX llm_call_job_idx ON core.llm_call USING btree (job_id);
+
+
+--
+-- Name: llm_call_run_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX llm_call_run_idx ON core.llm_call USING btree (check_run_id, trial_id);
 
 
 --
@@ -2887,46 +3107,6 @@ ALTER TABLE ONLY checks.step
 
 
 --
--- Name: api_call api_call_actor_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
---
-
-ALTER TABLE ONLY core.api_call
-    ADD CONSTRAINT api_call_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES core.actor(id);
-
-
---
--- Name: api_call api_call_annotation_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
---
-
-ALTER TABLE ONLY core.api_call
-    ADD CONSTRAINT api_call_annotation_run_id_fkey FOREIGN KEY (annotation_run_id) REFERENCES search.annotation_run(id);
-
-
---
--- Name: api_call api_call_check_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
---
-
-ALTER TABLE ONLY core.api_call
-    ADD CONSTRAINT api_call_check_run_id_fkey FOREIGN KEY (check_run_id) REFERENCES checks.run(id);
-
-
---
--- Name: api_call api_call_job_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
---
-
-ALTER TABLE ONLY core.api_call
-    ADD CONSTRAINT api_call_job_id_fkey FOREIGN KEY (job_id) REFERENCES jobs.job(id);
-
-
---
--- Name: api_call api_call_trial_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
---
-
-ALTER TABLE ONLY core.api_call
-    ADD CONSTRAINT api_call_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
-
-
---
 -- Name: audit_log audit_log_actor_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -3036,6 +3216,46 @@ ALTER TABLE ONLY core.ingest_run
 
 ALTER TABLE ONLY core.ingest_run
     ADD CONSTRAINT ingest_run_source_id_fkey FOREIGN KEY (source_id) REFERENCES core.source(id);
+
+
+--
+-- Name: llm_call llm_call_actor_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_call
+    ADD CONSTRAINT llm_call_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES core.actor(id);
+
+
+--
+-- Name: llm_call llm_call_annotation_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_call
+    ADD CONSTRAINT llm_call_annotation_run_id_fkey FOREIGN KEY (annotation_run_id) REFERENCES search.annotation_run(id);
+
+
+--
+-- Name: llm_call llm_call_check_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_call
+    ADD CONSTRAINT llm_call_check_run_id_fkey FOREIGN KEY (check_run_id) REFERENCES checks.run(id);
+
+
+--
+-- Name: llm_call llm_call_job_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_call
+    ADD CONSTRAINT llm_call_job_id_fkey FOREIGN KEY (job_id) REFERENCES jobs.job(id);
+
+
+--
+-- Name: llm_call llm_call_trial_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_call
+    ADD CONSTRAINT llm_call_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
 
 
 --
@@ -3536,4 +3756,7 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261124120000'),
     ('20261124130000'),
     ('20261124140000'),
-    ('20261124150000');
+    ('20261124150000'),
+    ('20261124160000'),
+    ('20261124170000'),
+    ('20261124180000');

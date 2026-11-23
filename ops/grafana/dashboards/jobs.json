@@ -1,0 +1,183 @@
+{
+  "uid": "trialwatch-jobs",
+  "title": "TrialWatch · Jobs",
+  "description": "The queue, job attempts and the worker",
+  "tags": [
+    "trialwatch"
+  ],
+  "editable": false,
+  "schemaVersion": 41,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Worker's last heartbeat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "time() - max(trialwatch_worker_heartbeat_seconds)",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "Seconds since the worker last said it is alive; the alert fires above 5 minutes.",
+      "id": 1
+    },
+    {
+      "type": "table",
+      "title": "Jobs by status",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "trialwatch-db"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "trialwatch-db"
+          },
+          "rawSql": "SELECT status, count(*) AS jobs FROM report.jobs GROUP BY status ORDER BY status",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "id": 2
+    },
+    {
+      "type": "timeseries",
+      "title": "Attempts ended by kind and status",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (kind, status) (increase(trialwatch_jobs_finished_total[1h]))",
+          "legendFormat": "{{kind}} {{status}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "How long jobs took",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "trialwatch-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "trialwatch-db"
+          },
+          "rawSql": "SELECT finished_at AS time, kind AS metric, seconds FROM report.jobs WHERE $__timeFilter(finished_at) AND seconds IS NOT NULL ORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "id": 4
+    },
+    {
+      "type": "table",
+      "title": "Failed, held, or queued over an hour",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "trialwatch-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "trialwatch-db"
+          },
+          "rawSql": "SELECT id, kind, status, attempts, run_after, finished_at, left(last_error, 200) AS last_error, trace_id FROM report.jobs WHERE status IN ('failed', 'held') OR (status = 'queued' AND run_after < now() - interval '1 hour') ORDER BY id DESC LIMIT 50",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "Retry or cancel them on /admin/jobs; a trace id opens the attempt in Explore (Tempo).",
+      "id": 5
+    }
+  ]
+}

@@ -165,8 +165,8 @@ def test_a_trial_page_lists_the_gold_items_naming_it(conn, tmp_path, monkeypatch
     # a newer run, still going: its judgement is not compared until it has ended
     running = start_a_run(conn)
     checks_db.save_judgement(conn, running, trial, parts={"participants": True, "outcomes": True, "cancelled": False},
-                             label="full", trace=None, served_by=[], record_id=None, document_versions=[],
-                             input_tokens=0, output_tokens=0, duration_ms=0, error=None)
+                             label="full", served_by=[], record_id=None, document_versions=[], duration_ms=0,
+                             error=None)
     datasets.write_version(tmp_path, a_meta(), [an_item(), an_item(key="1999-000000-00-99")])
     monkeypatch.setenv("TRIALWATCH_GOLD_DIR", str(tmp_path))
     identifiers = overview.trial_identifiers(conn, trial)

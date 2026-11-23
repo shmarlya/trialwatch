@@ -1,0 +1,11 @@
+# TrialWatch's dashboards (ops/grafana/dashboards/*.json), in a folder of their own, changed only here
+apiVersion: 1
+
+providers:
+  - name: TrialWatch
+    folder: TrialWatch
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /otel-lgtm/trialwatch-dashboards

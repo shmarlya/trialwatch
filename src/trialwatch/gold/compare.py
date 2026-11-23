@@ -62,7 +62,7 @@ class Scored:
     disagreements: list[Disagreement] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
-    # what the judged items' model calls cost (core.api_call), and how many calls ran on a model not in
+    # what the judged items' model calls cost (core.llm_call), and how many calls ran on a model not in
     # the price list
     cost_usd: Decimal = Decimal(0)
     unpriced: int = 0

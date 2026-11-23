@@ -8,7 +8,7 @@ from urllib.parse import quote as url_quote
 
 import psycopg
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
 from trialwatch import db
 from trialwatch.auth import accounts, actions, passwords, sessions
@@ -21,6 +21,7 @@ from trialwatch.web.deps import (
     TEMPLATES,
     Requires,
     short_error,
+    wants_page,
     with_error,
 )
 
@@ -126,6 +127,31 @@ def logout(request: Request) -> Response:
     response = RedirectResponse("/", status_code=303)
     response.delete_cookie(sessions.COOKIE, path="/")
     return response
+
+
+# --- Grafana (admins): signed in through TrialWatch ------------------------------------------------
+
+# The header Grafana takes as who is signed in (GF_AUTH_PROXY_HEADER_NAME, compose.yaml); the proxy
+# removes any a browser sends and sets it only from this answer (ops/caddy/Caddyfile)
+GRAFANA_USER_HEADER = "X-WEBAUTH-USER"
+
+
+@router.get("/auth/grafana")
+def grafana_access(request: Request) -> Response:
+    """Asked by the proxy (Caddy's forward_auth) before every request to Grafana (/grafana/): 200 with the
+    signed-in admin's email in GRAFANA_USER_HEADER, which Grafana believes (auth.proxy). A browser not
+    signed in is sent to sign in and then back to Grafana; anyone else is refused."""
+    user = signed_in(request)
+    if user is None:
+        if wants_page(request):
+            target = request.headers.get("x-forwarded-uri", "")
+            if not target.startswith("/grafana"):
+                target = "/grafana/"
+            return RedirectResponse(f"/login?next={url_quote(safe_next(target))}", status_code=303)
+        return PlainTextResponse("sign in first", status_code=401)
+    if not actions.allowed(user.role, "ops.view"):
+        return PlainTextResponse(f"your role ({user.role}) may not open Grafana", status_code=403)
+    return PlainTextResponse("ok", headers={GRAFANA_USER_HEADER: user.email})
 
 
 # --- users and the chart (admins) ----------------------------------------------------------------

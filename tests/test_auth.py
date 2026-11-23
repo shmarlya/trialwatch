@@ -3,6 +3,7 @@ interface checked for anyone not signed in, a moderator and an admin."""
 
 from datetime import timedelta
 
+import psycopg
 import pytest
 from conftest import TEST_PASSWORD, signed_in_client
 from fastapi.routing import APIRoute
@@ -35,7 +36,7 @@ def test_the_chart_gives_the_public_only_published_results_and_recruiting_trials
 
 def test_an_admin_may_do_everything_and_a_moderator_curates():
     admin_only = ["check.run", "source.sync", "source.register", "source.configure", "job.stop.any", "job.retry",
-                  "schedule.edit", "spend.cap.set", "user.manage"]
+                  "schedule.edit", "spend.cap.set", "user.manage", "ops.view"]
     for action in actions.ACTIONS:
         assert actions.allowed("admin", action.name), action.name
         if action.name in admin_only:
@@ -305,3 +306,38 @@ def test_users_are_added_by_email_only(app_conn):
     refused = post_as(admin, "/admin/users", {"email": "mona", "password": TEST_PASSWORD, "role": "moderator"})
     assert "not an email address" in refused.headers["location"].replace("%20", " ")
     assert auth_db.user_by_email(app_conn, "mona") is None
+
+
+# --- Grafana: signed in through TrialWatch, for admins ---------------------------------------------
+
+def test_grafana_opens_for_admins_only_through_trialwatchs_sign_in(app_conn):
+    public = TestClient(web.app)
+    # a browser not signed in signs in first, then comes back to the Grafana page it wanted
+    page = public.get("/auth/grafana", headers={"accept": "text/html", "x-forwarded-uri": "/grafana/d/x?from=now-1h"},
+                      follow_redirects=False)
+    assert page.status_code == 303 and page.headers["location"] == "/login?next=/grafana/d/x%3Ffrom%3Dnow-1h"
+    # anything else not signed in, and another site's address, get nowhere
+    assert public.get("/auth/grafana").status_code == 401
+    elsewhere = public.get("/auth/grafana", headers={"accept": "text/html", "x-forwarded-uri": "//evil.example/"},
+                           follow_redirects=False)
+    assert elsewhere.headers["location"] == "/login?next=/grafana/"
+    moderator = signed_in_client(app_conn, "moderator")
+    assert moderator.get("/auth/grafana").status_code == 403
+    admin = signed_in_client(app_conn, "admin")
+    allowed = admin.get("/auth/grafana")
+    assert allowed.status_code == 200 and allowed.headers["x-webauth-user"] == "admin@test.example"
+    assert "x-webauth-user" not in moderator.get("/auth/grafana").headers
+
+
+def test_grafana_reads_the_report_views_and_nothing_else(conn):
+    conn.execute("SET ROLE grafana_ro")
+    try:
+        assert conn.execute("SELECT count(*) FROM report.jobs").fetchone()[0] >= 0
+        assert conn.execute("SELECT count(*) FROM report.spend").fetchone()[0] >= 0
+        for table in ("auth.app_user", "auth.session", "core.llm_call", "core.file", "checks.judgement"):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                with conn.transaction():
+                    conn.execute(f"SELECT 1 FROM {table} LIMIT 1")
+    finally:
+        conn.execute("RESET ROLE")
+

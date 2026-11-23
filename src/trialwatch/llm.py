@@ -4,7 +4,8 @@
 - call(client, request, operation): send one request; the answer's text, who answered, the tokens of
   every billed attempt and their cost. The evidence check (checks/evidence.py) and patient search's
   AI tags (search/annotate.py) both call it.
-- record(conn, call, ...): add a call's billed attempts to core.api_call, the source of every spend total
+- record(conn, call, request, ...): add the call to core.llm_call (the request as sent, the answer, each
+  billed attempt priced), the source of every spend total
 
 Prices are one current list, prices.json: Anthropic's list prices per million tokens. A call is priced
 per billed attempt: when a model declined and a fallback model answered (server-side fallback), the
@@ -312,22 +313,48 @@ def _milliseconds_since(started: float) -> int:
 def record(
     conn: psycopg.Connection,
     result: CallResult,
+    request: dict,
     *,
     operation: str,
     check_run_id: int | None = None,
     trial_id: int | None = None,
     call_number: int | None = None,
     annotation_run_id: int | None = None,
-) -> None:
-    """Add the call's billed attempts to core.api_call, made for the session's actor."""
+) -> int:
+    """Add the call to core.llm_call, made for the session's actor: `request` as sent (without the system
+    prompt, which its run keeps once; attached files by their sha256), the answer as received, how it
+    ended, and each billed attempt priced. A call that failed is recorded too. Returns its id."""
+    attempts = []
     for cost in result.costs:
-        costs_db.record_call(
-            conn,
-            cost,
-            operation=operation,
-            check_run_id=check_run_id,
-            trial_id=trial_id,
-            call_number=call_number,
-            request_id=result.request_id,
-            annotation_run_id=annotation_run_id,
+        cost_text = None
+        if cost.cost_usd is not None:
+            # JSON has no exact decimals
+            cost_text = str(cost.cost_usd)
+        attempts.append(
+            {
+                "model": cost.model,
+                "input_tokens": cost.input_tokens,
+                "output_tokens": cost.output_tokens,
+                "cache_write_tokens": cost.cache_write_tokens,
+                "cache_read_tokens": cost.cache_read_tokens,
+                "cost_usd": cost_text,
+                "prices": cost.prices,
+            }
         )
+    return costs_db.record_call(
+        conn,
+        operation=operation,
+        model=request.get("model", ""),
+        served_by=result.served_by,
+        request=request,
+        response=result.raw_text,
+        stop_reason=result.stop_reason,
+        latency_ms=result.duration_ms,
+        error=result.error,
+        request_id=result.request_id,
+        attempts=attempts,
+        check_run_id=check_run_id,
+        trial_id=trial_id,
+        call_number=call_number,
+        annotation_run_id=annotation_run_id,
+    )

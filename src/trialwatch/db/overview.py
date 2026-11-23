@@ -348,7 +348,6 @@ def trial_history(conn: psycopg.Connection, trial_id: int) -> list[HistoryRow]:
 @dataclass(frozen=True)
 class RunRow:
     id: int
-    check_name: str
     actor: str
     model: str
     effort: str
@@ -363,7 +362,7 @@ class RunRow:
     input_tokens: int
     output_tokens: int
     cost_usd: Decimal
-    # billed calls on a model missing from the price list (not in cost_usd)
+    # billed attempts on a model missing from the price list (not in cost_usd)
     unpriced_calls: int
     full: int
     not_full: int
@@ -371,26 +370,34 @@ class RunRow:
 
 
 _RUN_ROWS = """
-    SELECT r.id, r.check_name, a.name AS actor, r.model, r.effort, r.prompt, r.requirements, r.status,
-           r.error, r.started_at, r.finished_at, r.trials, r.errors, r.input_tokens, r.output_tokens,
-           r.cost_usd,
-           (SELECT count(*) FROM core.api_call c WHERE c.check_run_id = r.id AND c.cost_usd IS NULL)::int
-               AS unpriced_calls,
+    SELECT r.id, a.name AS actor, r.model, r.effort, r.prompt, r.requirements, r.status,
+           r.error, r.started_at, r.finished_at, r.trials, r.errors, calls.input_tokens, calls.output_tokens,
+           calls.cost_usd, calls.unpriced_calls,
            count(*) FILTER (WHERE j.label = 'full')::int AS full,
            count(*) FILTER (WHERE j.label = 'not full')::int AS not_full,
            count(*) FILTER (WHERE j.label = 'undecided')::int AS undecided
-    FROM checks.run r JOIN core.actor a ON a.id = r.actor_id LEFT JOIN checks.judgement j ON j.run_id = r.id
+    FROM checks.run r JOIN core.actor a ON a.id = r.actor_id
+    -- its tokens and cost: its calls'
+    CROSS JOIN LATERAL (
+        SELECT coalesce(sum(c.input_tokens), 0)::bigint AS input_tokens,
+               coalesce(sum(c.output_tokens), 0)::bigint AS output_tokens, coalesce(sum(c.cost_usd), 0) AS cost_usd,
+               coalesce(sum(c.unpriced_attempts), 0)::int AS unpriced_calls
+        FROM core.llm_call c WHERE c.check_run_id = r.id
+    ) calls
+    LEFT JOIN checks.judgement j ON j.run_id = r.id
 """
 
 
 def runs(conn: psycopg.Connection) -> list[RunRow]:
     with conn.cursor(row_factory=class_row(RunRow)) as cur:
-        return cur.execute(_RUN_ROWS + " GROUP BY r.id, a.name ORDER BY r.id DESC").fetchall()
+        return cur.execute(_RUN_ROWS + " GROUP BY r.id, a.name, calls.input_tokens, calls.output_tokens, "
+                           "calls.cost_usd, calls.unpriced_calls ORDER BY r.id DESC").fetchall()
 
 
 def run_row(conn: psycopg.Connection, run_id: int) -> RunRow | None:
     with conn.cursor(row_factory=class_row(RunRow)) as cur:
-        return cur.execute(_RUN_ROWS + " WHERE r.id = %s GROUP BY r.id, a.name", (run_id,)).fetchone()
+        return cur.execute(_RUN_ROWS + " WHERE r.id = %s GROUP BY r.id, a.name, calls.input_tokens, "
+                           "calls.output_tokens, calls.cost_usd, calls.unpriced_calls", (run_id,)).fetchone()
 
 
 def run_prompt(conn: psycopg.Connection, run_id: int) -> tuple[str, dict]:
@@ -437,8 +444,9 @@ class JudgementRow:
 
 
 _JUDGEMENT_ROWS = f"""
-    SELECT j.run_id, j.trial_id, {_NAME} AS name, j.parts, j.label, j.trace,
-           j.served_by, j.error, j.input_tokens, j.output_tokens, j.cost_usd, j.duration_ms, r.model, r.prompt, r.requirements,
+    SELECT j.run_id, j.trial_id, {_NAME} AS name, j.parts, j.label, rules.trace,
+           j.served_by, j.error, calls.input_tokens, calls.output_tokens, calls.cost_usd, j.duration_ms, r.model, r.prompt,
+           r.requirements,
            r.started_at, j.trial_record_id, j.document_versions, r.status AS run_status,
            (SELECT max(v.published_at) FROM core.document_version v WHERE v.id = ANY(j.document_versions))
                AS latest_published_at,
@@ -448,6 +456,16 @@ _JUDGEMENT_ROWS = f"""
     FROM checks.judgement j
     LEFT JOIN core.actor wa ON wa.id = j.withdrawn_by
     JOIN checks.run r ON r.id = j.run_id JOIN core.trial t ON t.id = j.trial_id
+    -- how each part was set: its rules step's trace
+    LEFT JOIN LATERAL (SELECT nullif(s.data->'trace', '{{}}') AS trace FROM checks.step s
+                        WHERE s.run_id = j.run_id AND s.trial_id = j.trial_id AND s.name = 'rules') rules ON true
+    -- its tokens and cost: its calls' (no call: nothing spent; one on a model missing from the price list:
+    -- unknown)
+    CROSS JOIN LATERAL (
+        SELECT sum(c.input_tokens)::int AS input_tokens, sum(c.output_tokens)::int AS output_tokens,
+               CASE WHEN sum(c.unpriced_attempts) > 0 THEN NULL ELSE coalesce(sum(c.cost_usd), 0) END AS cost_usd
+        FROM core.llm_call c WHERE c.check_run_id = j.run_id AND c.trial_id = j.trial_id
+    ) calls
 """
 # Keeps only published judgements (withdrawn ones too: they stay public, marked) when %(published_only)s
 _PUBLISHED_FILTER = """
@@ -509,10 +527,25 @@ class StepRow:
 
 
 def run_steps(conn: psycopg.Connection, run_id: int, trial_id: int) -> list[StepRow]:
-    """The trace of judging one trial in one run, in order."""
+    """The trace of judging one trial in one run, in order; a call step with its call (core.llm_call):
+    the request as sent, the answer, how it ended, its tokens and cost (None: nothing billed, or a model
+    missing from the price list)."""
     with conn.cursor(row_factory=class_row(StepRow)) as cur:
         return cur.execute(
-            "SELECT seq, name, at, duration_ms, data FROM checks.step WHERE run_id = %s AND trial_id = %s ORDER BY seq",
+            """
+            SELECT s.seq, s.name, s.at, s.duration_ms,
+                   CASE WHEN c.id IS NULL THEN s.data
+                        ELSE (s.data - 'llm_call') || jsonb_build_object(
+                            'request', c.request, 'served_by', c.served_by, 'stop_reason', c.stop_reason,
+                            'input_tokens', c.input_tokens, 'output_tokens', c.output_tokens,
+                            'cache_write_tokens', c.cache_write_tokens, 'cache_read_tokens', c.cache_read_tokens,
+                            'cost_usd', CASE WHEN c.unpriced_attempts > 0 OR c.attempts = '[]' THEN NULL
+                                             ELSE c.cost_usd::text END,
+                            'error', c.error, 'answer', c.response) END AS data
+            FROM checks.step s
+            LEFT JOIN core.llm_call c ON s.name = 'call' AND c.id = (s.data->>'llm_call')::bigint
+            WHERE s.run_id = %s AND s.trial_id = %s ORDER BY s.seq
+            """,
             (run_id, trial_id),
         ).fetchall()
 

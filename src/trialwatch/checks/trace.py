@@ -1,17 +1,15 @@
 """The trace of one judgement (ADR-004): every step of judging a trial, in order, as the trial page
-shows it to anyone: the questions, the pages read, retrieval, each model call (the request as sent and
-the raw answer), quote verification and the rules. Pages are referenced by file and page, not copied."""
+shows it to anyone: the questions, the pages read, retrieval, each model call (what was asked; the
+request as sent and the raw answer are its core.llm_call row, which the step names), quote
+verification and the rules. Pages are referenced by file and page, not copied."""
 
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from trialwatch import llm
-from trialwatch.checks.ask import request_for_trace
 from trialwatch.checks.requirements import Question, RequirementSet
 from trialwatch.checks.settings import Settings
 from trialwatch.checks.verify import has_readable_text
 from trialwatch.db.core import Page
-from trialwatch.llm import CallResult
 
 if TYPE_CHECKING:
     # for the type only: trialwatch.checks.evidence uses this module
@@ -84,18 +82,16 @@ def call_data(
     settings: Settings,
     pages: list[Page],
     questions: list[Question],
-    request: dict,
-    call: "CallResult",
     files: list | None = None,
 ) -> dict:
-    """One model call for the trace: what was asked, the request exactly as sent (the system prompt is
-    the run's, kept once in checks.run.prompt_text), and the answer exactly as received."""
+    """One model call for the trace: what was asked, of which pages or files. The call itself (the
+    request exactly as sent, the answer exactly as received) is recorded with the trial's calls, and the
+    step names it (`llm_call`)."""
     keys = []
     asked = []
     for question in questions:
         keys.append(question.key)
         asked.append({"key": question.key, "text": question.text})
-    sent = request_for_trace(request, files)
     files_sent = []
     if files:
         for file in files:
@@ -111,25 +107,7 @@ def call_data(
         "asked": asked,
         "pages": page_refs(pages),
         "files": files_sent,
-        "request": sent,
-        "served_by": call.served_by,
-        "stop_reason": call.stop_reason,
-        "input_tokens": call.input_tokens,
-        "output_tokens": call.output_tokens,
-        "cache_write_tokens": call.cache_write_tokens,
-        "cache_read_tokens": call.cache_read_tokens,
-        "cost_usd": _cost_for_trace(call),
-        "error": call.error,
-        "answer": call.raw_text,
     }
-
-
-def _cost_for_trace(call: "CallResult") -> str | None:
-    """The call's cost as a decimal string (JSON has no exact decimals), None when nothing was billed or
-    a model it ran on is not in the price list."""
-    if not call.costs or llm.unpriced_count(call.costs):
-        return None
-    return str(llm.total_cost(call.costs))
 
 
 def verification_data(evidence: "dict[str, Evidence]") -> dict:

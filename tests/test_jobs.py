@@ -124,6 +124,19 @@ def test_the_registry_checks_params_before_a_job_is_queued():
     assert "no-such-setup" in tasks.problem("refresh", {"config": "no-such-setup"})
 
 
+def test_the_progress_lines_of_jobs_ended_long_ago_are_forgotten(conn):
+    old = queue(conn, "sync", {"source": "ctis"})
+    recent = queue(conn, "sync", {"source": "ctis"})
+    for job_id in (old, recent):
+        jobs_db.add_line(conn, job_id, 1, "a line")
+        jobs_db.finish(conn, job_id, "succeeded", {})
+    conn.execute("UPDATE jobs.job SET finished_at = now() - interval '91 days' WHERE id = %s", (old,))
+    worker.purge(conn)
+    assert (len(jobs_db.lines(conn, old)), len(jobs_db.lines(conn, recent))) == (0, 1)
+    # the job itself stays
+    assert jobs_db.job(conn, old).status == "succeeded"
+
+
 def test_two_workers_never_take_the_same_job(database_url):
     one = psycopg.connect(database_url, autocommit=True, options=SESSION_OPTIONS)
     two = psycopg.connect(database_url, autocommit=True, options=SESSION_OPTIONS)
@@ -223,7 +236,7 @@ def test_a_check_job_judges_its_trials_as_its_creator_and_records_the_job(app_co
     assert job.status == "succeeded", job.last_error
     run_id = job.result["check_run"]
     assert jobs_db.runs_of(app_conn, job_id).check_runs == [run_id]
-    calls = app_conn.execute("SELECT job_id, cost_usd FROM core.api_call WHERE check_run_id = %s", (run_id,)).fetchall()
+    calls = app_conn.execute("SELECT job_id, cost_usd FROM core.llm_call WHERE check_run_id = %s", (run_id,)).fetchall()
     assert calls == [(job_id, Decimal("0.000075"))]
     assert jobs_db.job_cost(app_conn, job_id) == Decimal("0.000075")
     assert job.result["cost"] == "$0.0001"
@@ -437,7 +450,7 @@ def test_staff_see_jobs_spend_and_costs_and_the_public_does_not(app_conn, fake_w
     progress = admin_client.get(f"/jobs/{done}/progress").json()
     assert progress["status"] == "succeeded" and progress["cost"] == "$0.0001"
     spend = admin_client.get("/admin/spend")
-    assert spend.status_code == 200 and "claude-haiku-5-5" in spend.text
+    assert spend.status_code == 200 and "$0.0001" in spend.text and "/grafana/d/trialwatch-spend" in spend.text
     capped = admin_client.post("/admin/spend/cap", data={"cap": "$25"}, follow_redirects=False)
     assert capped.status_code == 303 and costs_db.monthly_cap(app_conn) == Decimal("25")
     bad = admin_client.post("/admin/spend/cap", data={"cap": "lots"}, follow_redirects=False)

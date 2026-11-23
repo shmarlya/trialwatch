@@ -1,16 +1,17 @@
-"""What paid API calls cost: pricing per billed attempt, the ledger (core.api_call), and the totals a
+"""What model calls cost: pricing per billed attempt, the ledger (core.llm_call), and the totals a
 judgement, a run and the spend page show."""
 
 from decimal import Decimal
 from types import SimpleNamespace
 
+import anthropic
 from conftest import default_settings
-from test_evidence import GOOD, PROMPT, FakeClient, seed
+from test_evidence import GOOD, PROMPT, FakeClient, api_error, seed
 
 from trialwatch import llm
 from trialwatch.checks import evidence as ev
 from trialwatch.db import costs as costs_db
-from trialwatch.db import core
+from trialwatch.db import core, overview
 
 
 def test_a_call_is_priced_by_its_tokens_at_the_list_price():
@@ -63,22 +64,26 @@ def test_a_run_records_every_billed_call_and_its_totals_agree(conn):
     trial = seed(conn)
     # the fake answers as the setup's model, claude-haiku-5-5: 500 tokens in, 50 out
     summary = ev.run(conn, FakeClient(GOOD), [trial], default_settings(), PROMPT)
+    # one row per call, with each billed attempt priced and their sums
     calls = conn.execute("SELECT model, operation, check_run_id, trial_id, call_number, input_tokens, output_tokens, "
-                         "cost_usd, actor_id FROM core.api_call WHERE check_run_id = %s", (summary.run_id,)).fetchall()
+                         "cost_usd, unpriced_attempts, jsonb_array_length(attempts), attempts->0->>'cost_usd', actor_id "
+                         "FROM core.llm_call WHERE check_run_id = %s", (summary.run_id,)).fetchall()
     expected = Decimal("0.000075")
-    assert calls == [("claude-haiku-5-5", "check", summary.run_id, trial, 1, 500, 50, expected,
+    assert calls == [("claude-haiku-5-5", "check", summary.run_id, trial, 1, 500, 50, expected, 0, 1, "0.000075",
                       core.current_actor(conn))]
     assert summary.cost_usd == expected
-    run_cost = conn.execute("SELECT cost_usd FROM checks.run WHERE id = %s", (summary.run_id,)).fetchone()[0]
-    judgement_cost = conn.execute("SELECT cost_usd FROM checks.judgement WHERE run_id = %s",
-                                  (summary.run_id,)).fetchone()[0]
-    assert run_cost == judgement_cost == costs_db.run_cost(conn, summary.run_id) == expected
-    step = conn.execute("SELECT data->>'cost_usd' FROM checks.step WHERE run_id = %s AND name = 'call'",
-                        (summary.run_id,)).fetchone()[0]
-    assert Decimal(step) == expected
+    # the run's, the judgement's and the trace step's cost are the call's, as their pages show them
+    run = overview.run_row(conn, summary.run_id)
+    judgement = overview.run_judgements(conn, summary.run_id)[0]
+    assert run.cost_usd == judgement.cost_usd == costs_db.run_cost(conn, summary.run_id) == expected
+    assert (run.input_tokens, judgement.input_tokens, run.unpriced_calls) == (500, 500, 0)
+    step = overview.run_steps(conn, summary.run_id, trial)
+    call_step = [found for found in step if found.name == "call"][0]
+    assert Decimal(call_step.data["cost_usd"]) == expected and call_step.data["input_tokens"] == 500
     assert costs_db.spent_this_month(conn) >= expected
-    by_model = costs_db.spend_by(conn, "model")
-    assert by_model[0].name == "claude-haiku-5-5"
+    # Grafana's view of it: each billed attempt by model, without who the person was
+    spend = conn.execute("SELECT model, made_for, cost_usd FROM report.spend").fetchall()
+    assert spend == [("claude-haiku-5-5", "a person", expected)]
 
 
 def test_the_cap_is_reached_when_this_months_spend_meets_it(conn):
@@ -90,3 +95,14 @@ def test_the_cap_is_reached_when_this_months_spend_meets_it(conn):
     assert costs_db.monthly_cap(conn) == Decimal("12.50") and not costs_db.cap_reached(conn)
     costs_db.set_monthly_cap(conn, None)
     assert costs_db.monthly_cap(conn) is None
+
+
+def test_a_failed_call_is_recorded_with_its_error_and_costs_nothing(conn):
+    trial = seed(conn)
+    summary = ev.run(conn, FakeClient(api_error(anthropic.InternalServerError, "overloaded")), [trial], default_settings(), PROMPT)
+    assert list(summary.failed.values())[0].startswith("InternalServerError")
+    call = conn.execute("SELECT error, attempts, cost_usd, response, request ? 'messages' FROM core.llm_call "
+                        "WHERE check_run_id = %s", (summary.run_id,)).fetchone()
+    assert call[0].startswith("InternalServerError") and call[1:4] == ([], None, None) and call[4]
+    assert overview.run_row(conn, summary.run_id).cost_usd == 0
+    assert costs_db.spend_totals(conn).calls == 0

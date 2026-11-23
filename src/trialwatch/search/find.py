@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 
 import psycopg
 
+from trialwatch import telemetry
 from trialwatch.db import search as search_db
 from trialwatch.search import categories, concepts, query, why
 from trialwatch.search.constants import DISTANCES, FILTER_PHASES, RADII
@@ -75,9 +76,16 @@ def params_from(
 
 
 def find(conn: psycopg.Connection, params: SearchParams) -> "SearchPage":
-    """Read the query, then search with it, and say why it found each trial on the page."""
-    page = search(conn, read(conn, params), params.page)
-    page.why = why.explain(conn, page.reading, page.hits)
+    """Read the query, then search with it, and say why it found each trial on the page. Its span
+    (search.find) holds counts and kinds only, never the query's words (ADR-008)."""
+    with telemetry.tracer.start_as_current_span("search.find") as span:
+        page = search(conn, read(conn, params), params.page)
+        page.why = why.explain(conn, page.reading, page.hits)
+        span.set_attribute("trialwatch.search.total", page.total)
+        span.set_attribute("trialwatch.search.page", page.page)
+        span.set_attribute("trialwatch.search.place", page.reading.place is not None)
+        span.set_attribute("trialwatch.search.relaxed", page.relaxed)
+        span.set_attribute("trialwatch.search.corrected", len(page.corrected))
     return page
 
 

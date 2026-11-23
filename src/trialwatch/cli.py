@@ -108,15 +108,15 @@ def web(
     `worker` service). Several workers are safe: each takes a different job."""
     import uvicorn
 
-    from trialwatch.web import privacy
+    from trialwatch import telemetry
 
     child = None
     if with_worker:
         child = start_worker()
         typer.echo(f"worker started (pid {child.pid}); it stops with the web server")
     try:
-        # searches are private (ADR-008): access log lines leave out query strings
-        uvicorn.run("trialwatch.web.app:app", host=host, port=port, reload=reload, log_config=privacy.log_config())
+        # JSON lines; searches are private (ADR-008): access log lines leave out query strings
+        uvicorn.run("trialwatch.web.app:app", host=host, port=port, reload=reload, log_config=telemetry.log_config())
     finally:
         if child is not None:
             stop_worker(child)
@@ -129,11 +129,14 @@ def worker(
     """Run queued jobs one at a time (those people start on the web interface, and the weekly refresh),
     trying failed ones again later. `trialwatch web` starts one by itself; run this where the web
     server runs with --no-worker (compose's `worker` service)."""
-    import logging
+    import logging.config
 
+    from trialwatch import telemetry
     from trialwatch.jobs import worker as job_worker
 
-    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(message)s")
+    logging.config.dictConfig(telemetry.log_config())
+    # to Grafana when OTEL_EXPORTER_OTLP_ENDPOINT is set (compose)
+    telemetry.setup("trialwatch-worker")
     try:
         ran = job_worker.run(once=once)
     except KeyboardInterrupt:

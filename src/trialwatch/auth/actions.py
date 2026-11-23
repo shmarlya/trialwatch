@@ -55,6 +55,8 @@ ACTIONS = (
     Action("schedule.edit", "Change when scheduled jobs run, switch them on or off, start one now", (ADMIN,)),
     Action("spend.cap.set", "Set the monthly spending cap for automatic checks", (ADMIN,)),
     Action("user.manage", "Add users, change their role or password, disable them; see this chart", (ADMIN,)),
+    Action("ops.view", "Open Grafana (/grafana/): TrialWatch's own traces, metrics, logs, dashboards and alerts",
+           (ADMIN,)),
 )
 
 

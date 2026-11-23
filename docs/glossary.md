@@ -172,7 +172,7 @@ See [operations](operations.md).
 | **Worker** | `trialwatch worker`: runs queued jobs one at a time, starts the jobs schedules make, and releases held jobs when the cap allows. |
 | **Schedule** | A recurring job in `jobs.schedule` (daily, weekly or monthly, at an hour UTC), switched off until an admin starts it. |
 | **Weekly refresh** | The scheduled job that syncs, transfers what is new, stale or failed, tags recruiting trials and checks trials never judged or outdated. |
-| **Spend** | What paid API calls cost: one `core.api_call` row per billed model attempt, priced from `prices.json` (`src/trialwatch/llm.py`). |
+| **Spend** | What model calls cost: one `core.llm_call` row per call, each billed attempt priced from `prices.json` (`src/trialwatch/llm.py`). |
 | **Prices** | `src/trialwatch/prices.json`: what each model costs per million tokens; a new model needs a price before it runs. |
 | **Monthly cap** | The most automatic checks may spend in a calendar month (UTC); at the cap they are held, not failed. |
 | **Data-access layer** | `src/trialwatch/db/`: the only place with SQL. |

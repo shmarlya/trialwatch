@@ -33,14 +33,14 @@ from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
 import psycopg
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from trialwatch import config, db
+from trialwatch import config, db, telemetry
 from trialwatch.auth import accounts
 from trialwatch.auth import routes as auth_routes
 from trialwatch.checks import routes as checks_routes
@@ -65,10 +65,6 @@ async def lifespan(application: FastAPI):
     finally:
         db.close_pool()
 
-
-app = FastAPI(title="TrialWatch", lifespan=lifespan)
-# The brand and UI components: static/brand.css (tokens), static/components.css, the logo and favicon
-app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 # Methods that change something: only accepted from the interface's own pages
 CHANGING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
@@ -105,7 +101,6 @@ def refusal(request: Request) -> str | None:
     return None
 
 
-@app.middleware("http")
 async def only_this_machine_and_own_pages(request: Request, call_next):
     reason = refusal(request)
     if reason is not None:
@@ -119,7 +114,6 @@ async def only_this_machine_and_own_pages(request: Request, call_next):
     return response
 
 
-@app.exception_handler(SignInNeeded)
 def sign_in_needed(request: Request, exc: SignInNeeded) -> Response:
     """A browser goes to the sign-in page (back to the page it wanted, for a GET); anything else
     (curl, a script, the job page's polling) gets 401."""
@@ -136,8 +130,6 @@ def sign_in_needed(request: Request, exc: SignInNeeded) -> Response:
 # Error pages: rendered without auth_context, so they need no database (it may be what failed)
 ERROR_TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
 ERROR_TITLES = {403: "Not allowed", 404: "Not found", 405: "Not allowed", 500: "Something went wrong"}
-# Pages whose address can hold what someone searched for, which can be about their health (ADR-008)
-PRIVATE_PATHS = ("/find",)
 log = logging.getLogger("trialwatch.web")
 
 
@@ -149,7 +141,6 @@ def error_page(request: Request, status_code: int, message: str, reference: str 
     return ERROR_TEMPLATES.TemplateResponse(request, "error.html", context, status_code=status_code)
 
 
-@app.exception_handler(StarletteHTTPException)
 async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
     """A browser gets a page saying what went wrong; anything else gets FastAPI's JSON as before."""
     if not wants_page(request):
@@ -160,12 +151,14 @@ async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
     return error_page(request, exc.status_code, message)
 
 
-@app.exception_handler(Exception)
 async def server_error(request: Request, exc: Exception) -> Response:
-    """An error nobody handled: logged with a reference the page shows, so the two can be matched.
-    The log names the path only: a search's query string can be about someone's health (ADR-008)."""
-    reference = secrets.token_hex(4)
-    if request.url.path in PRIVATE_PATHS:
+    """An error nobody handled: logged with a reference the page shows, so the two can be matched (its
+    trace's id when it is traced: an admin finds both in Grafana). The log names the path only: a
+    search's query string can be about someone's health (ADR-008)."""
+    reference = telemetry.trace_id()
+    if reference is None:
+        reference = secrets.token_hex(4)
+    if request.url.path in telemetry.PRIVATE_PATHS:
         # where it was raised, but not its message: the message may quote what someone searched for
         frames = "".join(traceback.format_tb(exc.__traceback__))
         log.error(
@@ -192,15 +185,17 @@ async def server_error(request: Request, exc: Exception) -> Response:
 
 # --- health, for Docker and the proxy in front ----------------------------------------------------
 
+health = APIRouter()
 
-@app.get("/healthz", response_class=PlainTextResponse)
+
+@health.get("/healthz", response_class=PlainTextResponse)
 def healthz() -> PlainTextResponse:
     """The server is up. Asks nothing of the database, so a database outage doesn't get the server
     restarted (/readyz says whether it can answer)."""
     return PlainTextResponse("ok")
 
 
-@app.get("/readyz")
+@health.get("/readyz")
 def readyz() -> JSONResponse:
     """The server can answer: the database is reachable, at this migration. Says nothing about why
     not, to anyone: the log has it."""
@@ -212,5 +207,28 @@ def readyz() -> JSONResponse:
     return JSONResponse({"status": "ok", "migration": version})
 
 
-for part in (home, trials_routes, checks_routes, search_routes, gold_routes, sources_routes, jobs_routes, auth_routes):
-    app.include_router(part.router)
+# --- the app ----------------------------------------------------------------------------------------
+
+PARTS = (home, trials_routes, checks_routes, search_routes, gold_routes, sources_routes, jobs_routes, auth_routes)
+
+
+def create_app() -> FastAPI:
+    """The web interface: its pages, the checks every request passes, its error pages and health; traced
+    when OpenTelemetry is set up (telemetry.py)."""
+    application = FastAPI(title="TrialWatch", lifespan=lifespan)
+    # The brand and UI components: static/brand.css (tokens), static/components.css, the logo and favicon
+    application.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+    application.middleware("http")(only_this_machine_and_own_pages)
+    application.add_exception_handler(SignInNeeded, sign_in_needed)
+    application.add_exception_handler(StarletteHTTPException, http_error)
+    application.add_exception_handler(Exception, server_error)
+    application.include_router(health)
+    for part in PARTS:
+        application.include_router(part.router)
+    telemetry.instrument_app(application)
+    return application
+
+
+# Sent to Grafana when OTEL_EXPORTER_OTLP_ENDPOINT is set (compose); otherwise nothing is recorded
+telemetry.setup("trialwatch-web")
+app = create_app()

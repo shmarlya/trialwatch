@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 
 import psycopg
 
+from trialwatch import telemetry
 from trialwatch.db import core
 from trialwatch.db import search as search_db
 from trialwatch.db.core import RegisteredSource
@@ -37,7 +38,7 @@ from trialwatch.hashing import storable
 from trialwatch.progress import Progress, report
 from trialwatch.search import index as search_index
 from trialwatch.sources import profile
-from trialwatch.sources.registry import Adapter, DocumentRef, DownloadedFile
+from trialwatch.sources.registry import Adapter, DocumentRef, DownloadedFile, TrialNotFound
 from trialwatch.trials.pages import extract_missing
 
 ShouldStop = Callable[[], bool] | None
@@ -271,7 +272,11 @@ def transfer(
                     result.stopped = True
                     report(progress, "stopped: the trials transferred so far are kept")
                     break
-                status = _transfer_one(conn, source, adapter, key, kinds, extract, result)
+                with telemetry.tracer.start_as_current_span("ingest.trial") as span:
+                    span.set_attribute("trialwatch.source", source.code)
+                    span.set_attribute("trialwatch.source.key", key)
+                    status = _transfer_one(conn, source, adapter, key, kinds, extract, result)
+                    span.set_attribute("trialwatch.ingest.status", status)
                 result.statuses[key] = status
                 report(progress, f"{number}/{len(wanted)} {key}: {status}")
             if result.trial_ids:
@@ -410,13 +415,27 @@ class Saved:
     warnings: dict[str, str] = field(default_factory=dict)
 
 
+def _fetch(source: str, adapter: Adapter, key: str) -> dict:
+    """The trial's raw record from its source, counted by how it went (trialwatch.source.fetches)."""
+    try:
+        payload = adapter.fetch(key)
+    except TrialNotFound:
+        telemetry.source_fetches.add(1, {"source": source, "outcome": "not_found"})
+        raise
+    except Exception:
+        telemetry.source_fetches.add(1, {"source": source, "outcome": "error"})
+        raise
+    telemetry.source_fetches.add(1, {"source": source, "outcome": "ok"})
+    return payload
+
+
 def save(conn: psycopg.Connection, source: str, key: str, adapter: Adapter, kinds: Sequence[str] | None) -> Saved:
     """Fetch one trial from its source and save what its record says: the record (a new version if it
     changed), its sponsors, sites and profile, and every listed document of these kinds (None: every
     kind); documents of these kinds the source no longer lists are unlinked."""
     try:
         # text fields can hold characters Postgres can't store (a NUL): cleaned before anything else
-        payload = storable(adapter.fetch(key))
+        payload = storable(_fetch(source, adapter, key))
         listing = core.listing_summary(conn, source, key)
         trial = adapter.parse(payload, listing)
         record = core.save_trial_record(

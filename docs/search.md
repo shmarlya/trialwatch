@@ -70,14 +70,15 @@ flowchart LR
   kind of medicine, the purpose, synonyms of its conditions in English and its countries' languages, MeSH concepts
   from a shortlist, and the age limits its inclusion criteria give. A tag is kept only if it quotes the field it
   names, word for word; the others are kept as dropped, with why. Tags are shown as AI-made with their quote; each
-  call is a priced `core.api_call` row (operation `annotate`). About $0.001 a trial. Search works fully without
+  call is a `core.llm_call` row (operation `annotate`), with its request, answer and cost. About $0.001 a trial. Search works fully without
   them.
 - **Private.** What someone searches for can be about their health: nothing about a search is stored, a Referer
   never carries a page's address, only the site's origin (`Referrer-Policy: strict-origin`), and links to CTIS
   send none (`rel="noreferrer"`), so a link out doesn't reveal the search. Not `no-referrer`: under it, browsers
   send `Origin: null` when our own pages post a form, and the form check refuses it. `/find` is `no-store` and
   `noindex`, `trialwatch web` logs requests without their query string (`src/trialwatch/web/privacy.py`), and an
-  error on `/find` is logged without its message, which could quote the search. A reverse proxy in front must
+  error on `/find` is logged without its message, which could quote the search. Traces sent to Grafana are
+  redacted the same way ([operations](operations.md#what-trialwatch-records-about-itself)). A reverse proxy in front must
   leave query strings out of its logs too.
 
 A trial's status is CTIS's, per country; a card says when the register last changed the trial. Every search and
@@ -164,7 +165,7 @@ erDiagram
 | `search.trial_concept` | the MeSH concepts a trial's conditions name: method (exact-name, same-words, phrase, source-code, ai-quote) and the field and words it was found in |
 | `search.term` | words of recruiting trials and how many trials have each, for "did you mean" (trigram index) |
 | `search.annotation_run` | a run of AI tags with its exact prompt (and sha256), model, effort, status, tokens and cost |
-| `search.annotation` | one trial's AI tags in a run (append-only): kept facts, each with its field and quote; dropped tags and why; the request and raw answer |
+| `search.annotation` | one trial's AI tags in a run (append-only): kept facts, each with its field and quote; dropped tags and why (its call, the request and raw answer, is the `core.llm_call` of its run and trial) |
 | `geo.country`, `geo.country_name` | countries (GeoNames countryInfo; languages; `in_gazetteer`: its places are loaded) and every name of each, in many languages |
 | `geo.place`, `geo.place_name` | places with 1000+ people of the loaded countries and their point; every name of a place (trigram index) |
 | `geo.postcode` | postal codes with a point |

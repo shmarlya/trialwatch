@@ -21,6 +21,7 @@ from trialwatch import llm
 from trialwatch.checks.prompts import load_prompt, prompt_names
 from trialwatch.db import SESSION_OPTIONS, core
 from trialwatch.db import checks as checks_db
+from trialwatch.db import overview
 from trialwatch.sources import ctis
 from trialwatch.trials import ingest
 
@@ -172,17 +173,25 @@ class FakeClient:
 
 
 def steps_named(conn, run_id, name):
+    """The run's trace steps of that name, as the trial page reads them (a call step with its call)."""
     found = []
-    rows = conn.execute("SELECT name, data FROM checks.step WHERE run_id = %s ORDER BY seq", (run_id,)).fetchall()
-    for step_name, data in rows:
-        if step_name == name:
-            found.append(data)
+    trials = conn.execute("SELECT DISTINCT trial_id FROM checks.step WHERE run_id = %s ORDER BY 1", (run_id,)).fetchall()
+    for row in trials:
+        for step in overview.run_steps(conn, run_id, row[0]):
+            if step.name == name:
+                found.append(step.data)
     return found
+
+
+def rules_trace(conn, run_id):
+    """How the run's (one) judgement set each part: its rules step's trace."""
+    return conn.execute("SELECT data->'trace' FROM checks.step WHERE run_id = %s AND name = 'rules'",
+                        (run_id,)).fetchone()[0]
 
 
 def start_a_run(conn):
     return checks_db.start_run(
-        conn, check_name=ev.CHECK_NAME, model="claude-test", effort="low", prompt=PROMPT.name,
+        conn, model="claude-test", effort="low", prompt=PROMPT.name,
         prompt_sha256=PROMPT.sha256, prompt_text=PROMPT.text, requirements=SET.name, requirements_sha256=SET.sha256,
         requirements_text=SET.text, params={},
     )
@@ -203,8 +212,9 @@ def test_questions_come_from_the_registry():
 def test_judgement_rests_on_verified_evidence(conn):
     trial = seed(conn)
     summary = ev.run(conn, FakeClient(GOOD), [trial], default_settings(), PROMPT)
-    row = conn.execute("SELECT parts, label, trace, trial_record_id IS NOT NULL, cardinality(document_versions) "
-                       "FROM checks.judgement WHERE run_id = %s", (summary.run_id,)).fetchone()
+    row = conn.execute("SELECT parts, label, (SELECT s.data->'trace' FROM checks.step s WHERE s.run_id = j.run_id AND s.trial_id = j.trial_id AND s.name = 'rules'), trial_record_id IS NOT NULL, "
+                       "cardinality(document_versions) FROM checks.judgement j WHERE run_id = %s",
+                       (summary.run_id,)).fetchone()
     assert row[0] == {"participants": True, "outcomes": False, "cancelled": False} and row[1] == "not full"
     assert row[2]["endpoint:12"]["rule"] == "verified not_analysed"
     assert row[2]["outcomes"]["rule"] == "a requirement is not reported"
@@ -236,8 +246,8 @@ def test_quote_not_on_the_page_leaves_it_undecided(conn):
     invented = good_but([answer("endpoint:11", quote="mean 48.0 hours", page=3),
                          answer("endpoint:12", quote="colorectal transit 30 hours", page=4)])
     summary = ev.run(conn, FakeClient(invented), [trial], default_settings(), PROMPT)
-    label, trace = conn.execute("SELECT label, trace FROM checks.judgement WHERE run_id = %s",
-                                (summary.run_id,)).fetchone()
+    label = conn.execute("SELECT label FROM checks.judgement WHERE run_id = %s", (summary.run_id,)).fetchone()[0]
+    trace = rules_trace(conn, summary.run_id)
     assert label == "undecided"
     assert trace["endpoint:11"]["rule"] == "quote not on the cited page"
 
@@ -247,7 +257,7 @@ def test_a_quote_too_short_to_prove_anything_is_not_evidence(conn):
     # "0" is on the page (in "10.2"), but proves nothing
     short = good_but([answer("participants", quote="24", page=2), answer("endpoint:11", quote="0", page=3)])
     summary = ev.run(conn, FakeClient(short), [trial], default_settings(), PROMPT)
-    trace = conn.execute("SELECT trace FROM checks.judgement WHERE run_id = %s", (summary.run_id,)).fetchone()[0]
+    trace = rules_trace(conn, summary.run_id)
     assert trace["participants"]["rule"] == "quote not on the cited page"
     assert trace["endpoint:11"]["rule"] == "quote not on the cited page"
     assert summary.verified == 1
@@ -407,7 +417,7 @@ def test_two_different_answers_to_one_question_are_left_to_a_person(conn):
     answers = good_but([answer("participants", found=False, kind="other")])
     answers.append(GOOD[0])
     summary = ev.run(conn, FakeClient(answers), [trial], default_settings(), PROMPT)
-    trace = conn.execute("SELECT trace FROM checks.judgement WHERE run_id = %s", (summary.run_id,)).fetchone()[0]
+    trace = rules_trace(conn, summary.run_id)
     assert trace["participants"]["rule"] == "the model doesn't know"
 
 
@@ -588,8 +598,7 @@ def test_check_runs_whose_session_ended_are_closed_and_live_ones_are_not(databas
         rows = closer.execute("SELECT id, status, error, finished_at IS NOT NULL FROM checks.run "
                               "WHERE id = ANY(%s) ORDER BY id", ([abandoned, alive],)).fetchall()
     finally:
-        checks_db.finish_run(other_session, alive, status="succeeded", error=None, trials=0, errors=0,
-                             input_tokens=0, output_tokens=0)
+        checks_db.finish_run(other_session, alive, status="succeeded", error=None, trials=0, errors=0)
         closer.close()
     assert abandoned in closed and alive not in closed
     assert rows == [(abandoned, "failed", core.ABANDONED, True), (alive, "running", None, False)]
@@ -646,6 +655,13 @@ def test_the_trace_keeps_the_exact_request_and_what_retrieval_found(conn):
     sent = client.requests[0]
     assert calls[0]["request"]["messages"] == sent["messages"]  # exactly what went to the API
     assert "system" not in calls[0]["request"]  # stored once, with the run
+    # kept once, as the call (core.llm_call); its step names it
+    step = conn.execute("SELECT data FROM checks.step WHERE run_id = %s AND name = 'call' ORDER BY seq LIMIT 1",
+                        (summary.run_id,)).fetchone()[0]
+    assert "request" not in step and "answer" not in step
+    stored = conn.execute("SELECT request->'messages', response, stop_reason, operation, call_number "
+                          "FROM core.llm_call WHERE id = %s", (step["llm_call"],)).fetchone()
+    assert stored[0] == sent["messages"] and json.loads(stored[1]) and stored[2:] == ("end_turn", "check", 1)
     assert calls[0]["asked"][0]["key"] == "participants" and calls[0]["asked"][0]["text"]
     retrieval = steps_named(conn, summary.run_id, "retrieval")[0]
     participants = retrieval["questions"][0]
@@ -713,8 +729,8 @@ def test_dont_know_is_asked_again_with_every_page_then_left_to_a_person(conn):
     summary = ev.run(conn, client, [trial], default_settings({"whole_pages": 0, "top_k": 1}), PROMPT)
     # "don't know" in the retrieved pages is asked again with every page, like "not found"
     assert len(client.requests) == 2
-    label, trace = conn.execute("SELECT label, trace FROM checks.judgement WHERE run_id = %s",
-                                (summary.run_id,)).fetchone()
+    label = conn.execute("SELECT label FROM checks.judgement WHERE run_id = %s", (summary.run_id,)).fetchone()[0]
+    trace = rules_trace(conn, summary.run_id)
     # even after the whole document, "don't know" is never "not reported": a person decides
     assert label == "undecided"
     assert trace["endpoint:12"]["rule"] == "the model doesn't know"

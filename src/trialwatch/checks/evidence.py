@@ -25,12 +25,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 import psycopg
+from opentelemetry.trace import StatusCode
 
-from trialwatch import llm
+from trialwatch import llm, telemetry
 from trialwatch.checks import publishing, requirements
 from trialwatch.checks import trace as tracing
 from trialwatch.checks.ask import (MAX_FILES_BYTES, OPERATION, ask, build_files_request, build_request,
-                                   found_value, is_pdf, question_keys)
+                                   found_value, is_pdf, question_keys, request_for_trace)
 from trialwatch.checks.prompts import Prompt, load_prompt
 from trialwatch.checks.requirements import Question, RequirementSet
 from trialwatch.checks.retrieval import pages_to_send_first, search, search_query_for
@@ -43,7 +44,6 @@ from trialwatch.llm import CallResult, MessagesClient
 from trialwatch.progress import Progress, report
 from trialwatch.trials import readiness
 
-CHECK_NAME = "evidence"
 
 
 def trial_pages(conn: psycopg.Connection, trial_id: int, requirement_set: RequirementSet) -> list[Page]:
@@ -86,21 +86,23 @@ class TrialResult:
     output_tokens: int = 0
     cache_write_tokens: int = 0
     cache_read_tokens: int = 0
-    # the model calls made for this trial, by their number (1: first call, 2: widening), for core.api_call
-    calls: list[tuple[int, CallResult]] = field(default_factory=list)
+    # the model calls made for this trial: (number: 1 first call, 2 widening; the call; its request as
+    # sent, for core.llm_call)
+    calls: list[tuple[int, CallResult, dict]] = field(default_factory=list)
     served_by: list[str] = field(default_factory=list)
     # the inputs read at this moment: the trial record and the document versions
     record_id: int | None = None
     document_versions: list[int] = field(default_factory=list)
 
 
-def count_call(result: TrialResult, number: int, call: CallResult) -> None:
-    """Add a model call's tokens and the model that answered to the trial's totals."""
+def count_call(result: TrialResult, number: int, call: CallResult, sent: dict) -> None:
+    """Add a model call (and `sent`, its request as recorded) to the trial's, with its tokens and the
+    model that answered."""
     result.input_tokens += call.input_tokens
     result.output_tokens += call.output_tokens
     result.cache_write_tokens += call.cache_write_tokens
     result.cache_read_tokens += call.cache_read_tokens
-    result.calls.append((number, call))
+    result.calls.append((number, call, sent))
     if call.served_by:
         result.served_by.append(call.served_by)
 
@@ -114,12 +116,16 @@ def trial_costs(result: TrialResult) -> list[llm.CallCost]:
     return found
 
 
-def record_calls(conn: psycopg.Connection, run_id: int, trial_id: int, result: TrialResult) -> None:
-    """Add the trial's billed model attempts to core.api_call, made for the session's actor."""
-    for numbered in result.calls:
-        number = numbered[0]
-        call = numbered[1]
-        llm.record(conn, call, operation=OPERATION, check_run_id=run_id, trial_id=trial_id, call_number=number)
+def record_calls(conn: psycopg.Connection, run_id: int, trial_id: int, result: TrialResult,
+                 trace: "tracing.Trace") -> None:
+    """Add the trial's model calls to core.llm_call, made for the session's actor; each call step of the
+    trace names its call."""
+    for number, call, sent in result.calls:
+        call_id = llm.record(conn, call, sent, operation=OPERATION, check_run_id=run_id, trial_id=trial_id,
+                             call_number=number)
+        for step in trace.steps:
+            if step["name"] == "call" and step["data"]["call"] == number:
+                step["data"]["llm_call"] = call_id
 
 
 def questions_to_widen(questions: list[Question], first_answers: dict[str, dict], whole_first: bool,
@@ -251,8 +257,8 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
     whole_first = len(first) == len(pages)
     first_request = build_request(settings, prompt, first, questions, context)
     call, call_answers = ask(client, first_request)
-    trace.add("call", tracing.call_data(1, settings, first, questions, first_request, call), call.duration_ms)
-    count_call(result, 1, call)
+    trace.add("call", tracing.call_data(1, settings, first, questions), call.duration_ms)
+    count_call(result, 1, call, request_for_trace(first_request))
     if call.error:
         result.error = call.error
         return None
@@ -272,8 +278,8 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
     if retry and fits:
         second_request = build_request(settings, prompt, pages, retry, context)
         again, again_answers = ask(client, second_request)
-        trace.add("call", tracing.call_data(2, settings, pages, retry, second_request, again), again.duration_ms)
-        count_call(result, 2, again)
+        trace.add("call", tracing.call_data(2, settings, pages, retry), again.duration_ms)
+        count_call(result, 2, again, request_for_trace(second_request))
         if again.error:
             # recorded, not dropped: judging on the first answers alone would pass a failed call off as a
             # retrieval miss, so the trial is stored as failed and can be run again
@@ -323,8 +329,8 @@ def _ask_with_files(conn: psycopg.Connection, client: MessagesClient, settings: 
             result.document_versions.append(file.document_version_id)
     request = build_files_request(settings, prompt, sendable, questions, context)
     call, call_answers = ask(client, request)
-    trace.add("call", tracing.call_data(1, settings, pages, questions, request, call, sendable), call.duration_ms)
-    count_call(result, 1, call)
+    trace.add("call", tracing.call_data(1, settings, pages, questions, sendable), call.duration_ms)
+    count_call(result, 1, call, request_for_trace(request, sendable))
     if call.error:
         result.error = call.error
         return None
@@ -357,6 +363,22 @@ def check_trial(conn: psycopg.Connection, client: MessagesClient, run_id: int, t
     gather the inputs and the questions, ask the model (page text or whole files; questions retrieval
     could not settle are asked again with every page), verify the quotes, judge with the rules, save
     the questions, evidence, judgement, inputs and trace."""
+    with telemetry.tracer.start_as_current_span("checks.trial") as span:
+        span.set_attribute("trialwatch.check.run_id", run_id)
+        span.set_attribute("trialwatch.trial.id", trial_id)
+        span.set_attribute("trialwatch.check.method", settings.method)
+        result = _check_trial(conn, client, run_id, trial_id, settings, prompt, requirement_set)
+        if result.error:
+            # the kind of error only: its text may quote a document
+            span.set_attribute("error.type", result.error.split(":", 1)[0])
+            span.set_status(StatusCode.ERROR)
+        else:
+            span.set_attribute("trialwatch.check.label", result.label)
+    return result
+
+
+def _check_trial(conn: psycopg.Connection, client: MessagesClient, run_id: int, trial_id: int,
+                 settings: Settings, prompt: Prompt, requirement_set: RequirementSet) -> TrialResult:
     started = time.monotonic()
     result = TrialResult()
     trace = tracing.Trace()
@@ -368,7 +390,7 @@ def check_trial(conn: psycopg.Connection, client: MessagesClient, run_id: int, t
         return result
     asked = _ask(conn, client, settings, prompt, requirement_set, trial_id, questions, inputs, result, trace)
     # what was billed is recorded at once, whatever happens to the trial next
-    record_calls(conn, run_id, trial_id, result)
+    record_calls(conn, run_id, trial_id, result, trace)
     if asked is None:
         _finish_failed(conn, run_id, trial_id, result, trace, started)
         return result
@@ -481,7 +503,7 @@ def _save(conn: psycopg.Connection, run_id: int, trial_id: int, questions: list[
                                                 tracing.page_refs(sent_pages), widened, answer)
             if evidence_id is not None and question.key in rules_trace:
                 rules_trace[question.key]["evidence_id"] = evidence_id
-        _save_judgement(conn, run_id, trial_id, judged, rules_trace, result, started)
+        _save_judgement(conn, run_id, trial_id, judged, result, started)
         checks_db.save_steps(conn, run_id, trial_id, trace.steps)
 
 
@@ -510,31 +532,21 @@ def _finish_failed(conn: psycopg.Connection, run_id: int, trial_id: int, result:
                    started: float) -> None:
     trace.add("error", {"error": result.error})
     with conn.transaction():
-        _save_judgement(conn, run_id, trial_id, None, None, result, started)
+        _save_judgement(conn, run_id, trial_id, None, result, started)
         checks_db.save_steps(conn, run_id, trial_id, trace.steps)
 
 
-def _save_judgement(conn: psycopg.Connection, run_id: int, trial_id: int, judged: dict | None, trace: dict | None,
+def _save_judgement(conn: psycopg.Connection, run_id: int, trial_id: int, judged: dict | None,
                     result: TrialResult, started: float) -> None:
+    """The judgement; its rules' trace is its rules step, its calls core.llm_call."""
     # a trial that failed before judging is stored with no parts and no label
     parts = {}
     label = None
     if judged:
         parts = judged["parts"]
         label = judged["label"]
-    # a trial with no call cost nothing; one whose calls ran on a model missing from the price list
-    # has no known cost
-    cost = None
-    billed = trial_costs(result)
-    if not billed:
-        cost = llm.total_cost(billed)
-    elif llm.unpriced_count(billed) == 0:
-        cost = llm.total_cost(billed)
-    checks_db.save_judgement(conn, run_id, trial_id, parts=parts, label=label, trace=trace,
-                             served_by=result.served_by, record_id=result.record_id,
-                             document_versions=result.document_versions, input_tokens=result.input_tokens,
-                             output_tokens=result.output_tokens, cache_write_tokens=result.cache_write_tokens,
-                             cache_read_tokens=result.cache_read_tokens, cost_usd=cost,
+    checks_db.save_judgement(conn, run_id, trial_id, parts=parts, label=label, served_by=result.served_by,
+                             record_id=result.record_id, document_versions=result.document_versions,
                              duration_ms=_milliseconds_since(started), error=result.error)
 
 
@@ -656,7 +668,7 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
     # runs whose process died are closed first, so they never look as if they were still going
     checks_db.close_abandoned_runs(conn)
     run_id = checks_db.start_run(
-        conn, check_name=CHECK_NAME, model=settings.model, effort=settings.effort, prompt=prompt.name,
+        conn, model=settings.model, effort=settings.effort, prompt=prompt.name,
         prompt_sha256=prompt.sha256, prompt_text=prompt.text, requirements=requirement_set.name,
         requirements_sha256=requirement_set.sha256, requirements_text=requirement_set.text, params=settings.params(),
     )
@@ -708,10 +720,7 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
         for count in summary.labels.values():
             judged += count
         trials = judged + len(summary.failed)
-        checks_db.finish_run(conn, run_id, status=status, error=stop_error, trials=trials,
-                             errors=len(summary.failed), input_tokens=summary.input_tokens,
-                             output_tokens=summary.output_tokens, cache_write_tokens=summary.cache_write_tokens,
-                             cache_read_tokens=summary.cache_read_tokens)
+        checks_db.finish_run(conn, run_id, status=status, error=stop_error, trials=trials, errors=len(summary.failed))
         # every judgement it made goes public now, also when the run stopped part-way (ADR-007)
         try:
             summary.published = publishing.publish_run(conn, run_id)

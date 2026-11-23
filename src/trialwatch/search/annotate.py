@@ -7,7 +7,7 @@ one of the values asked for; the others are kept as dropped, with why. Exclusion
 sent: a condition they name is not the trial's.
 
 A run records the model, its effort and the exact prompt it sent (checks/prompts/annotate.md, one
-current text); each billed call is a core.api_call row (operation 'annotate'). The trial's search
+current text); each call is a core.llm_call row (operation 'annotate'). The trial's search
 document is then rebuilt with the kept tags (search/index.py).
 """
 
@@ -378,13 +378,10 @@ def annotate_trial(conn: psycopg.Connection, client: MessagesClient, settings: S
             error = f"invalid answer: {exc}"
     cost = total_cost(call.costs)
     with conn.transaction():
-        search_db.save_annotation(
-            conn, run_id=run_id, trial_id=trial_id, profile_hash=bytes(stored.profile_hash), served_by=call.served_by,
-            facts=checked.facts, dropped=checked.dropped, request=request_as_sent(request), raw_answer=call.raw_text,
-            error=error, input_tokens=call.input_tokens, output_tokens=call.output_tokens, cost_usd=cost,
-            duration_ms=call.duration_ms,
-        )
-        llm.record(conn, call, operation=OPERATION, trial_id=trial_id, call_number=1, annotation_run_id=run_id)
+        llm.record(conn, call, request_as_sent(request), operation=OPERATION, trial_id=trial_id, call_number=1,
+                   annotation_run_id=run_id)
+        search_db.save_annotation(conn, run_id=run_id, trial_id=trial_id, profile_hash=bytes(stored.profile_hash),
+                                  facts=checked.facts, dropped=checked.dropped, error=error)
         if error is None:
             index.rebuild_trial(conn, trial_id, force=True)
     kept = 0

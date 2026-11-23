@@ -83,9 +83,10 @@ flowchart TB
 - **Refusal fallback.** If the model's safety checks decline a request, the API may re-run it on another model
   Anthropic recommends; the answer records which model served it.
 - **Trace.** Every step of judging one trial in one run is stored in order (`checks.step`): the questions, the
-  documents and pages read, retrieval (terms, ranks, snippets), each model call (the request exactly as sent, the
-  model that answered, tokens, time, its raw answer), quote verification and the rules. The system prompt is
-  stored once per run.
+  documents and pages read, retrieval (terms, ranks, snippets), each model call (what was asked; the call
+  itself, the request exactly as sent, the model that answered, tokens, time and its raw answer, is its
+  `core.llm_call` row, which the step names), quote verification and the rules (how each part was set: the
+  judgement's trace). The system prompt is stored once per run.
 - **Runs are versions.** Each run (`checks.run`) adds new rows, never updates; `checks.judgement_current` shows
   the newest judgement per trial and requirement set. A judgement is **outdated** when a document version it read
   was replaced or unlinked, a document of the kinds its set reads was linked since, or another record of the trial
@@ -170,25 +171,26 @@ erDiagram
     step["checks.step"]
     trial["core.trial"]
     version["core.document_version"]
-    api_call["core.api_call"]
+    llm_call["core.llm_call"]
     run ||--o{ answer : "per trial and question"
     run ||--o{ judgement : "per trial"
     run ||--o{ step : "trace"
     trial ||--o{ judgement : "judged"
     version ||--o{ answer : "quoted from"
-    run ||--o{ api_call : "billed calls"
+    run ||--o{ llm_call : "model calls"
+    step |o--o| llm_call : "a call step names it"
 ```
 
 | Table | What it holds |
 |---|---|
-| `checks.run` | one check run: who ran it, model, effort, prompt and requirement set (name, sha256, text as sent), params (method, top_k, …), status (running, succeeded, failed, stopped) and why it ended early, counts, tokens, cost, job |
+| `checks.run` | one check run: who ran it, model, effort, prompt and requirement set (name, sha256, text as sent), params (method, top_k, …), status (running, succeeded, failed, stopped) and why it ended early, counts, job; its tokens and cost are its calls' (`core.llm_call`) |
 | `checks.answer` | each question a run asked about a trial (`participants`, `cancelled`, `endpoint:<registered id>`, …): the registered item it is about, the pages shown, whether it was asked again with every page; and the model's answer, if it gave one (`evidence_id`, which the rules trace names): found (true, false, NULL = don't know), kind (numeric_result, narrative_only, chart_only, redacted, not_analysed, other), the quote, document version, file sha256 and page, and whether the quote is really on that page |
-| `checks.judgement` | the rules' verdict per trial per run: label (full, not full, undecided; NULL only with an error), parts by name (NULL = undecided), the rule and evidence behind each, the inputs read (trial record, document versions), the models that served it, tokens, cost; its `agreement` with gold labels, recorded as its run finished; and its withdrawal by staff (at, by, the reason shown to all; audited) |
-| `checks.step` | the trace of one trial in one run: questions, pages, retrieval, call, widening, verification, rules, error, each with its data |
+| `checks.judgement` | the rules' verdict per trial per run: label (full, not full, undecided; NULL only with an error), parts by name (NULL = undecided), the rule and evidence behind each, the inputs read (trial record, document versions), the models that served it (its rules' trace is its rules step; its tokens and cost its calls'); its `agreement` with gold labels, recorded as its run finished; and its withdrawal by staff (at, by, the reason shown to all; audited) |
+| `checks.step` | the trace of one trial in one run: questions, pages, retrieval, call (naming its `core.llm_call`), widening, verification, rules, error, each with its data |
 | `checks.judgement_current` (view) | the judgement each trial shows, to staff and the public alike: the newest successful one per requirement set from a run that has ended (public from then: `published_at`), whether it is outdated, its agreement and its withdrawal |
 
 ## Claude API
 
 `POST https://api.anthropic.com/v1/messages`, with the API key from `.env`: the page text or PDFs, the questions
-and the system prompt. Anthropic only, through its SDK. Every billed call is a priced `core.api_call` row
+and the system prompt. Anthropic only, through its SDK. Every call is a `core.llm_call` row, its billed attempts priced
 ([spend](operations.md#spend)).

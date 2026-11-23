@@ -1,0 +1,114 @@
+{
+  "uid": "trialwatch-sources",
+  "title": "TrialWatch · Sources",
+  "description": "Sources: how fresh their lists and transfers are, and what failed",
+  "tags": [
+    "trialwatch"
+  ],
+  "editable": false,
+  "schemaVersion": 41,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "panels": [
+    {
+      "type": "table",
+      "title": "Sources",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "trialwatch-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "trialwatch-db"
+          },
+          "rawSql": "SELECT code, enabled, last_sync, last_transfer, failed_transfers FROM report.sources ORDER BY code",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "id": 1
+    },
+    {
+      "type": "timeseries",
+      "title": "Records fetched by outcome",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (source, outcome) (increase(trialwatch_source_fetches_total[1h]))",
+          "legendFormat": "{{source}} {{outcome}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "id": 2
+    },
+    {
+      "type": "table",
+      "title": "Runs",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "trialwatch-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "trialwatch-db"
+          },
+          "rawSql": "SELECT id, source, kind, status, started_at, finished_at, errors FROM report.ingest_runs ORDER BY id DESC LIMIT 30",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "id": 3
+    }
+  ]
+}

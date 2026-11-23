@@ -1,0 +1,218 @@
+{
+  "uid": "trialwatch-spend",
+  "title": "TrialWatch · Spend",
+  "description": "What model calls cost, priced at Anthropic's list prices (core.llm_call)",
+  "tags": [
+    "trialwatch"
+  ],
+  "editable": false,
+  "schemaVersion": 41,
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "This month",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "trialwatch-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "trialwatch-db"
+          },
+          "rawSql": "SELECT this_month_usd FROM report.spend_cap",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "id": 1
+    },
+    {
+      "type": "gauge",
+      "title": "Of the monthly cap",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "trialwatch-db"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "trialwatch-db"
+          },
+          "rawSql": "SELECT CASE WHEN cap_usd > 0 THEN this_month_usd / cap_usd END AS share FROM report.spend_cap",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "description": "Automatic checks and tags are held at 100%; the alert fires at 80%.",
+      "id": 2
+    },
+    {
+      "type": "timeseries",
+      "title": "Per day, by model",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "trialwatch-db"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "trialwatch-db"
+          },
+          "rawSql": "SELECT $__timeGroupAlias(at, '1d'), model AS metric, sum(cost_usd) AS cost FROM report.spend WHERE $__timeFilter(at) GROUP BY 1, 2 ORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "Per day, by operation",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "trialwatch-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "trialwatch-db"
+          },
+          "rawSql": "SELECT $__timeGroupAlias(at, '1d'), operation AS metric, sum(cost_usd) AS cost FROM report.spend WHERE $__timeFilter(at) GROUP BY 1, 2 ORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "id": 4
+    },
+    {
+      "type": "table",
+      "title": "By model, operation and who it was for",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "trialwatch-db"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "trialwatch-db"
+          },
+          "rawSql": "SELECT model, operation, made_for, count(*) AS attempts, sum(input_tokens) AS tokens_in, sum(output_tokens) AS tokens_out, sum(cost_usd) AS cost_usd FROM report.spend WHERE $__timeFilter(at) GROUP BY 1, 2, 3 ORDER BY cost_usd DESC NULLS LAST",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "id": 5
+    },
+    {
+      "type": "table",
+      "title": "Costliest check runs",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "trialwatch-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "trialwatch-db"
+          },
+          "rawSql": "SELECT id AS run, started_at, model, trials, cost_usd FROM report.check_runs WHERE cost_usd > 0 ORDER BY cost_usd DESC LIMIT 20",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "id": 6
+    }
+  ]
+}

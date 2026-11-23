@@ -1,0 +1,220 @@
+# TrialWatch's alerts (docs/operations.md, runbook). They show in Grafana (Alerting); to be told by email or
+# chat, give Grafana a contact point (GF_SMTP_* settings, or one added in its Alerting page).
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: TrialWatch
+    folder: TrialWatch
+    interval: 1m
+    rules:
+      - uid: trialwatch-worker-stopped
+        title: The worker stopped
+        condition: C
+        for: 2m
+        noDataState: Alerting
+        execErrState: Error
+        labels: {severity: critical}
+        annotations:
+          summary: The worker has not said it is alive for more than 5 minutes
+          description: Jobs (the refresh, checks, transfers) are not running. `docker compose ps worker`; its logs.
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model: {refId: A, expr: "time() - max(trialwatch_worker_heartbeat_seconds)", instant: true}
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [300]}}]
+
+      - uid: trialwatch-job-failed
+        title: A job failed
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels: {severity: warning}
+        annotations:
+          summary: A job failed every attempt, or the spending cap holds one
+          description: It waits for a person on /admin/jobs (try again, or cancel).
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: trialwatch-db
+            model:
+              refId: A
+              format: table
+              rawQuery: true
+              editorMode: code
+              rawSql: SELECT count(*) AS jobs FROM report.jobs WHERE status IN ('failed', 'held')
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [0]}}]
+
+      - uid: trialwatch-job-waiting
+        title: A job waits over an hour
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels: {severity: warning}
+        annotations:
+          summary: A job has been due for more than an hour and no worker took it
+          description: The worker is stuck on a long job or stopped. /admin/jobs?tab=queued; a second worker helps.
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: trialwatch-db
+            model:
+              refId: A
+              format: table
+              rawQuery: true
+              editorMode: code
+              rawSql: >-
+                SELECT count(*) AS jobs FROM report.jobs
+                WHERE status = 'queued' AND run_after < now() - interval '1 hour'
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [0]}}]
+
+      - uid: trialwatch-spend-near-cap
+        title: Spend is near the monthly cap
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels: {severity: warning}
+        annotations:
+          summary: This month's model calls cost 80% of the monthly cap or more
+          description: At 100% the refresh's checks and AI tags are held until next month. /admin/spend.
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: trialwatch-db
+            model:
+              refId: A
+              format: table
+              rawQuery: true
+              editorMode: code
+              rawSql: SELECT coalesce(this_month_usd / nullif(cap_usd, 0), 0) AS share FROM report.spend_cap
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [0.8]}}]
+
+      - uid: trialwatch-server-errors
+        title: Server errors
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: {severity: critical}
+        annotations:
+          summary: More than 1% of requests failed with a server error (5xx) over 10 minutes
+          description: The HTTP dashboard's logs link each error to its trace; an error page shows its trace id.
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                sum(rate(http_server_duration_milliseconds_count{service_name="trialwatch-web", http_status_code=~"5.."}[10m]))
+                / sum(rate(http_server_duration_milliseconds_count{service_name="trialwatch-web"}[10m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [0.01]}}]
+
+      - uid: trialwatch-web-silent
+        title: The web server sends nothing
+        condition: C
+        for: 2m
+        noDataState: Alerting
+        execErrState: Error
+        labels: {severity: critical}
+        annotations:
+          summary: The web server has sent no metrics for more than 5 minutes
+          description: It is down or cannot reach Grafana. `docker compose ps web`; /healthz and /readyz.
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model: {refId: A, expr: 'time() - max(timestamp(target_info{service_name="trialwatch-web"}))', instant: true}
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [300]}}]
+
+      - uid: trialwatch-database-down
+        title: The database does not answer
+        condition: C
+        for: 2m
+        noDataState: Alerting
+        execErrState: Alerting
+        labels: {severity: critical}
+        annotations:
+          summary: Grafana cannot read TrialWatch's database (what /readyz asks too)
+          description: Nothing works without it. `docker compose ps db`; its logs; the disk.
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: trialwatch-db
+            model: {refId: A, format: table, rawQuery: true, editorMode: code, rawSql: SELECT 1 AS answers}
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: lt, params: [1]}}]
+
+      - uid: trialwatch-backup-old
+        title: No backup in 26 hours
+        condition: C
+        for: 0s
+        noDataState: Alerting
+        execErrState: Error
+        labels: {severity: critical}
+        annotations:
+          summary: The newest backup of the database is more than 26 hours old
+          description: The backup service runs pg_dump every day into ./data/backups. `docker compose logs backup`.
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: trialwatch-db
+            model:
+              refId: A
+              format: table
+              rawQuery: true
+              editorMode: code
+              rawSql: SELECT extract(epoch FROM now() - max(at)) / 3600 AS hours FROM report.backups
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [26]}}]

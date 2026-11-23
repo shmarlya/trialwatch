@@ -382,15 +382,11 @@ def spend_page(
     with db.connect_system() as conn:
         totals = costs_db.spend_totals(conn)
         cap = costs_db.monthly_cap(conn)
-        groups = {}
-        for group in ("month", "model", "operation", "actor"):
-            groups[group] = costs_db.spend_by(conn, group)
         costliest = costs_db.costliest_runs(conn)
         held = jobs_db.jobs_with_status(conn, ("held",))
     context = {
         "totals": totals,
         "cap": cap,
-        "groups": groups,
         "costliest": costliest,
         "held": held,
         "error": error,

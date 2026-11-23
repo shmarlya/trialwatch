@@ -1,6 +1,7 @@
 # TrialWatch on one machine. `docker compose up -d` runs the database and the worker (for local work:
 # run the site itself with `uv run trialwatch web`). On a server, `docker compose --profile server up -d`
-# also runs the site (`web`) behind HTTPS (`caddy`) at TRIALWATCH_DOMAIN.
+# also runs the site (`web`) behind HTTPS (`caddy`) at TRIALWATCH_DOMAIN, Grafana for admins (`lgtm`, at
+# /grafana/), and the nightly backups (`backup`). docs/operations.md says how to run and watch it.
 
 # What the TrialWatch services share: the image, the database and the settings from .env
 x-trialwatch: &trialwatch
@@ -14,6 +15,8 @@ x-trialwatch: &trialwatch
     # The gold datasets in the mounted data/ (the package's own path is inside the image's venv).
     # They are read here; `gold build` runs on the host, where data/gold/ is writable.
     TRIALWATCH_GOLD_DIR: /app/data/gold
+    # Where traces, metrics and logs go (telemetry.py): on a server http://lgtm:4318 (in .env); empty: nowhere
+    OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   volumes:
     # Research files and gold datasets, read-only: data/bruckner/ and data/gold/ are in git
     - ./data:/app/data:ro
@@ -39,12 +42,7 @@ services:
       # The first admin, added when the web interface starts if no user has this email (ADR-006)
       TRIALWATCH_ADMIN_EMAIL: ${TRIALWATCH_ADMIN_EMAIL:-}
       TRIALWATCH_ADMIN_PASSWORD: ${TRIALWATCH_ADMIN_PASSWORD:-}
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/healthz', timeout=3)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
+    # healthy: /healthz answers (the image's HEALTHCHECK)
 
   # HTTPS in front of web: a certificate for TRIALWATCH_DOMAIN from Let's Encrypt (for localhost, one
   # of its own), renewed by itself (ops/caddy/Caddyfile)
@@ -66,12 +64,97 @@ services:
       web:
         condition: service_healthy
 
+  # Grafana with Prometheus (metrics), Tempo (traces) and Loki (logs), for TrialWatch's admins only: behind
+  # caddy at /grafana/, signed in through TrialWatch (ops/caddy/Caddyfile); never published on a port.
+  # The web server and the worker send to it (OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318). It keeps
+  # metrics 90 days, logs 30 and traces 7 (ops/lgtm/). Its dashboards and alerts are ops/grafana/.
+  lgtm:
+    image: grafana/otel-lgtm:0.41.1
+    profiles: ["server"]
+    restart: unless-stopped
+    environment:
+      # the image lets anyone in as an admin unless told otherwise
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_DISABLE_SIGNOUT_MENU: "true"
+      # who is signed in is the header caddy sets from TrialWatch's answer, and only caddy reaches this
+      # service with it (no port is published; a header from a browser is dropped)
+      GF_AUTH_PROXY_ENABLED: "true"
+      GF_AUTH_PROXY_HEADER_NAME: X-WEBAUTH-USER
+      GF_AUTH_PROXY_HEADER_PROPERTY: email
+      GF_AUTH_PROXY_AUTO_SIGN_UP: "true"
+      GF_USERS_AUTO_ASSIGN_ORG_ROLE: Admin
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-https://${TRIALWATCH_DOMAIN:-localhost}/grafana/}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=90d
+      # for its TrialWatch data source (ops/grafana/provisioning/datasources/trialwatch.yaml)
+      POSTGRES_DB: ${POSTGRES_DB}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-}
+    volumes:
+      - lgtm-data:/data
+      - ./ops/lgtm/tempo-config.yaml:/otel-lgtm/tempo-config.yaml:ro
+      - ./ops/lgtm/loki-config.yaml:/otel-lgtm/loki-config.yaml:ro
+      - ./ops/grafana/provisioning/datasources/trialwatch.yaml:/otel-lgtm/grafana/conf/provisioning/datasources/trialwatch.yaml:ro
+      - ./ops/grafana/provisioning/dashboards/trialwatch.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/trialwatch.yaml:ro
+      - ./ops/grafana/provisioning/alerting/trialwatch.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/trialwatch.yaml:ro
+      - ./ops/grafana/dashboards:/otel-lgtm/trialwatch-dashboards:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # Gives Grafana's database role (grafana_ro: the report views only) its password, then exits
+  grafana-role:
+    image: postgres:18-alpine
+    profiles: ["server"]
+    environment: &psql-environment
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-}
+    volumes:
+      - ./ops/db/grafana-role.sh:/grafana-role.sh:ro
+    entrypoint: ["/bin/sh", "/grafana-role.sh"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # A pg_dump of the database into ./data/backups every day, kept BACKUP_KEEP_DAYS (ops/db/backup.sh)
+  backup:
+    image: postgres:18-alpine
+    profiles: ["server"]
+    restart: unless-stopped
+    environment:
+      <<: *psql-environment
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./ops/db/backup.sh:/backup.sh:ro
+      - ./data/backups:/backups
+    entrypoint: ["/bin/sh", "/backup.sh"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   # Runs queued jobs (web forms, the weekly refresh) one at a time and tries failed ones again
   # (`trialwatch worker`, src/trialwatch/jobs/)
   worker:
     <<: *trialwatch
     command: ["worker"]
     restart: unless-stopped
+    healthcheck:
+      # it touches this file every loop, and every 30 s while a job runs (telemetry.heartbeat): a file
+      # older than 2 minutes means it is stuck
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/trialwatch-worker.alive') > 120)"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # Applies db/migrations/*.sql and writes db/schema.sql, then exits; web and worker start only if
   # this succeeds. Takes dbmate's arguments (`docker compose run --rm migrate status`).
@@ -111,3 +194,4 @@ volumes:
   pgdata:
   caddy-data:
   caddy-config:
+  lgtm-data:

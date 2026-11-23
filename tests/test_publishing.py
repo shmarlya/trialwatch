@@ -36,8 +36,7 @@ def a_gold_run(conn, gold, agreeing, disagreeing):
         expected = "full" if number < agreeing else "not full"
         items.append(an_item(ct(number), expected))
         judge(conn, run_id, ct(number), "full", FULL)
-    checks_db.finish_run(conn, run_id, status="succeeded", error=None, trials=len(items), errors=0, input_tokens=0,
-                         output_tokens=0)
+    checks_db.finish_run(conn, run_id, status="succeeded", error=None, trials=len(items), errors=0)
     datasets.write_version(gold, meta("v1"), items)
     return run_id
 
@@ -47,8 +46,7 @@ def a_new_run(conn, judged):
     run_id = start_a_run(conn)
     for number, label, parts in judged:
         judge(conn, run_id, ct(number), label, parts)
-    checks_db.finish_run(conn, run_id, status="succeeded", error=None, trials=len(judged), errors=0, input_tokens=0,
-                         output_tokens=0)
+    checks_db.finish_run(conn, run_id, status="succeeded", error=None, trials=len(judged), errors=0)
     return run_id
 
 

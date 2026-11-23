@@ -3,6 +3,7 @@ action → role chart, ADR-006), and the small helpers forms use. The routes the
 part (trials/routes.py, checks/routes.py, search/routes.py, gold/routes.py, sources/routes.py,
 jobs/routes.py, auth/routes.py, web/home.py); web/app.py puts them together."""
 
+import json
 from pathlib import Path
 from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
@@ -53,6 +54,21 @@ def country_names(codes: list[str]) -> list[str]:
 
 
 TEMPLATES.env.filters["country_names"] = country_names
+
+# Where Grafana is served (compose's lgtm behind Caddy, for admins), and its trace store's data source
+GRAFANA = "/grafana"
+TEMPO = "tempo"
+
+
+def trace_link(trace_id: str) -> str:
+    """A trace in Grafana's Explore (Tempo), for admins."""
+    query = {"refId": "A", "datasource": {"type": "tempo", "uid": TEMPO}, "queryType": "traceql", "query": trace_id}
+    panes = {"trace": {"datasource": TEMPO, "queries": [query], "range": {"from": "now-7d", "to": "now"}}}
+    return f"{GRAFANA}/explore?schemaVersion=1&orgId=1&panes={url_quote(json.dumps(panes, separators=(',', ':')))}"
+
+
+TEMPLATES.env.globals["trace_link"] = trace_link
+TEMPLATES.env.globals["grafana"] = GRAFANA
 
 
 def host_name(netloc: str) -> str:

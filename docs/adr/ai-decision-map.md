@@ -295,7 +295,7 @@ Untrusted input, the law, and explaining every output a year later.
 - **Terms:** Provenance = where a claim came from. Lineage = source → snapshot → run → LLM call → finding. Immutable = raw inputs are never overwritten, only superseded.
 - **Practice:** Each finding stores snapshot id, document hash, prompt version, model id, run id, verbatim quote and page. New method → new rows; old ones kept.
 - **Pitfall:** Re-running with a new model and silently replacing last month's findings.
-- **TrialWatch:** Built: core.trial_record, core.ingest_run, audit_log, core.api_call and each run's exact prompt and requirement set (sha256).
+- **TrialWatch:** Built: core.trial_record, core.ingest_run, audit_log, core.llm_call and each run's exact prompt and requirement set (sha256).
 - **Lab:** SQL: from one judgement back to its run, prompt, files (sha256) and the ingest run that brought them.
 
 ### Trust boundary (cards 13–16)
@@ -324,7 +324,7 @@ Run it every week: one gateway, known cost, full visibility, safe change.
 - **Terms:** Gateway = the only wrapper around the provider SDK. Prompt registry = prompts by name + version. Response cache = same input, stored output.
 - **Practice:** One place for model id, retries, timeouts, caching, rate limits, token and cost logging, prompt versions. Checks call gateway.run("results_check.v1", …), never the SDK.
 - **Pitfall:** SDK calls scattered across modules; nobody can say what last week cost.
-- **TrialWatch:** Not built: checks call the SDK directly; core.api_call logs every billed call.
+- **TrialWatch:** Not built: checks call the SDK directly; core.llm_call logs every call.
 - **Lab:** Move the SDK call behind one function with a fake provider for tests, if a second check needs it.
 
 ### 18 Cost & latency
@@ -346,7 +346,7 @@ Run it every week: one gateway, known cost, full visibility, safe change.
 - **Terms:** Trace = one request across all steps; span = one step in it. Drift = inputs or outputs shift over time (new CTIS format, new model). Online eval = scoring a sample of live outputs.
 - **Practice:** Log per call: prompt version, model id, tokens in / out, cache reads, latency, cost, stop_reason, error, request id. Alert on cost spikes and a shifted verdict mix.
 - **Pitfall:** Logging only errors; no way to replay one bad finding.
-- **TrialWatch:** Built: core.api_call (tokens, $, prices) and /admin/spend; /admin/jobs for failures.
+- **TrialWatch:** Built: core.llm_call (tokens, $, prices) and /admin/spend; /admin/jobs for failures.
 - **Lab:** SQL view: cost and verdict counts per run; flag runs where the "not reported" share jumps > 10 points.
 
 ### 20 Lifecycle & change
@@ -428,7 +428,7 @@ One session = one ADR + the lab that tests it. Details: [roadmap](roadmap.md).
 | 11 | gold datasets + eval gates (ADR-003) |
 | 13 | every judgement published with its gold agreement; staff only withdraw (ADR-007) |
 | 16 | central model, audit_log (ADR-003, 005) |
-| 17 | no gateway; core.api_call logs cost |
+| 17 | no gateway; core.llm_call logs cost |
 
 **Open (no answer yet):**
 

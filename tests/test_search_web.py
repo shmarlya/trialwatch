@@ -13,6 +13,7 @@ from recruiting_trials import EMAIL, LYON, MADRID, PARIS, VILLEJUIF, ManyCtis, l
 from test_sources_ctis import transfer
 from vocabulary import load_mesh
 
+from trialwatch import telemetry
 from trialwatch.db import core
 from trialwatch.db import search as search_db
 from trialwatch.geo import countries
@@ -139,9 +140,9 @@ def test_searches_are_private(trials, app_conn):
 
     line = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d', record_args, None)
     privacy.StripQueryFilter().filter(line)
-    assert line.getMessage() == '127.0.0.1:5000 - "GET /find HTTP/1.1" 200'
-    config = privacy.log_config()
-    assert "strip_query" in config["handlers"]["access"]["filters"]
+    assert line.getMessage() == '- - "GET /find HTTP/1.1" 200'
+    config = telemetry.log_config()
+    assert config["loggers"]["uvicorn.access"]["filters"] == ["strip_query"]
     assert json.dumps(config)
 
 

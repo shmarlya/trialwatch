@@ -7,6 +7,7 @@ the queries keep the view a public page uses."""
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from calls import recorded_call
 from conftest import signed_in_client
 from fastapi.testclient import TestClient
 from test_evidence import CT, SET, seed, start_a_run
@@ -33,15 +34,13 @@ def judged(conn, trial_id, label="not full", error=None, finished=True):
     checks_db.save_answer(conn, run_id, trial_id, "participants", "How many took part?", [], False, answer)
     if error is not None:
         label = None
-    checks_db.save_judgement(conn, run_id, trial_id, parts={"participants": True}, label=label,
-                             trace={"participants": {"value": True, "rule": "a verified count"}}, served_by=[],
-                             record_id=None, document_versions=[], input_tokens=123456, output_tokens=7,
-                             duration_ms=10, error=error)
+    checks_db.save_judgement(conn, run_id, trial_id, parts={"participants": True}, label=label, served_by=[],
+                             record_id=None, document_versions=[], duration_ms=10, error=error)
+    call_id = recorded_call(conn, run_id, trial_id, input_tokens=123456, output_tokens=7, cost_usd="0.42")
     now = datetime.now(timezone.utc)
     checks_db.save_steps(conn, run_id, trial_id, [
         {"name": "call", "at": now, "data": {"call": 1, "model": "claude-test", "effort": "low", "pages": [],
-                                             "questions": ["participants"], "input_tokens": 123456,
-                                             "output_tokens": 7, "cost_usd": 0.42, "answer": "{}"}},
+                                             "questions": ["participants"], "llm_call": call_id}},
         {"name": "rules", "at": now, "data": {"requirements": SET.name, "label": label, "parts": {"participants": True},
                                               "trace": {"participants": {"value": True, "rule": "a verified count"}}}},
     ])
@@ -52,8 +51,7 @@ def judged(conn, trial_id, label="not full", error=None, finished=True):
 
 def finish(conn, run_id):
     """The run ends: its judgements are public now, each with how its kind agreed with gold labels."""
-    checks_db.finish_run(conn, run_id, status="succeeded", error=None, trials=1, errors=0, input_tokens=123456,
-                         output_tokens=7)
+    checks_db.finish_run(conn, run_id, status="succeeded", error=None, trials=1, errors=0)
     publishing.publish_run(conn, run_id)
 
 

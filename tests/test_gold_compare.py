@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from calls import recorded_call
 from test_evidence import start_a_run
 
 from trialwatch.db import checks as checks_db
@@ -77,9 +78,9 @@ def a_trial(conn, ct_number, published_at):
 
 def judge(conn, run_id, ct_number, label, parts, published_at=BEFORE, error=None):
     trial_id, version_id = a_trial(conn, ct_number, published_at)
-    checks_db.save_judgement(conn, run_id, trial_id, parts=parts, label=label, trace=None, served_by=[],
-                             record_id=None, document_versions=[version_id], input_tokens=100, output_tokens=10,
-                             duration_ms=5, error=error)
+    checks_db.save_judgement(conn, run_id, trial_id, parts=parts, label=label, served_by=[], record_id=None,
+                             document_versions=[version_id], duration_ms=5, error=error)
+    recorded_call(conn, run_id, trial_id, input_tokens=100, output_tokens=10, cost_usd="0")
 
 
 def a_judged_run(conn):
@@ -93,8 +94,7 @@ def a_judged_run(conn):
     judge(conn, run_id, LATER_DOCUMENT, "not full", NOT_FULL, published_at=ON_THE_DAY)
     judge(conn, run_id, FAILED, None, {}, error="InternalServerError: overloaded")
     judge(conn, run_id, NO_LABEL, "full", FULL)
-    checks_db.finish_run(conn, run_id, status="failed", error=None, trials=7, errors=1, input_tokens=700,
-                         output_tokens=70)
+    checks_db.finish_run(conn, run_id, status="failed", error=None, trials=7, errors=1)
     return run_id
 
 

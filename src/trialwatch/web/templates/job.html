@@ -9,6 +9,7 @@
   · {% if job.automatic %}automatic{% endif %} created by {{ who(job.actor) }} {{ when(job.created_at) }}
   {% if job.status == "queued" and job.attempts %} · next try {{ when(job.run_after) }}{% endif %}
   · cost <span id="cost">{{ dollars(cost) }}</span>
+  {% if job.trace_id %} · trace {% if can("ops.view") %}<a href="{{ trace_link(job.trace_id) }}"><code class="small">{{ job.trace_id[:12] }}</code></a>{% else %}<code class="small">{{ job.trace_id[:12] }}</code>{% endif %}{% endif %}
 </p>
 <p class="small muted">
   {% if job.params.source %}source {{ job.params.source }}{% endif %}

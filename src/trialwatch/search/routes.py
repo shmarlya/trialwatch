@@ -1,9 +1,12 @@
 """The public patient search page (/find, ADR-008)."""
 
+import time
+
+import psycopg
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 
-from trialwatch import db
+from trialwatch import db, telemetry
 from trialwatch.db import auth as auth_db
 from trialwatch.db import search as search_db
 from trialwatch.search import categories as search_categories
@@ -50,7 +53,7 @@ def find(
     why = {}
     with db.connect_system() as conn:
         if params.given():
-            result = finding.find(conn, params)
+            result = _counted_find(conn, params)
             links = finding.links(params, result)
             urls = result.urls
             why = result.why
@@ -76,3 +79,17 @@ def find(
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Robots-Tag"] = "noindex"
     return response
+
+
+def _counted_find(conn: psycopg.Connection, params: finding.SearchParams) -> finding.SearchPage:
+    """The search, counted by how it went (hits, empty, error) and timed, for Grafana."""
+    started = time.monotonic()
+    outcome = "error"
+    try:
+        result = finding.find(conn, params)
+        outcome = "hits" if result.total else "empty"
+        return result
+    finally:
+        labels = {"outcome": outcome}
+        telemetry.search_requests.add(1, labels)
+        telemetry.search_duration.record(time.monotonic() - started, labels)

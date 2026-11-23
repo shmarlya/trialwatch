@@ -40,7 +40,7 @@ docker compose run --rm migrate
 `db/schema.sql`, then exits (the others start only if it succeeds; dbmate 2.37, `./db` mounted); `worker` runs
 `trialwatch worker`. On this machine you run the site itself with `uv run trialwatch web` (below).
 
-On a server, `docker compose --profile server up -d` also runs the site:
+On a server, `docker compose --profile server up -d` also runs the site, Grafana and the backups:
 
 - `web` runs `trialwatch web --host 0.0.0.0 --no-worker` in the image `trialwatch:dev` (Python 3.13, non-root,
   `ENTRYPOINT trialwatch`), with `data/` mounted read-only. Only
@@ -48,8 +48,19 @@ On a server, `docker compose --profile server up -d` also runs the site:
   `/healthz` (the server is up; it asks nothing of the database); `/readyz` says whether the database answers and
   at which migration (503 when it doesn't).
 - `caddy` serves HTTPS at `TRIALWATCH_DOMAIN` (in `.env`; a Let's Encrypt certificate, renewed by itself, kept in
-  the volume `caddy-data`) and sends everything to `web` (`ops/caddy/Caddyfile`). It keeps no access log: a search's
-  address can be about someone's health, and `web` logs each request without its query string.
+  the volume `caddy-data`) and sends everything to `web` (`ops/caddy/Caddyfile`), `/grafana/` to `lgtm`. It keeps
+  no access log: a search's address can be about someone's health, and `web` logs each request without its query
+  string or the visitor's address.
+- `lgtm` (`grafana/otel-lgtm`, pinned) is Grafana with Prometheus, Tempo and Loki, for admins
+  ([below](#grafana)). No port of it is published.
+- `grafana-role` gives `grafana_ro`, the database role Grafana reads with, its password, then exits.
+- `backup` dumps the database every day ([below](#backups)).
+
+To deploy: point the domain's DNS at the machine; copy `.env.example` to `.env` and set the passwords,
+`TRIALWATCH_DOMAIN`, `TRIALWATCH_ADMIN_EMAIL`/`_PASSWORD` (the first admin), `OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318`
+and `GRAFANA_DB_PASSWORD`; then `docker compose --profile server up -d --build`. Load the reference data once
+(`geo load`, `vocab load`), switch the refresh's schedule on at `/admin/jobs`, and set a spending cap at
+`/admin/spend`. To update: `git pull`, then the same `up -d --build` (migrations run first).
 
 One-off commands run in the same image: `docker compose run --rm web source list`.
 
@@ -149,14 +160,73 @@ runs. Everything it does, and what TrialWatch publishes by itself, is recorded a
 | `jobs/tasks.py`, `worker.py`, `steps.py`, `refresh.py`, `retry.py` | every kind of job, the worker, what each kind does, the refresh, retries |
 | `config.py` | every setting read from the environment (and `.env`) |
 | `llm.py`, `prices.json` | every model call: the client, pricing per billed attempt, recording it as spend |
-| `telemetry.py` | traces and counters for admins (OpenTelemetry; recorded nowhere until Grafana is set up) |
+| `telemetry.py` | what TrialWatch records about itself for admins: traces, metrics, JSON logs, redaction ([below](#what-trialwatch-records-about-itself)) |
 | `db/__init__.py` | connections: the web server's pool, everyone else's own |
 | `db/overview.py`, `db/auth.py`, `db/jobs.py`, `db/costs.py` | their SQL |
 
+## What TrialWatch records about itself
+
+For admins, in Grafana (OpenTelemetry, `src/trialwatch/telemetry.py`). The web server and the worker send traces,
+metrics and logs to `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP over HTTP) when it is set; without it nothing is sent and
+recording costs next to nothing (the tests, the command line). Either way their logs are JSON lines on stderr
+(time, level, logger, message, and the trace they were written in).
+
+- **Traces**: every request (not `/healthz`, `/readyz`), with its database queries (SQL without parameters) and
+  outgoing HTTP calls; and the work: `jobs.run` (one job attempt; the job's page shows its trace id), `ingest.trial`
+  (one trial transferred), `checks.trial` (one trial checked), `llm.call` (one model call), `search.find` (one
+  search: counts only). An unhandled error's page shows its trace id as the reference to search for.
+- **Metrics**: `trialwatch.llm.calls`, `.tokens`, `.cost`, `.duration` (by model, operation, outcome);
+  `trialwatch.search.requests`, `.duration` (by outcome: hits, empty, error); `trialwatch.source.fetches` (by
+  source, outcome: ok, not_found, error); `trialwatch.jobs.finished`, `.duration` (by kind, status); and
+  `trialwatch.worker.heartbeat` (when the worker last said it is alive). The queue, spend and judgements are read
+  from Postgres, not counted twice.
+- **Privacy** (ADR-008): what someone searched for is recorded nowhere. Every span is redacted before it leaves the
+  process: no query string (`url.query`, `url.full`, `http.target`, `http.url`) and no visitor's address
+  (`net.peer.ip`, `client.address`, …), and on `/find` an error keeps its type only, not its message or traceback;
+  access log lines leave out query strings and the visitor's address; libraries that log whole
+  addresses (`httpx`, `httpx2`) log warnings only. `tests/test_telemetry.py` searches with a marker word and checks
+  it appears in no span, event, metric or log.
+- **The worker's heartbeat**: it touches `TRIALWATCH_HEARTBEAT_FILE` (default `/tmp/trialwatch-worker.alive`) every
+  loop and every 30 seconds while a job runs; compose's healthcheck reads its age.
+
+## Grafana
+
+Admins open `https://TRIALWATCH_DOMAIN/grafana/`, signed in through TrialWatch: before each request caddy asks
+`web` who is signed in (`/auth/grafana`: an admin's email in `X-WEBAUTH-USER`; someone not signed in goes to the
+sign-in page first; anyone else is refused), and Grafana believes that header and nothing else (auth proxy; its own
+login form and anonymous access are off; caddy drops the header from a browser). Only admins have the action
+`ops.view`; moderators see `/admin/jobs` and `/admin/spend` but not Grafana.
+
+- **Dashboards** (folder TrialWatch, `ops/grafana/dashboards/`, changed only there): HTTP (requests, server
+  errors, latency by route, warning and error logs), Jobs (heartbeat, queue, attempts, durations, what waits for a
+  person), Spend (this month and the cap, per day by model and operation, the costliest runs), Checks (judgements by
+  label, agreement with gold, model calls), Sources (freshness, fetches, runs), Search (searches by outcome, empty
+  share, duration). Explore searches traces (Tempo) and logs (Loki); a job's page links its trace.
+- **Alerts** (`ops/grafana/provisioning/alerting/trialwatch.yaml`): the worker stopped (no heartbeat for 5
+  minutes), a job failed or is held, a job waits over an hour, spend at 80% of the cap, more than 1% server errors
+  over 10 minutes, the web server sends nothing, the database does not answer, no backup in 26 hours. They show in
+  Grafana's Alerting page; to be told, give Grafana a contact point (`GF_SMTP_*` settings in compose, or one added
+  there).
+- **Postgres** is read through the `report` schema's views only (queue, spend, checks, sources, backups), by
+  `grafana_ro`, which can read nothing else: no person's name or email, no session, no model request or answer, no
+  document. Latency, errors and searches come from the metrics.
+- **Kept**: metrics 90 days, logs 30, traces 7 (`ops/lgtm/`, volume `lgtm-data`); jobs' progress lines 90 days after
+  they end, and ended sign-in sessions not at all (the worker, daily). Business data is kept.
+
+## Backups
+
+`backup` runs `pg_dump -Fc` into `./data/backups/` when it starts and then every day, keeps 14 days
+(`BACKUP_KEEP_DAYS`), and records each in `core.backup` (an alert fires when the newest is 26 hours old). Copy
+`./data/backups/` off the machine from the host, e.g. with `restic` or `rclone` in a nightly cron. To restore
+one: stop `web`, `worker` and `backup`, then
+`docker compose exec -T db pg_restore -U <user> -d <database> --clean --if-exists < data/backups/<file>.dump`,
+and start them again.
+
 ## Spend
 
-Every billed model call is a row in `core.api_call` with its tokens and its cost in US dollars, priced at
-Anthropic's list prices in `src/trialwatch/prices.json` (each row keeps the prices it was charged at; a model
+Every model call is one row in `core.llm_call`, kept once: the request as sent and the answer (a check's trace
+and an AI tagging name it), and each billed attempt with its tokens and its cost in US dollars, priced at
+Anthropic's list prices in `src/trialwatch/prices.json` (each attempt keeps the prices it was charged at; a model
 missing from the list is shown as unpriced, never as $0; a new model needs a price before it runs). Runs,
 judgements, trace steps and jobs show their cost to staff, and `/admin/spend` shows the totals: this month, the
 last 30 days, all time, by month, model, operation and actor, and the costliest runs. An admin sets a monthly cap
@@ -190,14 +260,14 @@ erDiagram
     job["jobs.job"]
     job_line["jobs.job_line"]
     schedule["jobs.schedule"]
-    api_call["core.api_call"]
+    llm_call["core.llm_call"]
     actor ||--o| app_user : "writes as"
     app_user ||--o{ session : "signed in"
     actor ||--o{ job : "created"
     job ||--o{ job_line : "progress"
     schedule |o--o{ job : "started"
-    job |o--o{ api_call : "billed calls"
-    actor ||--o{ api_call : "for"
+    job |o--o{ llm_call : "model calls"
+    actor ||--o{ llm_call : "for"
 ```
 
 | Table | What it holds |
@@ -207,7 +277,7 @@ erDiagram
 | `jobs.job` | one job: kind (sync, transfer, check, annotate, refresh), params, automatic (the cap applies), schedule, priority, status (queued, running, held, succeeded, failed, cancelled), attempts and retries, the worker on it and its heartbeat |
 | `jobs.job_line` | a job's progress lines, per attempt |
 | `jobs.schedule` | when a job starts by itself: name, kind and params, frequency (daily, weekly, monthly), weekday, hour UTC, enabled, next run |
-| `core.api_call` | every billed call to a paid API: model, operation (check, annotate), run, trial, job, tokens, cost, the prices charged, the provider's request id |
+| `core.llm_call` | every model call, one row each, failed ones too: model asked and model that answered, operation (check, annotate), run, trial, call number, job, the request as sent (no system prompt; files by sha256), the answer, stop reason, latency, error, the provider's request id, and each billed attempt priced (more than one after a fallback) with their sums: tokens, cost, attempts on an unpriced model |
 | `core.app_setting` | settings an admin changes (audited): `spend.monthly_cap_usd` |
 | `public.schema_migrations` | dbmate's own table: which migrations are applied |
 
@@ -272,9 +342,12 @@ uv run --group docs mkdocs serve
 - **Run the refresh now.** `uv run trialwatch jobs refresh` queues one.
 - **Checks are held.** This month's spend reached the cap on `/admin/spend`: raise it, or wait for next month.
 - **Locked out.** `uv run trialwatch user password EMAIL`, or `user add` a new admin.
-- **Someone reports an error page.** Search the web log for the reference it shows (`unhandled error, reference
-  …`).
-- **Reset the database** (until the first deploy): back it up first with
-  `docker compose exec db pg_dump -U <user> -Fc <database> > data/backups/<date>.dump`, then
+- **Someone reports an error page.** Its reference is the request's trace id: Grafana's Explore, Tempo, finds the
+  trace, and Loki the log line (`unhandled error, reference …`).
+- **An alert fired.** Its description says where to look; the dashboards of the same name show what led up to it.
+- **The worker stopped.** `docker compose ps worker`, `docker compose logs worker`; `docker compose up -d worker`.
+  A job it was running goes back to the queue once its heartbeat lapses.
+- **Reset the database** (until the first deploy): back it up first (on a server the newest file in
+  `data/backups/`; elsewhere `docker compose exec db pg_dump -U <user> -Fc <database> > data/backups/<date>.dump`), then
   `docker compose down -v` and `docker compose run --rm migrate`, and reload: `geo load`, `vocab load`,
   `source sync ctis`, `source transfer ctis --which recruiting`, `search annotate`, `check evidence`.

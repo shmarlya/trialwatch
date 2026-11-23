@@ -18,7 +18,7 @@ from trialwatch.db.core import Page
 from trialwatch.llm import FALLBACK_BETA, CallResult, MessagesClient, uses_fallbacks
 
 
-# What its model calls are for, in core.api_call
+# What its model calls are for, in core.llm_call
 OPERATION = "check"
 
 

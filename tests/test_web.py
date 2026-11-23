@@ -290,7 +290,8 @@ def test_an_unhandled_error_is_logged_with_the_reference_the_page_shows(app_conn
     with caplog.at_level("ERROR", logger="trialwatch.web"):
         page = client.get("/find", params={"q": "private-marker"}, headers={"accept": "text/html"})
     assert page.status_code == 500 and "Something went wrong" in page.text
-    reference = re.search(r"<code>([0-9a-f]{8})</code>", page.text).group(1)
+    # a random reference, or the request's trace id when it is traced (an admin finds both in Grafana)
+    reference = re.search(r"<code>([0-9a-f]{8}|[0-9a-f]{32})</code>", page.text).group(1)
     logged = caplog.text
     assert reference in logged and "RuntimeError" in logged and "/find" in logged
     # neither the search nor the error's message (which quotes it) reaches the log or the page

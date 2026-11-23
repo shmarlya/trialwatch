@@ -1,9 +1,27 @@
 # The site's front door: HTTPS for TRIALWATCH_DOMAIN (a Let's Encrypt certificate; for localhost, one of
-# Caddy's own), then everything to the web service.
+# Caddy's own), then everything to the web service, and /grafana/ to Grafana for TrialWatch's admins.
 #
 # No access log here on purpose: a search's address holds what someone looked for, which can be about
 # their health (ADR-008). The web service logs each request without its query string.
 {$TRIALWATCH_DOMAIN} {
 	encode zstd gzip
-	reverse_proxy web:8010
+
+	# Grafana (compose's lgtm), signed in through TrialWatch: before each request TrialWatch says who is
+	# signed in (/auth/grafana: an admin's email, else the sign-in page or a refusal), and Grafana believes
+	# that header (auth.proxy). One a browser sends itself is dropped first. `route` keeps these steps in
+	# the order written: Caddy's own order would run forward_auth first and then drop the header it set.
+	handle /grafana* {
+		route {
+			request_header -X-WEBAUTH-USER
+			forward_auth web:8010 {
+				uri /auth/grafana
+				copy_headers X-WEBAUTH-USER
+			}
+			reverse_proxy lgtm:3000
+		}
+	}
+
+	handle {
+		reverse_proxy web:8010
+	}
 }

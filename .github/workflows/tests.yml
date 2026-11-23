@@ -1,6 +1,6 @@
-# Runs the whole test suite on every push and pull request, against a Postgres of its own: the tests
-# create their own database from db/migrations/ (tests/conftest.py). No model or CTIS calls: those
-# are faked in the tests.
+# Runs ruff and the whole test suite on every push and pull request. The tests run against a Postgres of
+# their own: they create their own database from db/migrations/ (tests/conftest.py). No model or CTIS
+# calls: those are faked in the tests.
 name: Tests
 
 on:
@@ -13,6 +13,23 @@ permissions:
   contents: read
 
 jobs:
+  # STYLE.md as far as a tool can check it; the rules and the files not formatted yet are in pyproject.toml
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.12.13"
+          enable-cache: true
+
+      - name: Lint
+        run: uv run --locked ruff check
+
+      - name: Format
+        run: uv run --locked ruff format --check
+
   pytest:
     runs-on: ubuntu-latest
     services:

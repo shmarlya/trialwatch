@@ -1,50 +1,63 @@
 # Python style: readable for people who don't read Python
 
-TrialWatch's code is read by people who know what the project does but not Python's shortcuts.
-So the code says each step out loud, even when Python could say it in one line. Longer and plain
-beats short and clever.
+TrialWatch's code is read by people who know what the project does but not Python's shortcuts. So the code
+says each step out loud. Plain beats clever; short is fine while it stays plain.
 
-## Rules
+Ruff checks what a tool can see: `uv run ruff check` and `uv run ruff format`, with the rules in
+`pyproject.toml`, run in CI and as a pre-commit hook. The rest is for review.
 
-1. **Loops instead of comprehensions.** Build lists, dicts and sets with a `for` loop and
-   `append` / assignment. No `[x for x in ...]`, `{k: v for ...}`, `{x for ...}`, and no generator
-   expressions inside calls (`sum(x for ...)`, `", ".join(x for ...)`, `any(...)`, `all(...)`).
+## Required
+
+1. **One step per line, named values.** Give intermediate results a name that says what they are; don't
+   chain several calls or conditions on one line.
+
+2. **Full names.** `question`, not `q`; `page`, not `p`. Comprehension variables too.
+
+3. **Comments say why, not what.** The code says what happens; a comment explains a reason, a rule from
+   the domain (Bruckner et al., CTIS, ADR-001), or a trap.
+
+4. **No lambdas, no functions defined inside functions.** Give every function a name at module level and
+   pass what it needs as arguments.
+
+## Allowed while they stay simple
+
+5. **One-level comprehensions.** One `for`, at most one `if`, a plain expression, on one line:
 
    ```python
-   # not this
-   keys = [q.key for q in questions if q.key.startswith("endpoint:")]
-   # but this
-   keys = []
-   for question in questions:
-       if question.key.startswith("endpoint:"):
-           keys.append(question.key)
+   keys = [question.key for question in questions if question.key.startswith("endpoint:")]
    ```
 
-2. **Name the question instead of `any()` / `all()`.** Write a small function whose name says
-   what it checks, with a plain loop inside (`def some_endpoint_not_reported(values): ...`).
+   Two `for`s, an `if` / `else` inside, or a comprehension that needs a second line becomes a loop:
 
-3. **`if` statements instead of inline conditions.** No `a if condition else b`, and no `or` /
-   `and` used to pick a value (`name or "unknown"`, `items or []`). Write the `if` out.
+   ```python
+   rows = []
+   for trial in trials:
+       for site in trial.sites:
+           if site.country in countries:
+               rows.append((trial.id, site.city))
+   ```
 
-4. **No lambdas, no functions defined inside functions.** Give every function a name at module
-   level and pass what it needs as arguments.
+6. **`any()` and `all()`** over a one-level generator, when the question reads at a glance
+   (`if any(page.is_readable for page in pages):`). When it needs more, name the question: a small function
+   with a plain loop inside (`def some_endpoint_not_reported(values): ...`).
 
-5. **No star-unpacking.** No `*rest, last = row` and no `(*values, extra)`. Take items by name
-   or position, one per line. Unpacking a function's documented pair result
-   (`snapshot_id, payload = latest_snapshot(...)`) is fine. The one allowed `**` is passing a
-   prepared argument dictionary to a library call, with a comment saying so.
+7. **Short ternaries.** `label = "full" if complete else "not full"`: one line, plain values, never nested.
+   Anything longer is an `if` statement.
 
-6. **No dictionary tricks.** No `setdefault`, no `dict.fromkeys`, no `dict(zip(...))`, no `|` to
-   merge. Check `if key not in d:` and assign.
+## Still avoid
 
-7. **No arithmetic on booleans.** Not `count += found`; write `if found: count += 1`.
+8. **`or` / `and` to pick a value** (`name or "unknown"`, `items or []`): `0`, `""` and `[]` count as false
+   too. Write the `if`, or a ternary that says what it tests (`name if name is not None else "unknown"`).
 
-8. **One step per line, named values.** Give intermediate results a name that says what they
-   are; avoid chaining several calls or conditions on one line. Prefer full names (`question`,
-   not `q`; `page`, not `p`).
+9. **Star-unpacking.** No `*rest, last = row` and no `(*values, extra)`; take items by name or position.
+   Unpacking a function's documented pair result (`snapshot_id, payload = latest_snapshot(...)`) is fine.
+   The one allowed `**` is passing a prepared argument dictionary to a library call, with a comment
+   saying so.
 
-9. **Comments say why, not what.** The code says what happens; a comment explains a reason, a
-   rule from the domain (Bruckner et al., CTIS, ADR-001), or a trap.
+10. **Dictionary tricks.** No `setdefault`, no `dict.fromkeys`, no `dict(zip(...))`, no `|` to merge.
+    Check `if key not in d:` and assign.
+
+11. **Arithmetic on booleans.** Not `count += found`; write `if found: count += 1`.
 
 ## Kept on purpose
 
@@ -55,7 +68,8 @@ These are part of how the libraries are used and read naturally: `with` blocks, 
 ## Not changed by a style edit
 
 Behaviour, public function names, CLI options and output, SQL text, and test expectations. A
-style edit that changes a test result is a bug.
+style edit that changes a test result is a bug. Code written under the stricter rules keeps its loops
+until its own refactor touches it; nobody rewrites loops into comprehensions in a sweep.
 
 ## UI (web interface)
 

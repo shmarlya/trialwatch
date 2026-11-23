@@ -133,11 +133,19 @@ the model (`ANTHROPIC_API_KEY` from `.env`). On the web interface, model checks 
 run" to send. A trial can be checked again, also with another setup to compare runs. The weekly refresh checks,
 with the default setup, the trials never judged or whose judgement is outdated ([operations](operations.md#jobs-the-worker-and-the-weekly-refresh)).
 
+The command line, the worker's check job and the gold evaluation all run a check the same way (`run` in
+`checks/evidence.py`), and a dry run shows the same preview everywhere. Only what happens to a trial whose evidence
+is not complete and current differs, by who chose it: a trial a person asked for is refused before anything is sent,
+with why; a trial TrialWatch chose (the refresh) or a gold evaluation took is left out, and the run's summary says
+why. With no trial left, no run is started.
+
 ## Code
 
 | Where | What |
 |---|---|
-| `checks/evidence.py` | the evidence check: questions, calls, widening, judgement |
+| `checks/evidence.py` | the evidence check's one entry point, `run` (the command line, jobs and gold evaluations all use it), and `check_trial`'s steps: gather, questions, ask, verify, judge, save |
+| `checks/ask.py` | the request of a call (page text or whole files, one skeleton) and the answers by key |
+| `checks/trace.py` | the trace steps a trial's page shows |
 | `checks/retrieval.py` | full-text search per question |
 | `checks/verify.py` | quote verification, readable pages |
 | `checks/requirements.py`, `requirement_sets/` | requirement sets and their rules |

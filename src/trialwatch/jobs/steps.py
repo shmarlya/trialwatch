@@ -14,8 +14,6 @@ from trialwatch import llm
 from trialwatch.checks import evidence
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
-from trialwatch.checks.prompts import load_prompt
-from trialwatch.checks.verify import has_readable_text
 from trialwatch.db import core
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
@@ -213,60 +211,41 @@ def _chosen_trials(conn: psycopg.Connection, job: Job, requirement_set) -> list[
     return left
 
 
-def _without_unready(ctx: Context, conn: psycopg.Connection, trial_ids: list[int], requirement_set) -> list[int]:
-    """An automatic check skips trials whose evidence changed or broke since they were chosen (the next
-    refresh takes them); a person's check refuses them, as on the command line."""
-    reasons = readiness.not_ready(conn, trial_ids, requirement_set.document_kinds)
-    if not reasons:
-        return trial_ids
-    if not ctx.job.automatic:
-        try:
-            evidence.refuse_unready(conn, trial_ids, requirement_set)
-        except evidence.NotReady as exc:
-            raise PermanentError(str(exc)) from exc
-    names = core.trial_names(conn, list(reasons))
-    ready = []
-    for trial_id in trial_ids:
-        if trial_id in reasons:
-            ctx.add(f"skipped {names[trial_id]}: {reasons[trial_id]}")
-        else:
-            ready.append(trial_id)
-    return ready
-
-
 def run_check(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
     params = job.params
     try:
         settings = check_settings.load(params.get("config", check_settings.DEFAULT))
     except (FileNotFoundError, ValueError) as exc:
         raise PermanentError(str(exc)) from exc
-    prompt = load_prompt(settings.prompt)
     requirement_set = requirement_sets.load(settings.requirements)
     trial_ids = _chosen_trials(conn, job, requirement_set)
-    trial_ids = _without_unready(ctx, conn, trial_ids, requirement_set)
+    # an automatic check skips trials whose evidence changed or broke since they were chosen (the next
+    # refresh takes them); a person's check refuses them, as on the command line
+    unready = evidence.REFUSE
+    if job.automatic:
+        unready = evidence.SKIP
     ctx.add(f"{len(trial_ids)} trials · {settings.summary()}")
     if not trial_ids:
         return Outcome({"trials": 0})
     if params.get("dry_run"):
-        names = core.trial_names(conn, trial_ids)
-        for trial_id in trial_ids:
-            questions, pages = evidence.preview_trial(conn, trial_id, requirement_set)
-            readable = 0
-            for page in pages:
-                if has_readable_text(page):
-                    readable += 1
-            ctx.add(f"{names[trial_id]}: {len(questions)} questions, {len(pages)} pages ({readable} readable)")
+        for preview in evidence.preview(conn, trial_ids, settings):
+            ctx.add(f"{preview.name}: {len(preview.questions)} questions, {len(preview.pages)} pages "
+                    f"({preview.readable} readable)")
         ctx.add("dry run: nothing was sent")
         return Outcome({"trials": len(trial_ids), "dry_run": True})
     # an automatic check never starts over the cap; it is held before anything is sent
     if ctx.should_stop():
         return Outcome({"trials": 0})
     try:
-        summary = evidence.run(conn, anthropic_client(), trial_ids, settings, prompt, progress=ctx.add,
-                               requirement_set=requirement_set, should_stop=ctx.should_stop)
+        summary = evidence.run(conn, anthropic_client(), trial_ids, settings, progress=ctx.add,
+                               should_stop=ctx.should_stop, unready=unready)
+    except evidence.NotReady as exc:
+        raise PermanentError(str(exc)) from exc
     except llm.BAD_CREDENTIALS as exc:
         # the same for every trial and every attempt: someone has to fix the API key
         raise PermanentError(f"{type(exc).__name__}: {exc}") from exc
+    if summary.run_id is None:
+        return Outcome({"trials": 0, "skipped": len(summary.skipped)})
     ctx.add(summary.summary())
     passing = {}
     left_to_people = {}

@@ -702,15 +702,13 @@ def check_evidence(
             raise typer.BadParameter(str(exc)) from exc
         typer.echo(f"{settings.summary()} (prompt sha256 {system_prompt.sha256.hex()[:12]}) · {len(trial_ids)} trials")
         if dry_run:
-            names = core_db.trial_names(conn, trial_ids)
-            for trial_id in trial_ids:
-                questions, pages = evidence.preview_trial(conn, trial_id, requirement_set)
-                typer.echo(f"{names[trial_id]} (trial {trial_id}): {len(pages)} pages, {len(questions)} questions")
-                for question in questions:
+            for preview in evidence.preview(conn, trial_ids, settings):
+                typer.echo(f"{preview.name}: {len(preview.pages)} pages ({preview.readable} readable), "
+                           f"{len(preview.questions)} questions")
+                for question in preview.questions:
                     typer.echo(f"  {question.key}")
             return
-        summary = evidence.run(conn, llm.client(), trial_ids, settings, system_prompt, progress=typer.echo,
-                               requirement_set=requirement_set)
+        summary = evidence.run(conn, llm.client(), trial_ids, settings, progress=typer.echo)
     typer.echo(summary.summary())
     _echo_failures(summary.failed)
     if summary.failed:
@@ -924,7 +922,6 @@ def gold_eval(
                                                   progress=typer.echo)
     typer.echo(transferred.summary())
     _echo_failures(transferred.failed)
-    system_prompt = load_prompt(settings.prompt)
     with db.connect_system() as conn:
         found = core_db.trials_with_scheme(conn, "eu-ct", ct_numbers)
         trial_ids = []
@@ -932,14 +929,10 @@ def gold_eval(
             if ct_number in found:
                 trial_ids.append(found[ct_number])
         # a trial whose evidence did not come in completely is not checked: it counts as missing
-        blocked = readiness.not_ready(conn, trial_ids, requirement_set.document_kinds)
-        ready = []
-        for trial_id in trial_ids:
-            if trial_id not in blocked:
-                ready.append(trial_id)
-        typer.echo(f"{len(ready)} of {len(ct_numbers)} trials ready for the check")
-        summary = evidence.run(conn, llm.client(), ready, settings, system_prompt, progress=typer.echo,
-                               requirement_set=requirement_set)
+        summary = evidence.run(conn, llm.client(), trial_ids, settings, progress=typer.echo, unready=evidence.SKIP)
+        typer.echo(f"{len(trial_ids) - len(summary.skipped)} of {len(ct_numbers)} trials ready for the check")
+        if summary.run_id is None:
+            raise typer.Exit(1)
         scored = gold_compare.compare_run(conn, summary.run_id, chosen)
         retrieval = gold_evaluate.retrieval_measures(conn, summary.run_id)
     loaded_gates = gold_evaluate.load_gates(gates)

@@ -19,22 +19,19 @@ run records the prompt and requirement set it used. On the autonomy ladder (card
 a fixed workflow with one LLM step inside. A run adds rows; nothing is updated.
 """
 
-import base64
-import html
-import json
-import re
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
 
 import psycopg
 
 from trialwatch import llm
 from trialwatch.checks import publishing, requirements
-from trialwatch.checks.prompts import Prompt
+from trialwatch.checks import trace as tracing
+from trialwatch.checks.ask import (MAX_FILES_BYTES, OPERATION, ask, build_files_request, build_request,
+                                   found_value, is_pdf, question_keys)
+from trialwatch.checks.prompts import Prompt, load_prompt
 from trialwatch.checks.requirements import Question, RequirementSet
 from trialwatch.checks.retrieval import pages_to_send_first, search, search_query_for
 from trialwatch.checks.settings import Settings
@@ -42,19 +39,11 @@ from trialwatch.checks.verify import every_page_readable, has_readable_text, som
 from trialwatch.db import checks as checks_db
 from trialwatch.db import core
 from trialwatch.db.core import Page
-from trialwatch.llm import FALLBACK_BETA, CallResult, MessagesClient, uses_fallbacks
+from trialwatch.llm import CallResult, MessagesClient
 from trialwatch.progress import Progress, report
 from trialwatch.trials import readiness
 
 CHECK_NAME = "evidence"
-# What its model calls are for, in core.api_call
-OPERATION = "check"
-# What a quote is evidence of; requirement sets say which of these mean "not reported"
-KINDS = ("numeric_result", "narrative_only", "chart_only", "redacted", "not_analysed", "other")
-# The model's three answers to "did you find it?": "dont_know" is always allowed and never a guess
-FOUND_ANSWERS = ("yes", "no", "dont_know")
-# A request may be 32 MB; files travel base64-encoded (4/3 larger), plus room for the questions
-MAX_FILES_BYTES = 23 * 1024 * 1024
 
 
 def trial_pages(conn: psycopg.Connection, trial_id: int, requirement_set: RequirementSet) -> list[Page]:
@@ -63,207 +52,6 @@ def trial_pages(conn: psycopg.Connection, trial_id: int, requirement_set: Requir
 
 
 # --- extraction ------------------------------------------------------------------------------
-
-# Text in a document or a title that looks like one of the tags the request fences data with
-FENCE_TAG = re.compile(r"<(/?\s*(?:trial|documents|document|page)\b)", re.IGNORECASE)
-
-
-def fenced(text: str) -> str:
-    """Data text that can't close or open the tags around it: a "<" starting one of our tag names
-    becomes "‹" (a PDF or title could otherwise end its <page> and talk outside it)."""
-    return FENCE_TAG.sub("‹\\1", text)
-
-
-def render_pages(pages: list[Page]) -> str:
-    parts = []
-    current = None
-    for page in pages:
-        if page.doc != current:
-            if current is not None:
-                parts.append("</document>")
-            title = html.escape(page.title, quote=True)
-            parts.append(f'<document number="{page.doc}" title="{title}">')
-            current = page.doc
-        parts.append(f'<page number="{page.page_no}">\n{fenced(page.text)}\n</page>')
-    if current is not None:
-        parts.append("</document>")
-    return "\n".join(parts)
-
-
-def answer_schema(keys: list[str]) -> dict:
-    item = {
-        "type": "object",
-        "properties": {
-            "key": {"type": "string", "enum": keys},
-            "found": {"type": "string", "enum": list(FOUND_ANSWERS)},
-            "quote": {"type": "string"},
-            "document": {"type": "integer"},
-            "page": {"type": "integer"},
-            "kind": {"type": "string", "enum": list(KINDS)},
-            "note": {"type": "string"},
-        },
-        "required": ["key", "found", "quote", "document", "page", "kind", "note"],
-        "additionalProperties": False,
-    }
-    return {"type": "object", "properties": {"answers": {"type": "array", "items": item}},
-            "required": ["answers"], "additionalProperties": False}
-
-
-def question_keys(questions: list[Question]) -> list[str]:
-    keys = []
-    for question in questions:
-        keys.append(question.key)
-    return keys
-
-
-def describe_trial(context: dict) -> str:
-    """What the model is told about the trial and its documents, from data (no source is assumed)."""
-    lines = [f"Trial: {context['name']}"]
-    if context.get("title"):
-        lines.append(f"Title: {context['title']}")
-    if context.get("source"):
-        lines.append(f"Registered information from: {context['source']}")
-    for document in context.get("documents", []):
-        lines.append(f"Document {document['doc']}: {document['title']} ({document['kind']})")
-    return fenced("\n".join(lines))
-
-
-def build_request(settings: Settings, prompt: Prompt, pages: list[Page], questions: list[Question],
-                  context: dict) -> dict:
-    question_lines = []
-    for question in questions:
-        line = f"- {question.key}: {question.text}"
-        if question.guidance:
-            line = f"{line}\n  ({question.guidance})"
-        question_lines.append(line)
-    asked = "\n".join(question_lines)
-    content = (f"<trial>\n{describe_trial(context)}\n</trial>\n\n"
-               f"<documents>\n{render_pages(pages)}\n</documents>\n\n"
-               f"Answer each of these questions once, by its key:\n{asked}")
-    schema = answer_schema(question_keys(questions))
-    request: dict[str, Any] = {
-        "model": settings.model,
-        "max_tokens": settings.max_tokens,
-        "system": prompt.text,
-        "thinking": {"type": "adaptive"},
-        "output_config": {"effort": settings.effort,
-                          "format": {"type": "json_schema", "schema": schema}},
-        "messages": [{"role": "user", "content": content}],
-    }
-    _add_fallbacks(settings, request)
-    return request
-
-
-def _add_fallbacks(settings: Settings, request: dict) -> None:
-    if uses_fallbacks(settings.model, settings.fallbacks):
-        request["betas"] = [FALLBACK_BETA]
-        request["fallbacks"] = "default"
-
-
-def is_pdf(file: core.TrialFile) -> bool:
-    if file.media_type == "application/pdf":
-        return True
-    return file.content.startswith(b"%PDF")
-
-
-def build_files_request(settings: Settings, prompt: Prompt, files: list[core.TrialFile], questions: list[Question],
-                        context: dict) -> dict:
-    """The files method's request: each document's file as a document block (numbered as in <trial>),
-    then the trial and the questions as text."""
-    content: list[dict] = []
-    for file in files:
-        encoded = base64.standard_b64encode(file.content).decode()
-        content.append({"type": "document", "title": f"Document {file.doc}: {file.title}",
-                        "source": {"type": "base64", "media_type": "application/pdf", "data": encoded}})
-    question_lines = []
-    for question in questions:
-        line = f"- {question.key}: {question.text}"
-        if question.guidance:
-            line = f"{line}\n  ({question.guidance})"
-        question_lines.append(line)
-    asked = "\n".join(question_lines)
-    text = (f"<trial>\n{describe_trial(context)}\n</trial>\n\n"
-            "The documents are the attached files, in the order of their numbers above; a page number is the "
-            "file's own 1-based page.\n\n"
-            f"Answer each of these questions once, by its key:\n{asked}")
-    content.append({"type": "text", "text": text})
-    request: dict[str, Any] = {
-        "model": settings.model,
-        "max_tokens": settings.max_tokens,
-        "system": prompt.text,
-        "thinking": {"type": "adaptive"},
-        "output_config": {"effort": settings.effort,
-                          "format": {"type": "json_schema", "schema": answer_schema(question_keys(questions))}},
-        "messages": [{"role": "user", "content": content}],
-    }
-    _add_fallbacks(settings, request)
-    return request
-
-
-def request_for_trace(request: dict, files: list[core.TrialFile] | None = None) -> dict:
-    """The request as sent, for the trace: without the system prompt (stored once with the run) and
-    with each attached file's bytes replaced by its sha256 and size (the file is in core.file)."""
-    by_title = {}
-    if files:
-        for file in files:
-            by_title[f"Document {file.doc}: {file.title}"] = file
-    sent = {}
-    for name, value in request.items():
-        if name == "system":
-            continue
-        if name != "messages":
-            sent[name] = value
-            continue
-        messages = []
-        for message in value:
-            content = message["content"]
-            if isinstance(content, str):
-                messages.append(message)
-                continue
-            blocks = []
-            for block in content:
-                if block.get("type") == "document":
-                    file = by_title.get(block.get("title"))
-                    stored = {"type": "document", "title": block.get("title"), "source": {"type": "file"}}
-                    if file is not None:
-                        stored["source"] = {"type": "file", "sha256": file.sha256.hex(), "bytes": file.size_bytes,
-                                            "media_type": "application/pdf"}
-                    blocks.append(stored)
-                else:
-                    blocks.append(block)
-            messages.append({"role": message["role"], "content": blocks})
-        sent[name] = messages
-    return sent
-
-
-def ask(client: MessagesClient, request: dict) -> tuple[CallResult, dict[str, dict]]:
-    """One model call of the check (trialwatch.llm.call), and the answer to each question by its key."""
-    result = llm.call(client, request, OPERATION)
-    answers = {}
-    if result.error is not None:
-        return result, answers
-    try:
-        parsed = json.loads(result.raw_text)
-        for answer in parsed["answers"]:
-            key = answer["key"]
-            if key not in answers:
-                answers[key] = answer
-            elif _differs(answers[key], answer):
-                # two different answers to one question: neither is settled by its position, a person looks
-                answers[key] = {"key": key, "found": "dont_know", "quote": "", "document": 0, "page": 0,
-                                "kind": "other", "note": "the model answered this question twice, differently"}
-    except (ValueError, KeyError, TypeError) as exc:
-        result.error = f"invalid answer: {type(exc).__name__}: {exc}"
-        answers = {}
-    return result, answers
-
-
-def _differs(first: dict, second: dict) -> bool:
-    """Two answers to one question that say different things."""
-    for name in ("found", "kind", "quote", "document", "page"):
-        if first.get(name) != second.get(name):
-            return True
-    return False
 
 
 def _milliseconds_since(started: float) -> int:
@@ -334,106 +122,6 @@ def record_calls(conn: psycopg.Connection, run_id: int, trial_id: int, result: T
         llm.record(conn, call, operation=OPERATION, check_run_id=run_id, trial_id=trial_id, call_number=number)
 
 
-class Trace:
-    """The steps of judging one trial, in order, for checks.step: what was asked, searched, sent,
-    answered, verified and decided. Pages are referenced by file and page number, not copied."""
-
-    def __init__(self) -> None:
-        self.steps: list[dict] = []
-
-    def add(self, name: str, data: dict, duration_ms: int | None = None) -> None:
-        self.steps.append({"name": name, "at": datetime.now(timezone.utc), "duration_ms": duration_ms, "data": data})
-
-
-def _questions_data(questions: list[Question], requirement_set: RequirementSet, context: dict, record) -> dict:
-    listed = []
-    for question in questions:
-        listed.append({"key": question.key, "text": question.text, "part": question.part, "rule": question.rule,
-                       "guidance": question.guidance})
-    record_data = None
-    if record is not None:
-        record_data = {"id": record.id, "source": record.source, "fetched_at": record.fetched_at.isoformat()}
-    return {"requirements": requirement_set.name, "requirements_sha256": requirement_set.sha256.hex(),
-            "trial": context, "record": record_data, "questions": listed}
-
-
-def _pages_data(pages: list[Page], unread: list[str], readable: bool) -> dict:
-    documents = {}
-    for page in pages:
-        if page.doc not in documents:
-            documents[page.doc] = {"doc": page.doc, "title": page.title, "kind": page.kind,
-                                   "file": page.file.hex(), "pages": 0, "unreadable_pages": []}
-        documents[page.doc]["pages"] += 1
-        if not has_readable_text(page):
-            documents[page.doc]["unreadable_pages"].append(page.page_no)
-    listed = []
-    for document in documents.values():
-        listed.append(document)
-    return {"documents": listed, "total_pages": len(pages), "every_page_readable": readable,
-            "documents_without_text": unread}
-
-
-def _call_data(call_number: int, settings: Settings, pages: list[Page], questions: list[Question],
-               request: dict, call: "CallResult", files: list | None = None) -> dict:
-    """One model call for the trace: what was asked, the request exactly as sent (the system prompt is
-    the run's, kept once in checks.run.prompt_text), and the answer exactly as received."""
-    keys = []
-    asked = []
-    for question in questions:
-        keys.append(question.key)
-        asked.append({"key": question.key, "text": question.text})
-    sent = request_for_trace(request, files)
-    files_sent = []
-    if files:
-        for file in files:
-            files_sent.append({"doc": file.doc, "title": file.title, "file": file.sha256.hex(), "bytes": file.size_bytes})
-    return {"call": call_number, "method": settings.method, "model": settings.model, "effort": settings.effort,
-            "questions": keys, "asked": asked, "pages": page_refs(pages), "files": files_sent, "request": sent,
-            "served_by": call.served_by,
-            "stop_reason": call.stop_reason, "input_tokens": call.input_tokens, "output_tokens": call.output_tokens,
-            "cache_write_tokens": call.cache_write_tokens, "cache_read_tokens": call.cache_read_tokens,
-            "cost_usd": _cost_for_trace(call), "error": call.error, "answer": call.raw_text}
-
-
-def _cost_for_trace(call: "CallResult") -> str | None:
-    """The call's cost as a decimal string (JSON has no exact decimals), None when nothing was billed or
-    a model it ran on is not in the price list."""
-    if not call.costs or llm.unpriced_count(call.costs):
-        return None
-    return str(llm.total_cost(call.costs))
-
-
-def _verification_data(evidence: dict[str, Evidence]) -> dict:
-    checked = []
-    for key, item in evidence.items():
-        cited = None
-        if item.page is not None:
-            cited = {"doc": item.page.doc, "file": item.page.file.hex(), "page": item.page.page_no}
-        checked.append({"key": key, "found": item.found, "kind": item.kind, "quote": item.quote, "cited": cited,
-                        "verified": item.verified, "whole_document": item.whole})
-    return {"evidence": checked}
-
-
-def page_ref(page: Page) -> dict:
-    return {"file": page.file.hex(), "page": page.page_no}
-
-
-def page_refs(pages: list[Page]) -> list[dict]:
-    refs = []
-    for page in pages:
-        refs.append(page_ref(page))
-    return refs
-
-
-def found_value(raw: object) -> bool | None:
-    """The model's "found" answer: True, False, or None for "dont_know" (and anything unreadable)."""
-    if raw == "yes" or raw is True:
-        return True
-    if raw == "no" or raw is False:
-        return False
-    return None
-
-
 def questions_to_widen(questions: list[Question], first_answers: dict[str, dict], whole_first: bool,
                        not_reported_kinds: frozenset[str] = frozenset()) -> list[Question]:
     """Questions to ask again with every page (none if all were sent): those not found in the
@@ -483,6 +171,29 @@ def evidence_from_answer(key: str, answer: dict, whole: bool, pages_by_ref: dict
     return Evidence(key, found, answer.get("kind"), quote, page, note, verified, whole)
 
 
+@dataclass(frozen=True)
+class TrialPreview:
+    """What a check of one trial would use now, for a dry run."""
+
+    name: str
+    questions: list[Question]
+    pages: list[Page]
+    # pages with text to quote (a scanned page has none)
+    readable: int
+
+
+def preview(conn: psycopg.Connection, trial_ids: list[int], settings: Settings) -> list[TrialPreview]:
+    """The questions and pages a check of each trial would use now, calling nothing."""
+    requirement_set = requirements.load(settings.requirements)
+    names = core.trial_names(conn, trial_ids)
+    previews = []
+    for trial_id in trial_ids:
+        questions, pages = preview_trial(conn, trial_id, requirement_set)
+        readable = len([page for page in pages if has_readable_text(page)])
+        previews.append(TrialPreview(names[trial_id], questions, pages, readable))
+    return previews
+
+
 def preview_trial(conn: psycopg.Connection, trial_id: int, requirement_set: RequirementSet
                   ) -> tuple[list[Question], list[Page]]:
     """The questions and pages a check of this trial would use now, without calling anything (dry runs)."""
@@ -518,7 +229,7 @@ def trial_context(conn: psycopg.Connection, trial_id: int, record, pages: list[P
 
 def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: Settings, prompt: Prompt,
                    requirement_set: RequirementSet, questions: list[Question], context: dict, pages: list[Page],
-                   readable: bool, result: "TrialResult", trace: "Trace") -> tuple[dict, list[Page], set] | None:
+                   readable: bool, result: "TrialResult", trace: "tracing.Trace") -> tuple[dict, list[Page], set] | None:
     """The text method: send page text (retrieved pages, or every page of a small document set), then
     ask again with every page what retrieved pages could not settle. Returns (answers with whether the
     model read the whole document, pages of the first call, widened keys), or None on a failed call
@@ -534,13 +245,13 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
             found = search(conn, pages, search_query_for(question), settings.top_k)
             per_question[question.key] = found.chosen
             searched.append({"key": question.key, "terms": found.terms, "ranked": found.ranked,
-                             "chosen": page_refs(found.chosen)})
+                             "chosen": tracing.page_refs(found.chosen)})
         trace.add("retrieval", {"whole": False, "top_k": settings.top_k, "questions": searched})
     first = pages_to_send_first(pages, per_question)
     whole_first = len(first) == len(pages)
     first_request = build_request(settings, prompt, first, questions, context)
     call, call_answers = ask(client, first_request)
-    trace.add("call", _call_data(1, settings, first, questions, first_request, call), call.duration_ms)
+    trace.add("call", tracing.call_data(1, settings, first, questions, first_request, call), call.duration_ms)
     count_call(result, 1, call)
     if call.error:
         result.error = call.error
@@ -561,7 +272,7 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
     if retry and fits:
         second_request = build_request(settings, prompt, pages, retry, context)
         again, again_answers = ask(client, second_request)
-        trace.add("call", _call_data(2, settings, pages, retry, second_request, again), again.duration_ms)
+        trace.add("call", tracing.call_data(2, settings, pages, retry, second_request, again), again.duration_ms)
         count_call(result, 2, again)
         if again.error:
             # recorded, not dropped: judging on the first answers alone would pass a failed call off as a
@@ -579,7 +290,7 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
 
 def _ask_with_files(conn: psycopg.Connection, client: MessagesClient, settings: Settings, prompt: Prompt,
                     requirement_set: RequirementSet, trial_id: int, questions: list[Question], context: dict,
-                    pages: list[Page], result: "TrialResult", trace: "Trace") -> tuple[dict, list[Page], set] | None:
+                    pages: list[Page], result: "TrialResult", trace: "tracing.Trace") -> tuple[dict, list[Page], set] | None:
     """The files method: send every document's file whole in one call. The model reads every page of
     every file sent (scanned ones too), so its answers count as the whole document unless a document
     could not be sent. Quotes are still verified against the extracted page text."""
@@ -612,7 +323,7 @@ def _ask_with_files(conn: psycopg.Connection, client: MessagesClient, settings: 
             result.document_versions.append(file.document_version_id)
     request = build_files_request(settings, prompt, sendable, questions, context)
     call, call_answers = ask(client, request)
-    trace.add("call", _call_data(1, settings, pages, questions, request, call, sendable), call.duration_ms)
+    trace.add("call", tracing.call_data(1, settings, pages, questions, request, call, sendable), call.duration_ms)
     count_call(result, 1, call)
     if call.error:
         result.error = call.error
@@ -624,14 +335,53 @@ def _ask_with_files(conn: psycopg.Connection, client: MessagesClient, settings: 
     return answers, pages, set()
 
 
+@dataclass
+class Inputs:
+    """What a check of one trial reads at this moment."""
+
+    # the trial's latest record (its registered information); None: no source gave one
+    record: core.CurrentRecord | None
+    # the page text of the current versions of its documents of the kinds the requirement set reads
+    pages: list[Page]
+    # documents of those kinds whose page text is not extracted yet
+    unread: list[str]
+    # what the model is told about the trial and its documents
+    context: dict
+    # every page has readable text and nothing is unread: an answer from every page counts as the whole document
+    readable: bool
+
+
 def check_trial(conn: psycopg.Connection, client: MessagesClient, run_id: int, trial_id: int,
                 settings: Settings, prompt: Prompt, requirement_set: RequirementSet) -> TrialResult:
-    """Judge one trial of the central model against a requirement set, and store its questions,
-    evidence, judgement, inputs and trace."""
+    """Judge one trial of the central model against a requirement set, in steps, each in its trace:
+    gather the inputs and the questions, ask the model (page text or whole files; questions retrieval
+    could not settle are asked again with every page), verify the quotes, judge with the rules, save
+    the questions, evidence, judgement, inputs and trace."""
     started = time.monotonic()
     result = TrialResult()
-    trace = Trace()
-    # what the check reads at this moment: the latest trial record and the current document versions
+    trace = tracing.Trace()
+    inputs = _gather(conn, trial_id, requirement_set, result)
+    questions = _questions(requirement_set, inputs, trace)
+    result.error = _why_not_asked(settings, requirement_set, inputs)
+    if result.error:
+        _finish_failed(conn, run_id, trial_id, result, trace, started)
+        return result
+    asked = _ask(conn, client, settings, prompt, requirement_set, trial_id, questions, inputs, result, trace)
+    # what was billed is recorded at once, whatever happens to the trial next
+    record_calls(conn, run_id, trial_id, result)
+    if asked is None:
+        _finish_failed(conn, run_id, trial_id, result, trace, started)
+        return result
+    answers, first, widened_keys = asked
+    evidence = _verify(answers, inputs.pages, trace)
+    judged, rules_trace = _judge(requirement_set, questions, evidence, result, trace)
+    _save(conn, run_id, trial_id, questions, evidence, inputs.pages, first, widened_keys, judged, rules_trace, result,
+          trace, started)
+    return result
+
+
+def _gather(conn: psycopg.Connection, trial_id: int, requirement_set: RequirementSet, result: TrialResult) -> Inputs:
+    """What the check reads at this moment: the latest trial record and the current document versions."""
     record = core.trial_current_record(conn, trial_id)
     pages = trial_pages(conn, trial_id, requirement_set)
     unread = core.unread_documents(conn, trial_id, requirement_set.document_kinds)
@@ -640,45 +390,53 @@ def check_trial(conn: psycopg.Connection, client: MessagesClient, run_id: int, t
     for page in pages:
         if page.document_version_id not in result.document_versions:
             result.document_versions.append(page.document_version_id)
-    questions = []
-    if record is not None:
-        questions = requirements.questions_for(requirement_set, record.registered)
     context = trial_context(conn, trial_id, record, pages)
-    trace.add("questions", _questions_data(questions, requirement_set, context, record))
     # a page without readable text, or a linked document not extracted yet, can't have been read, so
     # then no answer counts as "the whole document"
     readable = every_page_readable(pages) and not unread
-    trace.add("pages", _pages_data(pages, unread, readable))
-    if record is None:
-        result.error = "no registered information (no source has given a record for this trial)"
-    elif settings.method == "files":
-        # the files method reads the files themselves (scanned pages too); it checks them when it sends them
-        result.error = None
-    elif not pages:
-        kinds = ", ".join(requirement_set.document_kinds)
-        result.error = f"no page text in documents of the kinds the requirements read ({kinds})"
-    elif not some_page_readable(pages):
-        # a scanned PDF without a text layer: nothing to quote, so no call; a person decides
-        result.error = "no readable page text in its documents (scanned PDF?)"
-    if result.error:
-        _finish_failed(conn, run_id, trial_id, result, trace, started)
-        return result
+    return Inputs(record, pages, unread, context, readable)
 
+
+def _questions(requirement_set: RequirementSet, inputs: Inputs, trace: tracing.Trace) -> list[Question]:
+    """The questions the requirement set asks of this trial's registered information; the trace's first
+    two steps: the questions, and the pages read."""
+    questions = []
+    if inputs.record is not None:
+        questions = requirements.questions_for(requirement_set, inputs.record.registered)
+    trace.add("questions", tracing.questions_data(questions, requirement_set, inputs.context, inputs.record))
+    trace.add("pages", tracing.pages_data(inputs.pages, inputs.unread, inputs.readable))
+    return questions
+
+
+def _why_not_asked(settings: Settings, requirement_set: RequirementSet, inputs: Inputs) -> str | None:
+    """Why the model can't be asked about this trial, or None."""
+    if inputs.record is None:
+        return "no registered information (no source has given a record for this trial)"
     if settings.method == "files":
-        asked = _ask_with_files(conn, client, settings, prompt, requirement_set, trial_id, questions, context, pages,
-                                result, trace)
-    else:
-        asked = _ask_with_text(conn, client, settings, prompt, requirement_set, questions, context, pages, readable,
-                               result, trace)
-    # what was billed is recorded at once, whatever happens to the trial next
-    record_calls(conn, run_id, trial_id, result)
-    if asked is None:
-        _finish_failed(conn, run_id, trial_id, result, trace, started)
-        return result
-    answers = asked[0]
-    first = asked[1]
-    widened_keys = asked[2]
+        # the files method reads the files themselves (scanned pages too); it checks them when it sends them
+        return None
+    if not inputs.pages:
+        kinds = ", ".join(requirement_set.document_kinds)
+        return f"no page text in documents of the kinds the requirements read ({kinds})"
+    if not some_page_readable(inputs.pages):
+        # a scanned PDF without a text layer: nothing to quote, so no call; a person decides
+        return "no readable page text in its documents (scanned PDF?)"
+    return None
 
+
+def _ask(conn: psycopg.Connection, client: MessagesClient, settings: Settings, prompt: Prompt,
+         requirement_set: RequirementSet, trial_id: int, questions: list[Question], inputs: Inputs,
+         result: TrialResult, trace: tracing.Trace) -> tuple[dict, list[Page], set] | None:
+    """The model's answers, by the setup's method: page text (retrieved, widened) or whole files."""
+    if settings.method == "files":
+        return _ask_with_files(conn, client, settings, prompt, requirement_set, trial_id, questions, inputs.context,
+                               inputs.pages, result, trace)
+    return _ask_with_text(conn, client, settings, prompt, requirement_set, questions, inputs.context, inputs.pages,
+                          inputs.readable, result, trace)
+
+
+def _verify(answers: dict, pages: list[Page], trace: tracing.Trace) -> dict[str, Evidence]:
+    """Each answer as evidence, its quote checked against the page it cites."""
     pages_by_ref = {}
     for page in pages:
         pages_by_ref[(page.doc, page.page_no)] = page
@@ -687,7 +445,13 @@ def check_trial(conn: psycopg.Connection, client: MessagesClient, run_id: int, t
         answer = answer_and_whole[0]
         whole = answer_and_whole[1]
         evidence[key] = evidence_from_answer(key, answer, whole, pages_by_ref)
-    trace.add("verification", _verification_data(evidence))
+    trace.add("verification", tracing.verification_data(evidence))
+    return evidence
+
+
+def _judge(requirement_set: RequirementSet, questions: list[Question], evidence: dict[str, Evidence],
+           result: TrialResult, trace: tracing.Trace) -> tuple[dict, dict]:
+    """The requirement set's rules on the verified evidence: its parts and label, and how each was set."""
     judged, rules_trace = requirements.judge(requirement_set, questions, evidence)
     trace.add("rules", {"requirements": requirement_set.name, "parts": judged["parts"], "label": judged["label"],
                         "trace": rules_trace})
@@ -697,7 +461,13 @@ def check_trial(conn: psycopg.Connection, client: MessagesClient, run_id: int, t
             result.evidence += 1
         if item.verified:
             result.verified += 1
+    return judged, rules_trace
 
+
+def _save(conn: psycopg.Connection, run_id: int, trial_id: int, questions: list[Question],
+          evidence: dict[str, Evidence], pages: list[Page], first: list[Page], widened_keys: set, judged: dict,
+          rules_trace: dict, result: TrialResult, trace: tracing.Trace, started: float) -> None:
+    """The questions with the pages shown for each, the evidence, the judgement and the trace, at once."""
     with conn.transaction():
         for question in questions:
             widened = question.key in widened_keys
@@ -707,7 +477,7 @@ def check_trial(conn: psycopg.Connection, client: MessagesClient, run_id: int, t
                 # the first call showed the model every page any question needed
                 sent_pages = first
             checks_db.save_question(conn, run_id, trial_id, question.key, question.item_text,
-                                    page_refs(sent_pages), widened)
+                                    tracing.page_refs(sent_pages), widened)
             item = evidence.get(question.key)
             if item is None:
                 continue
@@ -734,10 +504,9 @@ def check_trial(conn: psycopg.Connection, client: MessagesClient, run_id: int, t
                 rules_trace[question.key]["evidence_id"] = evidence_id
         _save_judgement(conn, run_id, trial_id, judged, rules_trace, result, started)
         checks_db.save_steps(conn, run_id, trial_id, trace.steps)
-    return result
 
 
-def _finish_failed(conn: psycopg.Connection, run_id: int, trial_id: int, result: TrialResult, trace: Trace,
+def _finish_failed(conn: psycopg.Connection, run_id: int, trial_id: int, result: TrialResult, trace: tracing.Trace,
                    started: float) -> None:
     trace.add("error", {"error": result.error})
     with conn.transaction():
@@ -773,8 +542,11 @@ def _save_judgement(conn: psycopg.Connection, run_id: int, trial_id: int, judged
 
 @dataclass
 class RunSummary:
-    run_id: int
+    # None when no trial was left to check (no run was started)
+    run_id: int | None
     labels: dict[str, int] = field(default_factory=dict)
+    # trials left out because their evidence is not complete and current: name -> why (unready=SKIP)
+    skipped: dict[str, str] = field(default_factory=dict)
     # trial name (EU CT number where there is one) -> error
     failed: dict[str, str] = field(default_factory=dict)
     evidence: int = 0
@@ -791,6 +563,8 @@ class RunSummary:
     published: list[int] = field(default_factory=list)
 
     def summary(self) -> str:
+        if self.run_id is None:
+            return f"no run: no trial left to check ({len(self.skipped)} skipped, their evidence not complete)"
         label_counts = []
         for label, count in sorted(self.labels.items()):
             label_counts.append(f"{label} {count}")
@@ -817,6 +591,31 @@ class NotReady(ValueError):
         self.reasons = reasons
 
 
+def _checkable(conn: psycopg.Connection, trial_ids: Iterable[int], requirement_set: RequirementSet, unready: str,
+               summary: RunSummary, progress: Progress) -> list[int]:
+    """The trials to check, each once: every one, when all are ready; else NotReady (REFUSE), or the ready
+    ones with the others in the summary's `skipped` (SKIP)."""
+    wanted = []
+    for trial_id in trial_ids:
+        if trial_id not in wanted:
+            wanted.append(trial_id)
+    if unready == REFUSE:
+        refuse_unready(conn, wanted, requirement_set)
+        return wanted
+    reasons = readiness.not_ready(conn, wanted, requirement_set.document_kinds)
+    if not reasons:
+        return wanted
+    names = core.trial_names(conn, list(reasons))
+    ready = []
+    for trial_id in wanted:
+        if trial_id in reasons:
+            summary.skipped[names[trial_id]] = reasons[trial_id]
+            report(progress, f"skipped {names[trial_id]}: {reasons[trial_id]}")
+        else:
+            ready.append(trial_id)
+    return ready
+
+
 def refuse_unready(conn: psycopg.Connection, trial_ids: list[int], requirement_set: RequirementSet) -> None:
     """Raise NotReady when one of these trials may not be checked against the set yet."""
     reasons = readiness.not_ready(conn, trial_ids, requirement_set.document_kinds)
@@ -829,20 +628,30 @@ def refuse_unready(conn: psycopg.Connection, trial_ids: list[int], requirement_s
     raise NotReady(by_name)
 
 
+# What run() does with a trial whose evidence is not complete and current (trials/readiness.py)
+# a person asked for it: nothing is sent, NotReady says why (the command line, a person's job)
+REFUSE = "refuse"
+# chosen by TrialWatch or for an evaluation: left out, the summary says why (the refresh, gold eval)
+SKIP = "skip"
+
+
 def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[int], settings: Settings,
-        prompt: Prompt, progress: Progress = None, requirement_set: RequirementSet | None = None,
-        should_stop: Callable[[], bool] | None = None) -> RunSummary:
-    """Judge each trial (core.trial ids, each once) in one run, as the session's actor, with a named
-    setup's settings (checks/settings.py), against its requirement set (or the one given). Raises NotReady, before anything is sent, when a
-    trial's evidence is not complete and current (trials/readiness.py not_ready). `should_stop` is asked
-    between trials."""
+        prompt: Prompt | None = None, progress: Progress = None, requirement_set: RequirementSet | None = None,
+        should_stop: Callable[[], bool] | None = None, unready: str = REFUSE) -> RunSummary:
+    """The check's one entry point, for the command line, jobs and gold evaluations alike: judge each
+    trial (core.trial ids, each once) in one run, as the session's actor, with a named setup's settings
+    (checks/settings.py), its prompt and its requirement set (or the ones given). A trial whose evidence
+    is not complete and current is refused (NotReady, before anything is sent) or skipped (`unready`);
+    with no trial left, no run is started. `should_stop` is asked between trials."""
+    if prompt is None:
+        prompt = load_prompt(settings.prompt)
     if requirement_set is None:
         requirement_set = requirements.load(settings.requirements)
-    wanted = []
-    for trial_id in trial_ids:
-        if trial_id not in wanted:
-            wanted.append(trial_id)
-    refuse_unready(conn, wanted, requirement_set)
+    summary = RunSummary(None)
+    wanted = _checkable(conn, trial_ids, requirement_set, unready, summary, progress)
+    if not wanted:
+        report(progress, summary.summary())
+        return summary
     names = core.trial_names(conn, wanted)
     # runs whose process died are closed first, so they never look as if they were still going
     checks_db.close_abandoned_runs(conn)
@@ -851,7 +660,7 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
         prompt_sha256=prompt.sha256, prompt_text=prompt.text, requirements=requirement_set.name,
         requirements_sha256=requirement_set.sha256, requirements_text=requirement_set.text, params=settings.params(),
     )
-    summary = RunSummary(run_id)
+    summary.run_id = run_id
     report(progress, f"run {run_id} started")
     status = "stopped"
     stop_error = None

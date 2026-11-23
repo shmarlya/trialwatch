@@ -89,7 +89,7 @@ Decide what the AI is for, how you will judge it, and how much freedom it gets.
 - **Practice:** Use the least autonomy that passes your evals. Rules, dates and arithmetic stay in code.
 - **Pitfall:** An agent where a for-loop works; asking the model to compute deadlines.
 - **TrialWatch:** Due dates = plain code. Results check = one call + code check. Publication finder = workflow: search → match → verify.
-- **Lab:** Label every box in architecture.excalidraw with its rung on the autonomy ladder (right) and one line why.
+- **Lab:** Label every box in the architecture diagram ([checks](../checks.md)) with its rung on the autonomy ladder (right) and one line why.
 
 ### Autonomy ladder: pick a rung per step (card 02)
 

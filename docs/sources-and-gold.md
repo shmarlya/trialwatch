@@ -164,6 +164,7 @@ erDiagram
     organisation["core.organisation"]
     sponsor["core.trial_sponsor"]
     location["core.trial_location"]
+    profile["core.trial_profile"]
     document["core.document"]
     version["core.document_version"]
     file["core.file"]
@@ -179,6 +180,7 @@ erDiagram
     trial ||--o{ sponsor : "sponsored by"
     organisation ||--o{ sponsor : "sponsors"
     trial ||--o{ location : "runs at"
+    trial ||--o{ profile : "per source"
     trial ||--o{ trial_document : "linked"
     document ||--o{ trial_document : "linked"
     document ||--o{ version : "versions"

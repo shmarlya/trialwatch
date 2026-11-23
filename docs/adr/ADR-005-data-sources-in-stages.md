@@ -100,4 +100,4 @@ We choose B: every source is registered with an adapter and a config, and trials
 
 Decided with the user on 2026-11-21: syncing a source means getting its list of trials (id, name) mapped into our trials; evidence is transferred as each source's config says; checks run only on trials whose evidence was transferred (downloaded and read). The live-search page (C) was proposed first and dropped.
 
-Amended 2026-11-21 after a code review: stale evidence no longer counts as checkable (a sponsor's corrected document would be judged by its old copy). A check reads a trial only when every source that holds it has a complete, current transfer that brought the document kinds the check reads; a stale trial is transferred again first (sources/stages.py, not_ready).
+Amended 2026-11-21 after a code review: stale evidence no longer counts as checkable (a sponsor's corrected document would be judged by its old copy). A check reads a trial only when every source that holds it has a complete, current transfer that brought the document kinds the check reads; a stale trial is transferred again first (now trials/readiness.py, not_ready).

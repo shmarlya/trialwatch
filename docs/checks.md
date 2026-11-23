@@ -2,29 +2,31 @@
 
 A check judges whether a trial's results are reported completely. Every judgement without an error is published
 with its full trace and its agreement with the gold datasets ([ADR-007](adr/ADR-007-public-and-staff-data.md)).
-Today there are two: the **due-date rules** (plain code) and the **evidence check** (a model finds and quotes
-evidence, code checks the quotes, rules decide; [ADR-004](adr/ADR-004-generic-check-requirements-as-data.md)).
-Not built yet: the reviewers' per-part checks, the Europe PMC connector, the publication finder and the
-outcome-switch detector.
+There is one check, the **evidence check**: a model finds and quotes evidence, code checks the quotes, rules
+decide ([ADR-004](adr/ADR-004-generic-check-requirements-as-data.md)). Bruckner et al.'s due-date rules are code too,
+but they only build the gold data ([below](#due-date-rules)). Not built yet: the reviewers' per-part checks, the
+Europe PMC connector, the publication finder and the outcome-switch detector.
 
 ```mermaid
 flowchart TB
     ctis["CTIS<br>trials + results PDFs"] --> adapters["Source adapters<br>CTIS · manual uploads"]
     epmc["Europe PMC<br>publications (planned)"] -.-> adapters
-    worker["Worker<br>job queue · refresh · retries"] -- "triggers" --> adapters
-    adapters --> core["Central model (core)<br>trials · documents · files + page text"]
-    core --> due["Due-date rules<br>plain code"]
-    core --> evidence["Evidence check<br>requirement set + LLM + quote verify"]
+    worker["Worker · job registry (jobs/tasks.py)<br>refresh = sync → transfer → annotate → check"] -- "runs" --> adapters
+    adapters --> ingest["trials/ingest.py<br>one ingest for every source"]
+    ingest --> core["Central model (core)<br>trials · records · documents · files + page text<br>sponsors · locations · profile"]
+    core --> evidence["Evidence check<br>requirement set + model + quote verify + rules"]
+    core --> search["Patient search /find<br>search.document · AI tags (annotate)"]
     core -.-> finder["Publication finder,<br>outcome-switch detector (planned)"]
-    evidence <--> claude["Claude API<br>priced per call · monthly cap"]
-    due --> judgements["Judgements<br>answers · quotes · trace"]
-    evidence --> judgements
+    evidence <--> llm["llm.call → Claude API<br>one core.llm_call row per call<br>priced from prices.json · monthly cap"]
+    search <--> llm
+    evidence --> judgements["checks.judgement<br>label · answers · steps<br>published as the run finishes,<br>with gold agreement; staff may withdraw"]
     finder -.-> judgements
-    judgements --> publish["Publish<br>every judgement, with its gold agreement"]
-    publish --> web["Web interface<br>public · staff · admin"]
-    publish -.-> planned["MCP server for AI agents,<br>reports, e.g. Poland (planned)"]
-    gold["Gold datasets<br>data/gold/ + frozen CTIS snapshot"] --> gold_eval["Gold evaluation in CI<br>gates: evals/gates.json"]
-    judgements -. "compared" .-> gold_eval
+    judgements --> web["Web interface<br>public: home + charts, trials, /find<br>staff: workflow, sources, jobs, gold<br>admin: users, spend, Grafana"]
+    judgements -.-> planned["MCP server for AI agents,<br>reports, e.g. Poland (planned)"]
+    gold["Gold datasets<br>data/gold/ (Bruckner + due-date rules)<br>frozen CTIS snapshot"] --> gold_eval["Gold evaluation in CI<br>gates: evals/gates.json"]
+    gold -- "agreement" --> judgements
+    worker -. "OTLP" .-> otel["OpenTelemetry → Grafana<br>traces · metrics · logs · report.* views"]
+    web -. "OTLP" .-> otel
 ```
 
 ## How the evidence check judges a trial
@@ -76,7 +78,7 @@ flowchart TB
   cites as whole words, ignoring case, spacing, dash and quote-mark variants and line-end hyphens
   (`checks/verify.py`). A page counts as read only if its text layer holds at least 200 letters: on a scanned
   page "not found" can't mean "not reported".
-- **Don't know, and widening.** The model may answer `dont_know` (stored as `checks.evidence.found` NULL) when it
+- **Don't know, and widening.** The model may answer `dont_know` (stored as `checks.answer.found` NULL) when it
   can't tell. A question not answered from retrieved pages, or an endpoint found there only as not reported, is
   asked again with every page, so a retrieval miss never becomes "not reported". What the rules still can't
   settle is **undecided**, never a guess.

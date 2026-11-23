@@ -1,27 +1,43 @@
 # Operations
 
-How TrialWatch runs: the Docker Compose stack, the web interface, jobs, spend, the database, tests and CI. Nothing
-runs in production yet; monitoring (Grafana) and backups are not set up.
+How TrialWatch runs: the image, the Docker Compose stack, the web interface, jobs, spend, Grafana, backups, the
+database, tests and CI.
 
 ```mermaid
 flowchart TB
     you["Your machine<br>terminal: uv run trialwatch … · browser: 127.0.0.1:8010<br>psql · uv run pytest (its own &lt;db&gt;_test)"]
     people["People on the internet<br>https://TRIALWATCH_DOMAIN"]
+    admins["Admins<br>/grafana/ (signed in through /auth/grafana)"]
+    actions["GitHub Actions: image.yml (by hand)<br>tests → build → push"]
+    ghcr[("ghcr.io/shmarlya/trialwatch<br>:latest · :sha-&lt;commit&gt;")]
     subgraph compose["Docker Compose (compose.yaml)"]
         subgraph server["profile server"]
             caddy["caddy<br>HTTPS, no access log"]
             web["web<br>trialwatch web --no-worker<br>/healthz · /readyz"]
+            lgtm["lgtm<br>Grafana · Prometheus · Tempo · Loki"]
+            grafana_role["grafana-role<br>sets grafana_ro's password, exits"]
+            backup["backup<br>daily pg_dump → data/backups"]
         end
         worker["worker<br>queued jobs, retries, schedules"]
         migrate["migrate<br>dbmate: db/migrations/*.sql"]
     end
     db[("db: postgres:18-alpine<br>127.0.0.1:5432 only")]
     external["CTIS public API · Claude API<br>GeoNames · MeSH (once per load)"]
+    actions --> ghcr
+    ghcr -. "docker compose pull" .-> web
+    ghcr -. "docker compose pull" .-> worker
     people --> caddy --> web
+    admins --> caddy
+    caddy -- "/grafana/" --> lgtm
     you -.-> db
     web --> db
     worker --> db
     migrate --> db
+    backup --> db
+    grafana_role --> db
+    lgtm -- "report.* views, as grafana_ro" --> db
+    web -- "OTLP" --> lgtm
+    worker -- "OTLP" --> lgtm
     worker --> external
 ```
 
@@ -42,8 +58,8 @@ docker compose run --rm migrate
 
 On a server, `docker compose --profile server up -d` also runs the site, Grafana and the backups:
 
-- `web` runs `trialwatch web --host 0.0.0.0 --no-worker` in the image `trialwatch:dev` (Python 3.13, non-root,
-  `ENTRYPOINT trialwatch`), with `data/` mounted read-only. Only
+- `web` runs `trialwatch web --host 0.0.0.0 --no-worker` in the image `ghcr.io/shmarlya/trialwatch` (Python 3.13,
+  non-root, `ENTRYPOINT trialwatch`), with `data/` mounted read-only. Only
   `caddy` reaches it, so it trusts caddy's `X-Forwarded-*` headers (`FORWARDED_ALLOW_IPS`). Docker checks it with
   `/healthz` (the server is up; it asks nothing of the database); `/readyz` says whether the database answers and
   at which migration (503 when it doesn't).
@@ -58,9 +74,16 @@ On a server, `docker compose --profile server up -d` also runs the site, Grafana
 
 To deploy: point the domain's DNS at the machine; copy `.env.example` to `.env` and set the passwords,
 `TRIALWATCH_DOMAIN`, `TRIALWATCH_ADMIN_EMAIL`/`_PASSWORD` (the first admin), `OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318`
-and `GRAFANA_DB_PASSWORD`; then `docker compose --profile server up -d --build`. Load the reference data once
-(`geo load`, `vocab load`), switch the refresh's schedule on at `/admin/jobs`, and set a spending cap at
-`/admin/spend`. To update: `git pull`, then the same `up -d --build` (migrations run first).
+and `GRAFANA_DB_PASSWORD`; then `docker compose pull && docker compose --profile server up -d`. Load the
+reference data once (`geo load`, `vocab load`), switch the refresh's schedule on at `/admin/jobs`, and set a
+spending cap at `/admin/spend`.
+
+To update: run the **Image** workflow on `main` (Actions → Image → Run workflow, or
+`gh workflow run image.yml --ref main`). It runs the tests, then pushes `ghcr.io/shmarlya/trialwatch` tagged
+`sha-<commit>` and `latest`. On the server: `git pull` (for compose and `db/migrations`), then
+`docker compose pull && docker compose --profile server up -d` (migrations run first). To roll back, set
+`TRIALWATCH_TAG=sha-<commit>` in `.env` and run the same two commands. `up -d --build` builds from the checkout
+instead.
 
 One-off commands run in the same image: `docker compose run --rm web source list`.
 
@@ -279,6 +302,8 @@ erDiagram
 | `jobs.schedule` | when a job starts by itself: name, kind and params, frequency (daily, weekly, monthly), weekday, hour UTC, enabled, next run |
 | `core.llm_call` | every model call, one row each, failed ones too: model asked and model that answered, operation (check, annotate), run, trial, call number, job, the request as sent (no system prompt; files by sha256), the answer, stop reason, latency, error, the provider's request id, and each billed attempt priced (more than one after a fallback) with their sums: tokens, cost, attempts on an unpriced model |
 | `core.app_setting` | settings an admin changes (audited): `spend.monthly_cap_usd` |
+| `core.backup` | each nightly backup: file, size in bytes, when ([backups](#backups)) |
+| `report.*` | views Grafana reads as `grafana_ro`: jobs, llm_calls, spend, spend_cap, check_runs, judgements, ingest_runs, sources, backups |
 | `public.schema_migrations` | dbmate's own table: which migrations are applied |
 
 `checks.run` and `core.ingest_run` also have a `job_id`.
@@ -299,13 +324,15 @@ GitHub Actions:
   the whole test suite, against a Postgres service of its own.
 - `.github/workflows/docs.yml`, on every push and pull request: a strict build of this site; pushes to `main` also
   publish it to GitHub Pages.
+- `.github/workflows/image.yml`, started by hand: the tests, then the image to `ghcr.io/shmarlya/trialwatch`
+  (`sha-<commit>`, and `latest` from `main`).
 - Started by hand, calling CTIS or the model: `eval-short.yml` and `eval-full.yml` (gold evaluations, sharing
   `eval-shared.yml`) and `gold-snapshot.yml` (records the frozen snapshot); see
   [gold evaluations](sources-and-gold.md#gold-evaluations-ci).
 
 ## Code style
 
-The rules are in [STYLE.md](../STYLE.md): plain code for readers who don't read Python. Ruff checks what a tool can
+The rules are in [STYLE.md](../STYLE.md): code as simple as possible. Ruff checks what a tool can
 (`pyproject.toml`); the pre-commit hook runs it before each commit. One-time setup:
 
 ```bash

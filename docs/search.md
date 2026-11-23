@@ -147,6 +147,8 @@ erDiagram
     term["vocab.mesh_term"]
     tree["vocab.mesh_tree"]
     point["geo.address_point"]
+    llm_call["core.llm_call"]
+    reference_load["core.reference_load"]
     trial ||--o{ profile : "per source"
     trial ||--o| document : "one per trial"
     trial ||--o{ concept : "names"
@@ -156,6 +158,7 @@ erDiagram
     annotation_run ||--o{ annotation : "per trial"
     annotation |o--o{ document : "AI facts"
     location }o--o| point : "address keys"
+    annotation_run ||--o{ llm_call : "model calls"
 ```
 
 | Table | What it holds |
@@ -164,7 +167,7 @@ erDiagram
 | `search.document` | one per trial: what patient search matches. Recruiting countries, conditions, categories, phase, ages (AI ages quoted), sex, healthy volunteers, interventions and purposes (AI, quoted), and `tsv` with weights A–D (GIN index). |
 | `search.trial_concept` | the MeSH concepts a trial's conditions name: method (exact-name, same-words, phrase, source-code, ai-quote) and the field and words it was found in |
 | `search.term` | words of recruiting trials and how many trials have each, for "did you mean" (trigram index) |
-| `search.annotation_run` | a run of AI tags with its exact prompt (and sha256), model, effort, status, tokens and cost |
+| `search.annotation_run` | a run of AI tags with its exact prompt (and sha256), model, effort, status, job; its tokens and cost are its calls' (`core.llm_call`) |
 | `search.annotation` | one trial's AI tags in a run (append-only): kept facts, each with its field and quote; dropped tags and why (its call, the request and raw answer, is the `core.llm_call` of its run and trial) |
 | `geo.country`, `geo.country_name` | countries (GeoNames countryInfo; languages; `in_gazetteer`: its places are loaded) and every name of each, in many languages |
 | `geo.place`, `geo.place_name` | places with 1000+ people of the loaded countries and their point; every name of a place (trigram index) |

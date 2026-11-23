@@ -1,7 +1,6 @@
-# Python style: readable for people who don't read Python
+# Python style: simple code
 
-TrialWatch's code is read by people who know what the project does but not Python's shortcuts. So the code
-says each step out loud. Plain beats clever; short is fine while it stays plain.
+Write code as simple as possible. Plain beats clever; short is fine while it stays plain.
 
 Ruff checks what a tool can see: `uv run ruff check` and `uv run ruff format`, with the rules in
 `pyproject.toml`, run in CI and as a pre-commit hook. The rest is for review.

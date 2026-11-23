@@ -16,24 +16,20 @@ version. Each source of gold labels has a converter that builds a version from i
 
 import hashlib
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from trialwatch import config
 from trialwatch.db.core import Identifier, normalised
 
 DATASET_FILE = "dataset.json"
 ITEMS_FILE = "items.jsonl"
 LOCK_FILE = "versions.lock"
-# The repository's data/gold/; TRIALWATCH_GOLD_DIR points elsewhere (tests, another checkout)
-DEFAULT_DIR = Path(__file__).parent.parent.parent.parent / "data" / "gold"
 
 
 def gold_dir() -> Path:
-    configured = os.environ.get("TRIALWATCH_GOLD_DIR")
-    if configured:
-        return Path(configured)
-    return DEFAULT_DIR
+    """The repository's data/gold/, or where TRIALWATCH_GOLD_DIR points (tests, a container)."""
+    return config.gold_dir()
 
 
 @dataclass(frozen=True)

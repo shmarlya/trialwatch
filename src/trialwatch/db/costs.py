@@ -4,17 +4,20 @@
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import psycopg
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
-from trialwatch.costs import CallCost
+if TYPE_CHECKING:
+    # for the type only: trialwatch.llm imports this module
+    from trialwatch.llm import CallCost
 
 MONTHLY_CAP = "spend.monthly_cap_usd"
 
 
-def record_call(conn: psycopg.Connection, cost: CallCost, *, operation: str, check_run_id: int | None = None,
+def record_call(conn: psycopg.Connection, cost: "CallCost", *, operation: str, check_run_id: int | None = None,
                 trial_id: int | None = None, call_number: int | None = None, request_id: str | None = None,
                 annotation_run_id: int | None = None) -> None:
     """Add one billed attempt, made for the session's actor (for a check run, or an AI tagging run)."""
@@ -33,11 +36,6 @@ def record_call(conn: psycopg.Connection, cost: CallCost, *, operation: str, che
 def run_cost(conn: psycopg.Connection, run_id: int) -> Decimal:
     row = conn.execute("SELECT coalesce(sum(cost_usd), 0) FROM core.api_call WHERE check_run_id = %s",
                        (run_id,)).fetchone()
-    return row[0]
-
-
-def spent_since(conn: psycopg.Connection, since: datetime) -> Decimal:
-    row = conn.execute("SELECT coalesce(sum(cost_usd), 0) FROM core.api_call WHERE at >= %s", (since,)).fetchone()
     return row[0]
 
 

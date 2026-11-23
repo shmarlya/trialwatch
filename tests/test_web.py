@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from urllib.parse import unquote
 
+import psycopg
 from fastapi.testclient import TestClient
 from test_sources_ctis import CT, RECORD, FakeCtis, ctis_source, listed_row, transfer
 
@@ -288,3 +289,17 @@ def test_an_unhandled_error_is_logged_with_the_reference_the_page_shows(app_conn
     assert reference in logged and "RuntimeError" in logged and "/find" in logged
     # neither the search nor the error's message (which quotes it) reaches the log or the page
     assert "private-marker" not in logged and "private-marker" not in page.text
+
+
+def test_health_says_the_server_is_up_and_readiness_that_the_database_answers(app_conn, monkeypatch):
+    client = TestClient(web.app)
+    assert (client.get("/healthz").status_code, client.get("/healthz").text) == (200, "ok")
+    # the tests' database is built from the migrations' SQL, without dbmate's table of versions
+    assert client.get("/readyz").json() == {"status": "ok", "migration": None}
+    monkeypatch.setattr(web.db, "migration_version", database_down)
+    down = client.get("/readyz")
+    assert (down.status_code, down.json()) == (503, {"status": "unavailable"})
+
+
+def database_down():
+    raise psycopg.OperationalError("connection refused")

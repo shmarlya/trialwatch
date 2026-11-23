@@ -1,24 +1,27 @@
 # Operations
 
 How TrialWatch runs: the Docker Compose stack, the web interface, jobs, spend, the database, tests and CI. Nothing
-runs in production yet; deploying, monitoring (Grafana) and backups are not set up.
+runs in production yet; monitoring (Grafana) and backups are not set up.
 
 ```mermaid
 flowchart TB
     you["Your machine<br>terminal: uv run trialwatch … · browser: 127.0.0.1:8010<br>psql · uv run pytest (its own &lt;db&gt;_test)"]
+    people["People on the internet<br>https://TRIALWATCH_DOMAIN"]
     subgraph compose["Docker Compose (compose.yaml)"]
-        app["app<br>trialwatch CLI and web"]
+        subgraph server["profile server"]
+            caddy["caddy<br>HTTPS, no access log"]
+            web["web<br>trialwatch web --no-worker<br>/healthz · /readyz"]
+        end
         worker["worker<br>queued jobs, retries, schedules"]
         migrate["migrate<br>dbmate: db/migrations/*.sql"]
     end
     db[("db: postgres:18-alpine<br>127.0.0.1:5432 only")]
     external["CTIS public API · Claude API<br>GeoNames · MeSH (once per load)"]
-    you --> app
+    people --> caddy --> web
     you -.-> db
-    app --> db
+    web --> db
     worker --> db
     migrate --> db
-    app --> external
     worker --> external
 ```
 
@@ -32,10 +35,23 @@ applies the migrations:
 docker compose run --rm migrate
 ```
 
-Compose runs four services: `db` holds the data and is reachable from this machine only (`127.0.0.1:5432`, volume
-`pgdata`, TimeZone UTC); `migrate` applies `db/migrations/*.sql` with dbmate and writes `db/schema.sql`, then exits
-(the app starts only if it succeeds; dbmate 2.37, `./db` mounted); `app` runs the `trialwatch` command in a
-container (image `trialwatch:dev`, Python 3.13, non-root, `ENTRYPOINT trialwatch`), with `data/` mounted read-only (and `data/ctis/` writable for `--files-dir`); `worker` runs `trialwatch worker`.
+`docker compose up -d` runs three services: `db` holds the data and is reachable from this machine only
+(`127.0.0.1:5432`, volume `pgdata`, TimeZone UTC); `migrate` applies `db/migrations/*.sql` with dbmate and writes
+`db/schema.sql`, then exits (the others start only if it succeeds; dbmate 2.37, `./db` mounted); `worker` runs
+`trialwatch worker`. On this machine you run the site itself with `uv run trialwatch web` (below).
+
+On a server, `docker compose --profile server up -d` also runs the site:
+
+- `web` runs `trialwatch web --host 0.0.0.0 --no-worker` in the image `trialwatch:dev` (Python 3.13, non-root,
+  `ENTRYPOINT trialwatch`), with `data/` mounted read-only (and `data/ctis/` writable for `--files-dir`). Only
+  `caddy` reaches it, so it trusts caddy's `X-Forwarded-*` headers (`FORWARDED_ALLOW_IPS`). Docker checks it with
+  `/healthz` (the server is up; it asks nothing of the database); `/readyz` says whether the database answers and
+  at which migration (503 when it doesn't).
+- `caddy` serves HTTPS at `TRIALWATCH_DOMAIN` (in `.env`; a Let's Encrypt certificate, renewed by itself, kept in
+  the volume `caddy-data`) and sends everything to `web` (`ops/caddy/Caddyfile`). It keeps no access log: a search's
+  address can be about someone's health, and `web` logs each request without its query string.
+
+One-off commands run in the same image: `docker compose run --rm web source list`.
 
 ## Web interface
 
@@ -52,8 +68,12 @@ searches the gold datasets ([sources and gold](sources-and-gold.md#gold-datasets
 
 The site answers only requests addressed to this machine (127.0.0.1, localhost, ::1; `TRIALWATCH_HOSTS` adds other
 names) and takes form posts only from its own pages. A stored PDF opens in the browser's viewer, sandboxed; any
-other file is downloaded; uploads must be PDFs. Served on a network (`--host` with `TRIALWATCH_HOSTS`), put HTTPS in
-front: off this machine the session cookie is sent over HTTPS only.
+other file is downloaded; uploads must be PDFs. Served on a network, it needs HTTPS in front (compose's `caddy`): off
+this machine the session cookie is sent over HTTPS only.
+
+The web server takes its database connections from a pool (`src/trialwatch/db/__init__.py`, opened when the server
+starts); a connection goes back with its session reset, so a request never writes as the one before it or holds
+its locks. The worker and the command line open a connection of their own each time.
 
 ### Sign-in and roles
 
@@ -121,13 +141,16 @@ person.
 | `web/templates/`, `web/static/` | pages, and the brand and UI components ([STYLE.md](../STYLE.md), UI) |
 | `auth/` | accounts, passwords, sessions, the action chart |
 | `jobs/worker.py`, `steps.py`, `refresh.py`, `retry.py` | the worker, what each job kind does, the refresh, retries |
-| `costs/` | prices and spend |
+| `config.py` | every setting read from the environment (and `.env`) |
+| `llm.py`, `prices.json` | every model call: the client, pricing per billed attempt, recording it as spend |
+| `telemetry.py` | traces and counters for admins (OpenTelemetry; recorded nowhere until Grafana is set up) |
+| `db/__init__.py` | connections: the web server's pool, everyone else's own |
 | `db/overview.py`, `db/auth.py`, `db/jobs.py`, `db/costs.py` | their SQL |
 
 ## Spend
 
 Every billed model call is a row in `core.api_call` with its tokens and its cost in US dollars, priced at
-Anthropic's list prices in `src/trialwatch/costs/prices.json` (each row keeps the prices it was charged at; a model
+Anthropic's list prices in `src/trialwatch/prices.json` (each row keeps the prices it was charged at; a model
 missing from the list is shown as unpriced, never as $0; a new model needs a price before it runs). Runs,
 judgements, trace steps and jobs show their cost to staff, and `/admin/spend` shows the totals: this month, the
 last 30 days, all time, by month, model, operation and actor, and the costliest runs. An admin sets a monthly cap

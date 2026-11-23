@@ -8,14 +8,13 @@ check the trials not judged in the job's runs or whose call failed for a passing
 
 from dataclasses import dataclass, field
 
-import anthropic
 import psycopg
 
-from trialwatch import costs as pricing
+from trialwatch import llm
 from trialwatch.checks import evidence
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
-from trialwatch.checks.model import load_prompt
+from trialwatch.checks.prompts import load_prompt
 from trialwatch.checks.verify import has_readable_text
 from trialwatch.db import core
 from trialwatch.db import costs as costs_db
@@ -28,7 +27,6 @@ from trialwatch.search import annotate
 from trialwatch.sources import registry, stages
 
 # Calls go to Anthropic's API itself, as from the CLI
-ANTHROPIC_API = "https://api.anthropic.com"
 CAP_REACHED = "held: this month's spend reached the monthly cap (/admin/spend)"
 
 STEPS = {
@@ -187,9 +185,9 @@ def run_transfer(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
 
 # --- check ---------------------------------------------------------------------------------------
 
-def anthropic_client():
+def anthropic_client() -> llm.MessagesClient:
     """The model client (tests replace this)."""
-    return anthropic.Anthropic(base_url=ANTHROPIC_API, max_retries=4)
+    return llm.client()
 
 
 def _chosen_trials(conn: psycopg.Connection, job: Job, requirement_set) -> list[int]:
@@ -265,7 +263,7 @@ def run_check(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
     try:
         summary = evidence.run(conn, anthropic_client(), trial_ids, settings, prompt, progress=ctx.add,
                                requirement_set=requirement_set, should_stop=ctx.should_stop)
-    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
+    except llm.BAD_CREDENTIALS as exc:
         # the same for every trial and every attempt: someone has to fix the API key
         raise PermanentError(f"{type(exc).__name__}: {exc}") from exc
     ctx.add(summary.summary())
@@ -280,7 +278,7 @@ def run_check(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
         ctx.add(f"  left to a person, {name}: {error}")
     result = {"check_run": summary.run_id, "summary": summary.summary(), "trials": len(trial_ids),
               "labels": summary.labels, "left_to_people": left_to_people, "published": len(summary.published),
-              "cost_usd": str(summary.cost_usd), "cost": pricing.dollars(summary.cost_usd)}
+              "cost_usd": str(summary.cost_usd), "cost": llm.dollars(summary.cost_usd)}
     return Outcome(result, passing)
 
 
@@ -313,12 +311,12 @@ def run_annotate(ctx: Context, conn: psycopg.Connection, job: Job) -> Outcome:
         return Outcome({"trials": 0})
     try:
         summary = annotate.run(conn, anthropic_client(), chosen, progress=ctx.add, should_stop=ctx.should_stop)
-    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
+    except llm.BAD_CREDENTIALS as exc:
         raise PermanentError(f"{type(exc).__name__}: {exc}") from exc
     passing = {}
     for trial_id, error in summary.failed.items():
         passing[f"trial {trial_id}"] = error
     ctx.add(f"annotation run {summary.run_id}: {summary.tagged} of {summary.trials} tagged, {summary.kept} tags kept, "
-            f"{summary.dropped} dropped, {pricing.dollars(summary.cost_usd)}")
+            f"{summary.dropped} dropped, {llm.dollars(summary.cost_usd)}")
     return Outcome({"annotation_run": summary.run_id, "trials": summary.trials, "tagged": summary.tagged,
                     "kept": summary.kept, "dropped": summary.dropped, "cost_usd": str(summary.cost_usd)}, passing)

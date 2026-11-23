@@ -759,19 +759,6 @@ def set_trial_locations(conn: psycopg.Connection, trial_id: int, source: str, lo
     return len(unique)
 
 
-def current_records(conn: psycopg.Connection, source: str) -> list[tuple[int, dict]]:
-    """(trial id, payload) of the newest record of each trial from this source. Every payload at once:
-    for a few trials; read many with current_records_page."""
-    rows = conn.execute(
-        "SELECT c.trial_id, c.payload FROM core.trial_record_current c WHERE c.source_id = %s ORDER BY c.trial_id",
-        (source_id(conn, source),),
-    ).fetchall()
-    found = []
-    for trial_id, payload in rows:
-        found.append((trial_id, payload))
-    return found
-
-
 @dataclass(frozen=True)
 class StoredRecord:
     """The newest record of a trial from a source, with the source's list row for it (when listed)."""
@@ -1136,9 +1123,9 @@ def evidence_counts(conn: psycopg.Connection, trial_id: int, kinds: Sequence[str
 # --- page text ---------------------------------------------------------------------------------
 
 def files_without_pages(conn: psycopg.Connection, trial_ids: Sequence[int] | None = None,
-                        results_only: bool = True, kinds: Sequence[str] | None = None) -> list[bytes]:
+                        kinds: Sequence[str] | None = None) -> list[bytes]:
     """Files of the current document versions (of these trials, or all) whose text is not extracted
-    yet; by default only document kinds a results check reads, or only these `kinds`."""
+    yet; of every document kind, or only these `kinds`."""
     if trial_ids is None:
         wanted_trials = None
     else:
@@ -1150,15 +1137,13 @@ def files_without_pages(conn: psycopg.Connection, trial_ids: Sequence[int] | Non
         """
         SELECT DISTINCT d.file_sha256
         FROM core.document_current d
-        JOIN core.document_kind k ON k.code = d.kind
         JOIN core.trial_document l ON l.document_id = d.id AND l.removed_at IS NULL
         JOIN core.file f ON f.sha256 = d.file_sha256 AND f.pages_extracted_at IS NULL
-        WHERE (k.has_results OR NOT %(results_only)s)
-          AND (%(kinds)s::text[] IS NULL OR d.kind = ANY(%(kinds)s))
+        WHERE (%(kinds)s::text[] IS NULL OR d.kind = ANY(%(kinds)s))
           AND (%(trials)s::bigint[] IS NULL OR l.trial_id = ANY(%(trials)s))
         ORDER BY d.file_sha256
         """,
-        {"results_only": results_only, "trials": wanted_trials, "kinds": wanted_kinds},
+        {"trials": wanted_trials, "kinds": wanted_kinds},
     ).fetchall()
     files = []
     for row in rows:

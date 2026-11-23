@@ -275,11 +275,11 @@ def _transfer_one(conn: psycopg.Connection, source: RegisteredSource, adapter: A
     result.new_versions += fetched.new_versions
     result.unchanged += fetched.unchanged
     result.unlinked += fetched.unlinked
-    pages = extract_missing(conn, [fetched.trial_id], results_only=False, kinds=kinds, extract=extract)
+    pages = extract_missing(conn, [fetched.trial_id], kinds=kinds, extract=extract)
     result.pages += pages.pages
     for sha, message in pages.failed.items():
         errors[f"file {sha}"] = message
-    unread = core.files_without_pages(conn, [fetched.trial_id], results_only=False, kinds=kinds)
+    unread = core.files_without_pages(conn, [fetched.trial_id], kinds=kinds)
     if unread and not pages.failed:
         errors["pages"] = f"{len(unread)} files without page text"
     problem = _index(conn, fetched.trial_id)

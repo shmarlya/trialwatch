@@ -24,7 +24,6 @@ page elsewhere can't submit a form to it).
 
 import json
 import logging
-import os
 import re
 import secrets
 import threading
@@ -34,7 +33,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from functools import cache
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote as url_quote
@@ -49,9 +47,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import psycopg
 
-from trialwatch import db
+from trialwatch import config, db
 from trialwatch.auth import accounts, actions, passwords, sessions
-from trialwatch.checks import evidence, model
+from trialwatch.checks import evidence, prompts
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
 from trialwatch.db import auth as auth_db
@@ -61,7 +59,7 @@ from trialwatch.db.core import Identifier, normalised
 from trialwatch.gold import datasets as gold_datasets
 from trialwatch.db import search as search_db
 from trialwatch.sources import manual, profile, registry, stages
-from trialwatch.costs import dollars
+from trialwatch.llm import dollars
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
 from trialwatch.jobs import MAX_ATTEMPTS, PRIORITY_AUTOMATIC
@@ -88,7 +86,6 @@ def auth_context(request: Request) -> dict:
 TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates", context_processors=[auth_context])
 # `dollars(amount)` in a template: money as pages show it ($1.23, $0.0042)
 TEMPLATES.env.globals["dollars"] = dollars
-CT_NUMBER = re.compile(r"\d{4}-\d{6}-\d{2}-\d{2}")
 # Names of the trace steps as the trial page shows them
 STEP_TITLES = {
     "questions": "Questions: the requirements for this trial",
@@ -103,10 +100,15 @@ STEP_TITLES = {
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """On start: add the admin named by TRIALWATCH_ADMIN_EMAIL / _PASSWORD if they are not a user yet
-    (trialwatch.auth.accounts); a half-set or invalid seed stops the server with the reason."""
-    accounts.seed_from_environment(db.connect)
-    yield
+    """On start: open the database connection pool, and add the admin named by TRIALWATCH_ADMIN_EMAIL /
+    _PASSWORD if they are not a user yet (trialwatch.auth.accounts); a half-set or invalid seed stops the
+    server with the reason. On stop: close the pool."""
+    db.open_pool()
+    try:
+        accounts.seed_from_environment(db.connect)
+        yield
+    finally:
+        db.close_pool()
 
 
 app = FastAPI(title="TrialWatch", lifespan=lifespan)
@@ -120,10 +122,9 @@ LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1", "testserver")
 CHANGING_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 
-@cache
 def default_settings() -> check_settings.Settings:
     """The check's default setup (checks/configs/default.json); pages show labels judged against its
-    requirement set. Read once: a changed file takes effect when the server restarts."""
+    requirement set."""
     return check_settings.load(check_settings.DEFAULT)
 
 
@@ -131,10 +132,8 @@ def allowed_hosts() -> list[str]:
     hosts = []
     for host in LOCAL_HOSTS:
         hosts.append(host)
-    configured = os.environ.get("TRIALWATCH_HOSTS", "")
-    for host in configured.split(","):
-        if host.strip():
-            hosts.append(host.strip())
+    for host in config.extra_hosts():
+        hosts.append(host)
     return hosts
 
 
@@ -353,6 +352,27 @@ async def server_error(request: Request, exc: Exception) -> Response:
     if not wants_page(request):
         return PlainTextResponse(f"{message} Reference {reference}.", status_code=500)
     return error_page(request, 500, message, reference)
+
+
+# --- health, for Docker and the proxy in front ----------------------------------------------------
+
+@app.get("/healthz", response_class=PlainTextResponse)
+def healthz() -> PlainTextResponse:
+    """The server is up. Asks nothing of the database, so a database outage doesn't get the server
+    restarted (/readyz says whether it can answer)."""
+    return PlainTextResponse("ok")
+
+
+@app.get("/readyz")
+def readyz() -> JSONResponse:
+    """The server can answer: the database is reachable, at this migration. Says nothing about why
+    not, to anyone: the log has it."""
+    try:
+        version = db.migration_version()
+    except psycopg.Error:
+        log.warning("not ready: the database can't be reached", exc_info=True)
+        return JSONResponse({"status": "unavailable"}, status_code=503)
+    return JSONResponse({"status": "ok", "migration": version})
 
 
 class LoginThrottle:
@@ -1551,8 +1571,8 @@ def prompts_page(request: Request, show: str | None = None,
             used_texts[key] = overview.run_prompt_text(conn, use.prompt_sha256)
     current = []
     current_hashes = set()
-    for name in model.prompt_names():
-        prompt = model.load_prompt(name)
+    for name in prompts.prompt_names():
+        prompt = prompts.load_prompt(name)
         current.append(prompt)
         current_hashes.add(prompt.sha256.hex())
     context = {"current": current, "current_hashes": current_hashes, "uses": uses, "used_texts": used_texts,

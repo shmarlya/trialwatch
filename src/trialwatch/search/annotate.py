@@ -20,15 +20,14 @@ from pathlib import Path
 
 import psycopg
 
-from trialwatch.checks import evidence
-from trialwatch.checks.model import MessagesClient, Prompt, load_prompt
+from trialwatch import llm
+from trialwatch.checks.prompts import Prompt, load_prompt
 from trialwatch.checks.verify import verify_in_text
-from trialwatch.costs import total_cost
 from trialwatch.db import core
-from trialwatch.db import costs as costs_db
 from trialwatch.db import geo as geo_db
 from trialwatch.db import search as search_db
 from trialwatch.db import vocab as vocab_db
+from trialwatch.llm import MessagesClient, total_cost
 from trialwatch.search import categories, index
 from trialwatch.sources import profile
 
@@ -367,7 +366,7 @@ def annotate_trial(conn: psycopg.Connection, client: MessagesClient, settings: S
     languages = languages_for(conn, read, settings.max_languages)
     candidates = candidates_for(conn, read, settings.max_candidates)
     request = build_request(settings, prompt, fields, languages, candidates)
-    call = evidence.call_model(client, request)
+    call = llm.call(client, request, OPERATION)
     checked = Checked()
     error = call.error
     if error is None:
@@ -386,9 +385,7 @@ def annotate_trial(conn: psycopg.Connection, client: MessagesClient, settings: S
             error=error, input_tokens=call.input_tokens, output_tokens=call.output_tokens, cost_usd=cost,
             duration_ms=call.duration_ms,
         )
-        for priced in call.costs:
-            costs_db.record_call(conn, priced, operation=OPERATION, trial_id=trial_id, call_number=1,
-                                 request_id=call.request_id, annotation_run_id=run_id)
+        llm.record(conn, call, operation=OPERATION, trial_id=trial_id, call_number=1, annotation_run_id=run_id)
         if error is None:
             index.rebuild_trial(conn, trial_id, force=True)
     kept = 0

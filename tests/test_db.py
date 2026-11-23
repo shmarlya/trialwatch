@@ -53,13 +53,13 @@ class ActorTableMissing:
 def test_connect_closes_the_connection_when_it_cannot_name_the_actor(database_url, monkeypatch):
     failing = ActorTableMissing()
     monkeypatch.setattr(core, "act_as", failing)
-    with pytest.raises(RuntimeError, match="no core.actor table"):
-        db.connect()
+    with pytest.raises(RuntimeError, match="no core.actor table"), db.connect():
+        pass
     # the caller never got the connection, so connect closed it
     assert len(failing.connections) == 1 and failing.connections[0].closed
 
 
 def test_connect_needs_a_database_url(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    with pytest.raises(RuntimeError, match="DATABASE_URL is not set"):
-        db.connect()
+    with pytest.raises(RuntimeError, match="DATABASE_URL is not set"), db.connect():
+        pass

@@ -1,49 +1,82 @@
+# TrialWatch on one machine. `docker compose up -d` runs the database and the worker (for local work:
+# run the site itself with `uv run trialwatch web`). On a server, `docker compose --profile server up -d`
+# also runs the site (`web`) behind HTTPS (`caddy`) at TRIALWATCH_DOMAIN.
+
+# What the TrialWatch services share: the image, the database and the settings from .env
+x-trialwatch: &trialwatch
+  build: .
+  image: trialwatch:dev
+  environment: &trialwatch-environment
+    DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    TZ: UTC
+    # For checks and AI tags: put ANTHROPIC_API_KEY=... in .env (git-ignored); empty = no model calls
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    # The gold datasets in the mounted data/ (the package's own path is inside the image's venv).
+    # They are read here; `gold build` runs on the host, where data/gold/ is writable.
+    TRIALWATCH_GOLD_DIR: /app/data/gold
+  volumes:
+    # Research files and gold datasets, read-only: data/bruckner/ and data/gold/ are in git
+    - ./data:/app/data:ro
+    # Writable, git-ignored: `source transfer ctis --files-dir data/ctis/documents` writes copies of the PDFs there
+    - ./data/ctis:/app/data/ctis
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+
 services:
-  app:
-    build: .
-    image: trialwatch:dev
+  # The web interface (`trialwatch web`), reached only through caddy. Its worker runs separately.
+  # One-off commands run in the same image: `docker compose run --rm web source list`.
+  web:
+    <<: *trialwatch
+    profiles: ["server"]
+    command: ["web", "--host", "0.0.0.0", "--no-worker"]
+    restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      TZ: UTC
-      # For `check evidence`: put ANTHROPIC_API_KEY=... in .env (git-ignored); empty = no model calls
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # The gold datasets in the mounted data/ (the package's own path is inside the image's venv).
-      # They are read here; `gold build` runs on the host, where data/gold/ is writable.
-      TRIALWATCH_GOLD_DIR: /app/data/gold
+      <<: *trialwatch-environment
+      # The site's public name: requests for any other name are refused (DNS rebinding)
+      TRIALWATCH_HOSTS: ${TRIALWATCH_DOMAIN:-localhost}
+      # Who the proxy is: only caddy can reach this service, so its X-Forwarded-* headers are trusted
+      # (the client's address for the sign-in throttle, https for the session cookie)
+      FORWARDED_ALLOW_IPS: "*"
       # The first admin, added when the web interface starts if no user has this email (ADR-006)
       TRIALWATCH_ADMIN_EMAIL: ${TRIALWATCH_ADMIN_EMAIL:-}
       TRIALWATCH_ADMIN_PASSWORD: ${TRIALWATCH_ADMIN_PASSWORD:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # HTTPS in front of web: a certificate for TRIALWATCH_DOMAIN from Let's Encrypt (for localhost, one
+  # of its own), renewed by itself (ops/caddy/Caddyfile)
+  caddy:
+    image: caddy:2.10
+    profiles: ["server"]
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      TRIALWATCH_DOMAIN: ${TRIALWATCH_DOMAIN:-localhost}
     volumes:
-      # Research files and gold datasets, read-only: data/bruckner/ and data/gold/ are in git
-      - ./data:/app/data:ro
-      # Writable, git-ignored: `source transfer ctis --files-dir data/ctis/documents` writes copies of the PDFs there
-      - ./data/ctis:/app/data/ctis
+      - ./ops/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # its certificates and their keys
+      - caddy-data:/data
+      - caddy-config:/config
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      web:
+        condition: service_healthy
 
   # Runs queued jobs (web forms, the weekly refresh) one at a time and tries failed ones again
-  # (`trialwatch worker`, src/trialwatch/jobs/). Same image and settings as app.
+  # (`trialwatch worker`, src/trialwatch/jobs/)
   worker:
-    image: trialwatch:dev
+    <<: *trialwatch
     command: ["worker"]
     restart: unless-stopped
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      TZ: UTC
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      TRIALWATCH_GOLD_DIR: /app/data/gold
-    volumes:
-      - ./data:/app/data:ro
-      - ./data/ctis:/app/data/ctis
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      app:
-        condition: service_started
 
-  # Applies db/migrations/*.sql and writes db/schema.sql, then exits; the app starts only if this
-  # succeeds. Takes dbmate's arguments (`docker compose run --rm migrate status`).
+  # Applies db/migrations/*.sql and writes db/schema.sql, then exits; web and worker start only if
+  # this succeeds. Takes dbmate's arguments (`docker compose run --rm migrate status`).
   migrate:
     image: ghcr.io/amacneil/dbmate:2.37.0
     command: ["--wait", "up"]
@@ -78,3 +111,5 @@ services:
 
 volumes:
   pgdata:
+  caddy-data:
+  caddy-config:

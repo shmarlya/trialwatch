@@ -7,14 +7,14 @@ from types import SimpleNamespace
 from conftest import default_settings
 from test_evidence import GOOD, PROMPT, FakeClient, seed
 
-from trialwatch import costs
+from trialwatch import llm
 from trialwatch.checks import evidence as ev
 from trialwatch.db import costs as costs_db
 from trialwatch.db import core
 
 
 def test_a_call_is_priced_by_its_tokens_at_the_list_price():
-    cost = costs.price_tokens("claude-opus-5-5", input_tokens=1_000_000, output_tokens=100_000,
+    cost = llm.price_tokens("claude-opus-5-5", input_tokens=1_000_000, output_tokens=100_000,
                               cache_write_tokens=0, cache_read_tokens=1_000_000)
     # $4 a million in, $20 a million out, $0.20 a million read from the cache
     assert cost.cost_usd == Decimal("4") + Decimal("2") + Decimal("0.2")
@@ -22,19 +22,19 @@ def test_a_call_is_priced_by_its_tokens_at_the_list_price():
 
 
 def test_a_long_prompt_costs_more_on_haiku():
-    short = costs.price_tokens("claude-haiku-5-5", input_tokens=100_000, output_tokens=0)
-    long = costs.price_tokens("claude-haiku-5-5", input_tokens=100_001, output_tokens=0)
+    short = llm.price_tokens("claude-haiku-5-5", input_tokens=100_000, output_tokens=0)
+    long = llm.price_tokens("claude-haiku-5-5", input_tokens=100_001, output_tokens=0)
     assert short.cost_usd == Decimal("0.01")
     assert long.prices["input"] == "0.50"
     # cached tokens count towards the prompt's length too
-    cached = costs.price_tokens("claude-haiku-5-5", input_tokens=50_000, output_tokens=0, cache_read_tokens=60_000)
+    cached = llm.price_tokens("claude-haiku-5-5", input_tokens=50_000, output_tokens=0, cache_read_tokens=60_000)
     assert cached.prices["input"] == "0.50"
 
 
 def test_an_unknown_model_is_unpriced_not_free():
-    cost = costs.price_tokens("claude-test", input_tokens=500, output_tokens=50)
+    cost = llm.price_tokens("claude-test", input_tokens=500, output_tokens=50)
     assert cost.cost_usd is None and not cost.priced
-    assert costs.total_cost([cost]) == 0 and costs.unpriced_count([cost]) == 1
+    assert llm.total_cost([cost]) == 0 and llm.unpriced_count([cost]) == 1
 
 
 def test_a_fallback_is_priced_per_attempt_at_the_model_that_ran_it():
@@ -43,20 +43,20 @@ def test_a_fallback_is_priced_per_attempt_at_the_model_that_ran_it():
     answered = SimpleNamespace(type="fallback_message", model="claude-opus-4-8", input_tokens=1000, output_tokens=500,
                                cache_creation_input_tokens=0, cache_read_input_tokens=0)
     usage = SimpleNamespace(input_tokens=1000, output_tokens=500, iterations=[declined, answered])
-    priced = costs.price_usage(usage, "claude-opus-4-8")
+    priced = llm.price_usage(usage, "claude-opus-4-8")
     assert [cost.model for cost in priced] == ["claude-opus-5-5", "claude-opus-4-8"]
     assert priced[0].cost_usd == Decimal("0.0042")
     assert priced[1].cost_usd == Decimal("0.0175")
     # without iterations, the response's own model and usage
-    plain = costs.price_usage(SimpleNamespace(input_tokens=10, output_tokens=0), "claude-sonnet-5-5")
+    plain = llm.price_usage(SimpleNamespace(input_tokens=10, output_tokens=0), "claude-sonnet-5-5")
     assert [(cost.model, cost.cost_usd) for cost in plain] == [("claude-sonnet-5-5", Decimal("0.00002"))]
 
 
 def test_money_reads_plainly():
-    assert costs.dollars(Decimal("1234.5")) == "$1,234.50"
-    assert costs.dollars(Decimal("0.000075")) == "$0.0001"
-    assert costs.dollars(Decimal(0)) == "$0.00"
-    assert costs.dollars(None) == "—"
+    assert llm.dollars(Decimal("1234.5")) == "$1,234.50"
+    assert llm.dollars(Decimal("0.000075")) == "$0.0001"
+    assert llm.dollars(Decimal(0)) == "$0.00"
+    assert llm.dollars(None) == "—"
 
 
 def test_a_run_records_every_billed_call_and_its_totals_agree(conn):

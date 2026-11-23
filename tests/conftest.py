@@ -16,10 +16,9 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from trialwatch import db, env
+from trialwatch import config, db
 from trialwatch.checks import settings as check_settings
 from trialwatch.db import SESSION_OPTIONS
-from trialwatch.env import ENV_FILE, read_env_file
 
 ROOT = Path(__file__).parent.parent
 MIGRATIONS = ROOT / "db" / "migrations"
@@ -31,12 +30,11 @@ def server_url() -> str | None:
     url = os.environ.get("DATABASE_URL")
     if url:
         return url
-    values = read_env_file(ENV_FILE)
+    values = config.read_env_file(config.ENV_FILE)
     for key, value in os.environ.items():
         if key.startswith("POSTGRES_") and value:
             values[key] = value
-    # env.database_url, not the fixture below that shares its name
-    return env.database_url(values)
+    return config.compose_database_url(values)
 
 
 def up_section(path: Path) -> str:

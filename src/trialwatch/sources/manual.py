@@ -134,7 +134,7 @@ def add_trial(conn: psycopg.Connection, entry: TrialEntry, files: list[UploadedF
         for file in files:
             add_document(conn, saved.trial_id, file, kind, title=None, extract=False)
     if files:
-        extract_missing(conn, [saved.trial_id], results_only=False)
+        extract_missing(conn, [saved.trial_id])
     record_transfer(conn, saved.trial_id)
     return saved.trial_id
 
@@ -146,7 +146,7 @@ def record_transfer(conn: psycopg.Connection, trial_id: int) -> None:
     if not keys:
         return
     errors = {}
-    unread = core.files_without_pages(conn, [trial_id], results_only=False)
+    unread = core.files_without_pages(conn, [trial_id])
     if unread:
         errors["pages"] = f"{len(unread)} files without page text"
     documents, pages = core.evidence_counts(conn, trial_id, None)
@@ -177,6 +177,6 @@ def add_document(conn: psycopg.Connection, trial_id: int, file: UploadedFile, ki
     )
     core.link_document(conn, trial_id=trial_id, document_id=saved.document_id, basis="manual", source=SOURCE)
     if extract:
-        extract_missing(conn, [trial_id], results_only=False)
+        extract_missing(conn, [trial_id])
         record_transfer(conn, trial_id)
     return saved.document_id

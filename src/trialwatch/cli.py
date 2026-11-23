@@ -15,18 +15,18 @@ import httpx
 import psycopg
 import typer
 
-from trialwatch import costs as pricing
+from trialwatch import llm
 from trialwatch import db
 from trialwatch.auth import accounts, actions, passwords
 from trialwatch.checks import evidence
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
-from trialwatch.checks.model import load_prompt
+from trialwatch.checks.prompts import load_prompt
 from trialwatch.db import auth as auth_db
 from trialwatch.db import core as core_db
 from trialwatch.db import geo as geo_db
 from trialwatch.db import search as search_db
-from trialwatch.env import load_env_file
+from trialwatch.config import load_env_file
 from trialwatch.geo import geonames
 from trialwatch.geo import load as geo_loading
 from trialwatch.gold import bruckner, datasets
@@ -58,8 +58,6 @@ app.add_typer(vocab_app, name="vocab")
 search_app = typer.Typer(no_args_is_help=True, help="Patient search (ADR-008): the index of recruiting trials, and searching it.")
 app.add_typer(search_app, name="search")
 
-# Calls go to Anthropic's API itself, whatever ANTHROPIC_BASE_URL a shell may set (e.g. a proxy)
-ANTHROPIC_API = "https://api.anthropic.com"
 # Converters that build a gold dataset version from a source's own files (ADR-003)
 GOLD_CONVERTERS = {"bruckner": bruckner.build}
 
@@ -587,12 +585,9 @@ def search_annotate(
             typer.echo(request["messages"][0]["content"])
             typer.echo("dry run: nothing was sent")
             return
-        import anthropic
-
-        client = anthropic.Anthropic(base_url=ANTHROPIC_API, max_retries=4)
-        summary = search_annotating.run(conn, client, trial_ids, settings, progress=typer.echo)
+        summary = search_annotating.run(conn, llm.client(), trial_ids, settings, progress=typer.echo)
     typer.echo(f"annotation run {summary.run_id}: {summary.tagged} of {summary.trials} tagged, {summary.kept} tags kept, "
-               f"{summary.dropped} dropped, {pricing.dollars(summary.cost_usd)}")
+               f"{summary.dropped} dropped, {llm.dollars(summary.cost_usd)}")
     if summary.failed:
         raise typer.Exit(1)
 
@@ -717,10 +712,7 @@ def check_evidence(
                 for question in questions:
                     typer.echo(f"  {question.key}")
             return
-        import anthropic
-
-        client = anthropic.Anthropic(base_url=ANTHROPIC_API, max_retries=4)
-        summary = evidence.run(conn, client, trial_ids, settings, system_prompt, progress=typer.echo,
+        summary = evidence.run(conn, llm.client(), trial_ids, settings, system_prompt, progress=typer.echo,
                                requirement_set=requirement_set)
     typer.echo(summary.summary())
     _echo_failures(summary.failed)
@@ -959,10 +951,7 @@ def gold_eval(
             if trial_id not in blocked:
                 ready.append(trial_id)
         typer.echo(f"{len(ready)} of {len(ct_numbers)} trials ready for the check")
-        import anthropic
-
-        client = anthropic.Anthropic(base_url=ANTHROPIC_API, max_retries=4)
-        summary = evidence.run(conn, client, ready, settings, system_prompt, progress=typer.echo,
+        summary = evidence.run(conn, llm.client(), ready, settings, system_prompt, progress=typer.echo,
                                requirement_set=requirement_set)
         scored = gold_compare.compare_run(conn, summary.run_id, chosen)
         retrieval = gold_evaluate.retrieval_measures(conn, summary.run_id)

@@ -7,16 +7,16 @@ changed: a password set later in .env does nothing; change it with `trialwatch u
 """
 
 import logging
-import os
 import re
 
 import psycopg
 
+from trialwatch import config
 from trialwatch.auth import actions, passwords
 from trialwatch.db import auth as auth_db
 
-ADMIN_EMAIL = "TRIALWATCH_ADMIN_EMAIL"
-ADMIN_PASSWORD = "TRIALWATCH_ADMIN_PASSWORD"
+ADMIN_EMAIL = config.ADMIN_EMAIL
+ADMIN_PASSWORD = config.ADMIN_PASSWORD
 # The same rule as the auth.app_user check: something@something.something, no spaces or slashes
 EMAIL = re.compile(r"[^@\s/]+@[^@\s/]+\.[^@\s/]+")
 LONGEST_EMAIL = 254
@@ -74,8 +74,6 @@ def seed_admin(conn: psycopg.Connection, environment: dict) -> str | None:
 
 def seed_from_environment(connect) -> str | None:
     """seed_admin with this process's environment, on a connection from `connect` (trialwatch.db.connect)."""
-    environment = {}
-    for key in (ADMIN_EMAIL, ADMIN_PASSWORD):
-        environment[key] = os.environ.get(key, "")
+    environment = config.admin_seed()
     with connect(actor=SEED_ACTOR, actor_kind="process") as conn:
         return seed_admin(conn, environment)

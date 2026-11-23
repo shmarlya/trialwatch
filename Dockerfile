@@ -25,3 +25,6 @@ ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 USER app
 WORKDIR /app
 ENTRYPOINT ["trialwatch"]
+# The web interface, without a worker of its own (compose runs one); `docker compose run` takes other commands
+EXPOSE 8010
+CMD ["web", "--host", "0.0.0.0", "--no-worker"]

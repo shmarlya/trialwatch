@@ -30,20 +30,19 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-import anthropic
 import psycopg
 
-from trialwatch import costs as pricing
+from trialwatch import llm
 from trialwatch.checks import publishing, requirements
-from trialwatch.checks.model import FALLBACK_BETA, MessagesClient, Prompt, first_text, uses_fallbacks
+from trialwatch.checks.prompts import Prompt
 from trialwatch.checks.requirements import Question, RequirementSet
 from trialwatch.checks.retrieval import pages_to_send_first, search, search_query_for
 from trialwatch.checks.settings import Settings
 from trialwatch.checks.verify import every_page_readable, has_readable_text, some_page_readable, verify
 from trialwatch.db import checks as checks_db
 from trialwatch.db import core
-from trialwatch.db import costs as costs_db
 from trialwatch.db.core import Page
+from trialwatch.llm import FALLBACK_BETA, CallResult, MessagesClient, uses_fallbacks
 from trialwatch.progress import Progress, report
 from trialwatch.sources import stages
 
@@ -237,98 +236,26 @@ def request_for_trace(request: dict, files: list[core.TrialFile] | None = None) 
     return sent
 
 
-@dataclass
-class CallResult:
-    answers: dict[str, dict] = field(default_factory=dict)
-    error: str | None = None
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_write_tokens: int = 0
-    cache_read_tokens: int = 0
-    # each billed attempt priced (more than one after a fallback); the provider's request id
-    costs: list[pricing.CallCost] = field(default_factory=list)
-    request_id: str | None = None
-    # for the trace: the model that answered (after a fallback, not the one asked), why it stopped,
-    # its answer as sent, and how long the call took
-    served_by: str | None = None
-    stop_reason: str | None = None
-    raw_text: str | None = None
-    duration_ms: int = 0
-
-
-def token_count(usage: Any, name: str) -> int:
-    """A token count from the response's usage, every attempt included: when the model declined and a
-    fallback model answered (server-side fallback), the declined attempt is billed too, and only the
-    usage's iterations list it. 0 when the API did not report it."""
-    iterations = getattr(usage, "iterations", None)
-    if iterations:
-        total = 0
-        for iteration in iterations:
-            count = getattr(iteration, name, 0)
-            if count:
-                total += count
-        return total
-    count = getattr(usage, name, 0)
-    if not count:
-        return 0
-    return count
-
-
-def ask(client: MessagesClient, request: dict) -> CallResult:
-    """One model call of the check: the answer to each question by its key (see call_model)."""
-    result = call_model(client, request)
+def ask(client: MessagesClient, request: dict) -> tuple[CallResult, dict[str, dict]]:
+    """One model call of the check (trialwatch.llm.call), and the answer to each question by its key."""
+    result = llm.call(client, request, OPERATION)
+    answers = {}
     if result.error is not None:
-        return result
+        return result, answers
     try:
         parsed = json.loads(result.raw_text)
         for answer in parsed["answers"]:
             key = answer["key"]
-            if key not in result.answers:
-                result.answers[key] = answer
-            elif _differs(result.answers[key], answer):
+            if key not in answers:
+                answers[key] = answer
+            elif _differs(answers[key], answer):
                 # two different answers to one question: neither is settled by its position, a person looks
-                result.answers[key] = {"key": key, "found": "dont_know", "quote": "", "document": 0, "page": 0,
-                                       "kind": "other", "note": "the model answered this question twice, differently"}
+                answers[key] = {"key": key, "found": "dont_know", "quote": "", "document": 0, "page": 0,
+                                "kind": "other", "note": "the model answered this question twice, differently"}
     except (ValueError, KeyError, TypeError) as exc:
         result.error = f"invalid answer: {type(exc).__name__}: {exc}"
-    return result
-
-
-def call_model(client: MessagesClient, request: dict) -> CallResult:
-    """Send one request and price it: tokens, costs, who answered, the answer's text as sent. An error
-    that a retry may fix (overloaded, too large, a timeout) or a refusal is the result's error; bad
-    credentials raise (the same for every trial). Also used by patient search's AI tags (ADR-008)."""
-    started = time.monotonic()
-    try:
-        # the prepared request dictionary is passed as keyword arguments to the SDK call
-        response = client.beta.messages.create(**request)
-    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError):
-        # the same for every trial: the run stops
-        raise
-    except anthropic.APIError as exc:  # e.g. overloaded, too large, a timeout: recorded per trial, the run goes on
-        return CallResult(error=f"{type(exc).__name__}: {exc}", duration_ms=_milliseconds_since(started))
-    # anything else (no credentials at all, a bug) is the same for every trial too: the run stops
-    served_by = getattr(response, "model", None)
-    priced_as = served_by
-    if not priced_as:
-        priced_as = request.get("model", "")
-    result = CallResult(input_tokens=token_count(response.usage, "input_tokens"),
-                        output_tokens=token_count(response.usage, "output_tokens"),
-                        cache_write_tokens=token_count(response.usage, "cache_creation_input_tokens"),
-                        cache_read_tokens=token_count(response.usage, "cache_read_input_tokens"),
-                        costs=pricing.price_usage(response.usage, priced_as),
-                        request_id=getattr(response, "_request_id", None),
-                        served_by=served_by, stop_reason=response.stop_reason,
-                        duration_ms=_milliseconds_since(started))
-    text = first_text(response.content, "")
-    result.raw_text = text
-    if response.stop_reason in ("refusal", "max_tokens"):
-        result.error = f"stop_reason {response.stop_reason}"
-        details = getattr(response, "stop_details", None)
-        category = getattr(details, "category", None)
-        if category:
-            result.error = f"{result.error} ({category})"
-    return result
+        answers = {}
+    return result, answers
 
 
 def _differs(first: dict, second: dict) -> bool:
@@ -390,7 +317,7 @@ def count_call(result: TrialResult, number: int, call: CallResult) -> None:
         result.served_by.append(call.served_by)
 
 
-def trial_costs(result: TrialResult) -> list[pricing.CallCost]:
+def trial_costs(result: TrialResult) -> list[llm.CallCost]:
     found = []
     for numbered in result.calls:
         call = numbered[1]
@@ -404,9 +331,7 @@ def record_calls(conn: psycopg.Connection, run_id: int, trial_id: int, result: T
     for numbered in result.calls:
         number = numbered[0]
         call = numbered[1]
-        for cost in call.costs:
-            costs_db.record_call(conn, cost, operation=OPERATION, check_run_id=run_id, trial_id=trial_id,
-                                 call_number=number, request_id=call.request_id)
+        llm.record(conn, call, operation=OPERATION, check_run_id=run_id, trial_id=trial_id, call_number=number)
 
 
 class Trace:
@@ -473,9 +398,9 @@ def _call_data(call_number: int, settings: Settings, pages: list[Page], question
 def _cost_for_trace(call: "CallResult") -> str | None:
     """The call's cost as a decimal string (JSON has no exact decimals), None when nothing was billed or
     a model it ran on is not in the price list."""
-    if not call.costs or pricing.unpriced_count(call.costs):
+    if not call.costs or llm.unpriced_count(call.costs):
         return None
-    return str(pricing.total_cost(call.costs))
+    return str(llm.total_cost(call.costs))
 
 
 def _verification_data(evidence: dict[str, Evidence]) -> dict:
@@ -614,7 +539,7 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
     first = pages_to_send_first(pages, per_question)
     whole_first = len(first) == len(pages)
     first_request = build_request(settings, prompt, first, questions, context)
-    call = ask(client, first_request)
+    call, call_answers = ask(client, first_request)
     trace.add("call", _call_data(1, settings, first, questions, first_request, call), call.duration_ms)
     count_call(result, 1, call)
     if call.error:
@@ -623,11 +548,11 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
     # each answer is kept with whether the model read the whole document when it gave it
     first_whole = whole_first and readable
     answers = {}
-    for key, answer in call.answers.items():
+    for key, answer in call_answers.items():
         answers[key] = (answer, first_whole)
 
     # widening: questions not settled from retrieved pages are asked again with every page
-    retry = questions_to_widen(questions, call.answers, whole_first, requirement_set.not_reported_kinds)
+    retry = questions_to_widen(questions, call_answers, whole_first, requirement_set.not_reported_kinds)
     widened_keys = set()
     fits = total_text_length(pages) <= settings.max_text_chars
     if retry and not fits:
@@ -635,7 +560,7 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
                                question_keys(retry)})
     if retry and fits:
         second_request = build_request(settings, prompt, pages, retry, context)
-        again = ask(client, second_request)
+        again, again_answers = ask(client, second_request)
         trace.add("call", _call_data(2, settings, pages, retry, second_request, again), again.duration_ms)
         count_call(result, 2, again)
         if again.error:
@@ -644,8 +569,8 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
             result.error = f"widening: {again.error}"
             return None
         for question in retry:
-            if question.key in again.answers:
-                answers[question.key] = (again.answers[question.key], readable)
+            if question.key in again_answers:
+                answers[question.key] = (again_answers[question.key], readable)
                 widened_keys.add(question.key)
         result.widened = len(widened_keys)
 
@@ -686,7 +611,7 @@ def _ask_with_files(conn: psycopg.Connection, client: MessagesClient, settings: 
         if file.document_version_id not in result.document_versions:
             result.document_versions.append(file.document_version_id)
     request = build_files_request(settings, prompt, sendable, questions, context)
-    call = ask(client, request)
+    call, call_answers = ask(client, request)
     trace.add("call", _call_data(1, settings, pages, questions, request, call, sendable), call.duration_ms)
     count_call(result, 1, call)
     if call.error:
@@ -694,7 +619,7 @@ def _ask_with_files(conn: psycopg.Connection, client: MessagesClient, settings: 
         return None
     whole = not not_sent
     answers = {}
-    for key, answer in call.answers.items():
+    for key, answer in call_answers.items():
         answers[key] = (answer, whole)
     return answers, pages, set()
 
@@ -833,9 +758,9 @@ def _save_judgement(conn: psycopg.Connection, run_id: int, trial_id: int, judged
     cost = None
     billed = trial_costs(result)
     if not billed:
-        cost = pricing.total_cost(billed)
-    elif pricing.unpriced_count(billed) == 0:
-        cost = pricing.total_cost(billed)
+        cost = llm.total_cost(billed)
+    elif llm.unpriced_count(billed) == 0:
+        cost = llm.total_cost(billed)
     checks_db.save_judgement(conn, run_id, trial_id, parts=parts, label=label, trace=trace,
                              served_by=result.served_by, record_id=result.record_id,
                              document_versions=result.document_versions, input_tokens=result.input_tokens,
@@ -872,7 +797,7 @@ class RunSummary:
         return (f"run {self.run_id}: {', '.join(label_counts)}; failed {len(self.failed)}; evidence quotes "
                 f"{self.evidence}, verified on the page {self.verified}; questions widened to every page "
                 f"{self.widened}; tokens in {self.input_tokens:,}, out {self.output_tokens:,}; "
-                f"cost {pricing.dollars(self.cost_usd)}{self._unpriced()}")
+                f"cost {llm.dollars(self.cost_usd)}{self._unpriced()}")
 
     def _unpriced(self) -> str:
         if not self.unpriced_calls:
@@ -948,8 +873,8 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
             summary.cache_write_tokens += trial_result.cache_write_tokens
             summary.cache_read_tokens += trial_result.cache_read_tokens
             billed = trial_costs(trial_result)
-            summary.cost_usd += pricing.total_cost(billed)
-            summary.unpriced_calls += pricing.unpriced_count(billed)
+            summary.cost_usd += llm.total_cost(billed)
+            summary.unpriced_calls += llm.unpriced_count(billed)
             summary.evidence += trial_result.evidence
             summary.verified += trial_result.verified
             summary.widened += trial_result.widened

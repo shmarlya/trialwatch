@@ -138,15 +138,6 @@ def descriptors_at(conn: psycopg.Connection, numbers: Sequence[str]) -> dict[str
     return found
 
 
-def descriptor_names(conn: psycopg.Connection, uis: Sequence[str]) -> dict[str, str]:
-    found = {}
-    for ui, name in conn.execute(
-        "SELECT ui, name FROM vocab.mesh_descriptor WHERE ui = ANY(%s) ORDER BY ui", (list(uis),)
-    ).fetchall():
-        found[ui] = name
-    return found
-
-
 # a MeSH term this alike to the words of a condition is offered to the AI tags as a candidate
 CANDIDATE_SIMILARITY = 0.5
 

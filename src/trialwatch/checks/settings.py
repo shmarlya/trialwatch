@@ -12,9 +12,10 @@ name), so editing a file never changes what an earlier run says.
 
 import json
 from dataclasses import dataclass
+from functools import cache
 from importlib.resources import files
 
-from trialwatch.checks.model import prompt_names
+from trialwatch.checks.prompts import prompt_names
 from trialwatch.checks.requirements import set_names
 
 # How documents reach the model: their page text (searched per question, asked again with every page
@@ -118,9 +119,11 @@ def _problems(name: str, data: object) -> list[str]:
     return problems
 
 
+@cache
 def load(name: str) -> Settings:
-    """A setup by name; FileNotFoundError when there is no such file (a name is never a path: it may
-    come from a form), ValueError when its content can't be used."""
+    """A setup by name, read once (a changed file takes effect when the process restarts);
+    FileNotFoundError when there is no such file (a name is never a path: it may come from a form),
+    ValueError when its content can't be used."""
     if name not in names():
         raise FileNotFoundError(f"no setup {name!r} in checks/configs/ (there are {', '.join(names())})")
     text = files("trialwatch.checks.configs").joinpath(f"{name}.json").read_text()

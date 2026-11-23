@@ -15,7 +15,7 @@ from decimal import Decimal
 
 import psycopg
 
-from trialwatch.costs import dollars
+from trialwatch.llm import dollars
 from trialwatch.db import checks as checks_db
 from trialwatch.db import costs as costs_db
 from trialwatch.db import core

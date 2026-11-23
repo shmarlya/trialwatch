@@ -281,19 +281,6 @@ def places_named(conn: psycopg.Connection, names: Sequence[str]) -> list[NamedPl
         ).fetchall()
 
 
-def place_by_id(conn: psycopg.Connection, geonameid: int) -> NamedPlace | None:
-    with conn.cursor(row_factory=class_row(NamedPlace)) as cur:
-        return cur.execute(
-            """
-            SELECT geo.name_key(p.name) AS name_key, p.geonameid, p.name, p.country_code, c.name AS country_name,
-                   c.eea, p.population, p.latitude, p.longitude
-            FROM geo.place p JOIN geo.country c ON c.iso2 = p.country_code
-            WHERE p.geonameid = %s
-            """,
-            (geonameid,),
-        ).fetchone()
-
-
 @dataclass(frozen=True)
 class NamedCountry:
     name_key: str
@@ -314,13 +301,6 @@ def countries_named(conn: psycopg.Connection, names: Sequence[str]) -> list[Name
             """,
             (list(names),),
         ).fetchall()
-
-
-def country_by_code(conn: psycopg.Connection, iso2: str) -> NamedCountry | None:
-    with conn.cursor(row_factory=class_row(NamedCountry)) as cur:
-        return cur.execute(
-            "SELECT geo.name_key(name) AS name_key, iso2, name FROM geo.country WHERE iso2 = %s", (iso2.upper(),)
-        ).fetchone()
 
 
 @dataclass(frozen=True)

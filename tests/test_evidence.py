@@ -16,7 +16,8 @@ from test_sources_ctis import FakeCtis, ctis_source, listed_row
 
 from trialwatch.checks import evidence as ev
 from trialwatch.checks import requirements
-from trialwatch.checks.model import load_prompt, prompt_names
+from trialwatch import llm
+from trialwatch.checks.prompts import load_prompt, prompt_names
 from trialwatch.db import SESSION_OPTIONS, core
 from trialwatch.db import checks as checks_db
 from trialwatch.sources import ctis, stages
@@ -381,12 +382,12 @@ def test_two_different_answers_to_one_question_are_left_to_a_person(conn):
              answer("participants", found=False, kind="other"),
              answer("cancelled", found=False, kind="other"),
              answer("cancelled", found=False, kind="other")]
-    called = ev.ask(FakeClient(twice), {"model": "claude-test"})
-    assert called.answers["participants"] == {"key": "participants", "found": "dont_know", "quote": "", "document": 0,
+    called, answers_by_key = ev.ask(FakeClient(twice), {"model": "claude-test"})
+    assert answers_by_key["participants"] == {"key": "participants", "found": "dont_know", "quote": "", "document": 0,
                                               "page": 0, "kind": "other",
                                               "note": "the model answered this question twice, differently"}
     # the same answer twice is that answer
-    assert called.answers["cancelled"] == answer("cancelled", found=False, kind="other")
+    assert answers_by_key["cancelled"] == answer("cancelled", found=False, kind="other")
     trial = seed(conn)
     answers = good_but([answer("participants", found=False, kind="other")])
     answers.append(GOOD[0])
@@ -597,22 +598,23 @@ def test_token_counts_include_every_attempt():
     declined = SimpleNamespace(input_tokens=900, output_tokens=12)
     answered = SimpleNamespace(input_tokens=950, output_tokens=40)
     usage = SimpleNamespace(input_tokens=950, output_tokens=40, iterations=[declined, answered])
-    assert ev.token_count(usage, "input_tokens") == 1850
-    assert ev.token_count(usage, "output_tokens") == 52
+    both = llm.CallResult(costs=llm.price_usage(usage, "claude-test"))
+    assert (both.input_tokens, both.output_tokens) == (1850, 52)
     plain = SimpleNamespace(input_tokens=500, output_tokens=None, iterations=None)
-    assert (ev.token_count(plain, "input_tokens"), ev.token_count(plain, "output_tokens")) == (500, 0)
-    assert ev.token_count(SimpleNamespace(iterations=[]), "input_tokens") == 0
+    one = llm.CallResult(costs=llm.price_usage(plain, "claude-test"))
+    assert (one.input_tokens, one.output_tokens) == (500, 0)
+    assert llm.CallResult(costs=llm.price_usage(SimpleNamespace(iterations=[]), "claude-test")).input_tokens == 0
     client = FakeClient([])
     client.usage = usage
-    called = ev.ask(client, {"model": "claude-test"})
+    called, _answers = ev.ask(client, {"model": "claude-test"})
     assert (called.input_tokens, called.output_tokens, called.error) == (1850, 52, None)
 
 
 def test_a_refusal_is_an_error_not_an_answer():
     client = FakeClient(GOOD)
     client.stop_reason = "refusal"
-    called = ev.ask(client, {"model": "claude-test"})
-    assert (called.error, called.answers) == ("stop_reason refusal", {})
+    called, answers_by_key = ev.ask(client, {"model": "claude-test"})
+    assert (called.error, answers_by_key) == ("stop_reason refusal", {})
 
 
 def test_the_trace_keeps_the_exact_request_and_what_retrieval_found(conn):

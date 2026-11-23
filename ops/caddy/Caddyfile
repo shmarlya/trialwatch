@@ -1,0 +1,9 @@
+# The site's front door: HTTPS for TRIALWATCH_DOMAIN (a Let's Encrypt certificate; for localhost, one of
+# Caddy's own), then everything to the web service.
+#
+# No access log here on purpose: a search's address holds what someone looked for, which can be about
+# their health (ADR-008). The web service logs each request without its query string.
+{$TRIALWATCH_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy web:8010
+}

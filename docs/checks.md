@@ -142,7 +142,8 @@ with the default setup, the trials never judged or whose judgement is outdated (
 | `checks/verify.py` | quote verification, readable pages |
 | `checks/requirements.py`, `requirement_sets/` | requirement sets and their rules |
 | `checks/settings.py`, `configs/` | setups |
-| `checks/model.py`, `prompts/` | the model call and the system prompt |
+| `checks/prompts/` | the system prompts and loading them |
+| `llm.py` (shared) | the model call and its cost |
 | `checks/publishing.py` | publication and its gold agreement |
 | `checks/due_date.py` | due-date rules |
 | `db/checks.py` | their SQL |

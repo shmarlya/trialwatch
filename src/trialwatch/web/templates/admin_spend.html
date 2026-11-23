@@ -3,7 +3,7 @@
 {% block title %}Spend · TrialWatch{% endblock %}
 {% block content %}
 <h1>Spend</h1>
-<p class="sub">What TrialWatch spent on paid APIs: every billed model call, priced at Anthropic's list prices (<code>src/trialwatch/costs/prices.json</code>) when it was made. US dollars; months are UTC.</p>
+<p class="sub">What TrialWatch spent on paid APIs: every billed model call, priced at Anthropic's list prices (<code>src/trialwatch/prices.json</code>) when it was made. US dollars; months are UTC.</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="grid">
   <div class="panel">

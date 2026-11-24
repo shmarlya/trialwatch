@@ -1,0 +1,8 @@
+{
+  "description": "What the short gold evaluation (the hardest 50, mostly items Bruckner's reviewers disagreed on) must reach, or its pipeline fails. It is gated against its own accepted baseline, not against fixed shares: no clear false accusation, no more than max_drop items worse than the baseline, and no item 'not full' in one of the repeated runs and 'full' in another (items moving between a label and 'undecided' are reported, not gated).",
+  "max_clear_false_accusations": 0,
+  "max_missing": 0.1,
+  "max_contradicting": 0,
+  "baseline": "evals/baselines/gold-short.json",
+  "max_drop": 2
+}

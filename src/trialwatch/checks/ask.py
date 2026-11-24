@@ -11,7 +11,7 @@ from typing import Any
 
 from trialwatch import llm
 from trialwatch.checks.prompts import Prompt
-from trialwatch.checks.requirements import Question
+from trialwatch.checks.requirements import KINDS, Question
 from trialwatch.checks.settings import Settings
 from trialwatch.db import core
 from trialwatch.db.core import Page
@@ -20,10 +20,6 @@ from trialwatch.llm import FALLBACK_BETA, CallResult, MessagesClient, uses_fallb
 
 # What its model calls are for, in core.llm_call
 OPERATION = "check"
-
-
-# What a quote is evidence of; requirement sets say which of these mean "not reported"
-KINDS = ("numeric_result", "narrative_only", "chart_only", "redacted", "not_analysed", "other")
 
 
 # The model's three answers to "did you find it?": "dont_know" is always allowed and never a guess

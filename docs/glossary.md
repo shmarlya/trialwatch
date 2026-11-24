@@ -120,7 +120,7 @@ See [sources and gold](sources-and-gold.md).
 | **Gold item** | One trial in a gold dataset: its identifiers, the expected parts and label, each reviewer's answers and comments. |
 | **Gold labels** | Hand-checked answers (from Bruckner, COMPare) we compare our results against. |
 | **Version lock** | `data/gold/versions.lock`: the sha256 of every released gold dataset version, which never changes. The one exception to "no versioning before production". |
-| **Gold evaluation** | Our whole workflow run on a gold dataset's labelled trials, passing or failing on the gates in `evals/gates.json`. |
+| **Gold evaluation** | Our whole workflow run on a gold dataset's labelled trials, passing or failing on the gates in `evals/gates/` (full: fixed shares; short: against its accepted baseline). |
 | **Evals** | Scoring our checks against gold labels: `gold compare` scores one run; a gold evaluation runs the whole workflow. |
 | **Frozen snapshot** | CTIS's raw answers for a gold dataset's trials, recorded once and replayed to the CTIS adapter, so every gold evaluation reads the same evidence. |
 | **Set aside** | A gold item left out of the score because our check read a document posted on or after the day the reviewers read theirs. |

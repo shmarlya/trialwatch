@@ -137,14 +137,59 @@ def test_the_score_reads_as_lines(conn):
                           "  cancelled     4/4 agree with the reviewers, 0 left open"]
     assert lines[5:9] == ["  ours full      · theirs full     1", "  ours full      · theirs not full 1",
                           "  ours not full  · theirs full     1", "  ours undecided · theirs full     1"]
-    assert lines[9:] == ["false accusations (ours not full, theirs full): 1; missed (ours full, theirs not full): 1",
+    assert lines[9:] == ["false accusations (ours not full, theirs full): 1 (1 clear, 0 contested: a reviewer read it "
+                         "as we did); missed (ours full, theirs not full): 1",
+                         "decided items that agree with the final label or with at least one reviewer: 1",
                          "tokens in 600, out 60; cost $0.00"]
     disagreements = compare.disagreement_lines(scored)
     assert len(disagreements) == 3
     assert disagreements[0].startswith(f"  {ACCUSED} ours not full (") and "outcomes=0" in disagreements[0]
-    assert disagreements[0].endswith("theirs full (participants=1 outcomes=1 cancelled=0): every outcome is in table 3")
+    assert disagreements[0].endswith("theirs full (participants=1 outcomes=1 cancelled=0) [clear false accusation]: "
+                                     "every outcome is in table 3")
     assert disagreements[1].endswith("theirs not full (participants=1 outcomes=0 cancelled=0): ")
     assert disagreements[2] == f"  {FAILED}: InternalServerError: overloaded"
+
+
+def a_review(name, parts):
+    return datasets.Review(reviewer=name, parts=dict(parts), asked_to_check=None, comment=None)
+
+
+def test_a_false_accusation_a_reviewer_also_read_is_contested(conn):
+    """ACCUSED: one of its reviewers read an outcome as not reported, as we did; MISSED: one reviewer
+    cleared it, as we did, so ours agrees with a reviewer though not with the final label."""
+    run_id = a_judged_run(conn)
+    items = list(ITEMS)
+    items[0] = datasets.Item(**{**ITEMS[0].__dict__, "reviews": [a_review("first", FULL), a_review("second", NOT_FULL)]})
+    items[1] = datasets.Item(**{**ITEMS[1].__dict__, "reviews": [a_review("first", FULL), a_review("second", NOT_FULL)]})
+    scored = compare.compare_run(conn, run_id, a_dataset(items))
+    assert scored.false_accusations == [ACCUSED] and scored.contested_accusations == [ACCUSED]
+    assert scored.disagreements[0].tier == "contested" and scored.disagreements[1].tier is None
+    # AGREED, and MISSED through its first reviewer; ACCUSED's "not full" matches its second reviewer too
+    assert scored.agrees_with_a_reviewer == 3
+    assert scored.item_labels[LEFT_OPEN] == "undecided" and scored.expected_labels[LEFT_OPEN] == "full"
+
+
+def test_the_items_ours_leaves_open_or_disagrees_on_show_each_answer_and_its_rule(conn):
+    run_id = a_judged_run(conn)
+    trial_id = compare.trial_of_item(conn, an_item(LEFT_OPEN, "full"))
+    answer = checks_db.Answer(found=True, kind="numeric_result", quote="A total of 23   participants were enrolled",
+                              document_version_id=None, file_sha256=None, page_no=3, note="the count", verified=True)
+    checks_db.save_answer(conn, run_id, trial_id, "participants", None, [], False, answer)
+    checks_db.save_answer(conn, run_id, trial_id, "endpoint:7", "Overall survival", [], True, None)
+    checks_db.save_steps(conn, run_id, trial_id, [{"name": "rules", "at": BEFORE, "data": {"trace": {
+        "participants": {"value": True, "rule": "verified quote with a count"},
+        "endpoint:7": {"value": None, "rule": "no answer"}}}}])
+    scored = compare.compare_run(conn, run_id, a_dataset(ITEMS))
+    assert scored.undecided == [LEFT_OPEN]
+    assert compare.undecided_lines(scored) == [
+        f"  {LEFT_OPEN} theirs full",
+        "      endpoint:7: undecided · no answer · no answer, asked again with every page",
+        "      participants: yes · verified quote with a count · found, numeric_result, p.3",
+        "        “A total of 23 participants were enrolled”",
+        "        note: the count",
+    ]
+    # an item disagreed on whose trial has no answers stored shows no lines under it
+    assert scored.details[ACCUSED] == []
 
 
 def test_a_run_is_only_scored_against_labels_of_its_requirement_set(conn):

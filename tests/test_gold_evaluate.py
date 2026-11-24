@@ -79,6 +79,73 @@ def test_the_gates_pass_or_say_what_was_missed():
     assert evaluate.load_gates().max_false_accusations == 0
 
 
+def test_the_gates_files_name_only_known_gates_and_leave_out_the_rest(tmp_path):
+    full = evaluate.load_gates(evaluate.GATES_DIR / "full.json")
+    assert (full.min_label_agreement, full.max_clear_false_accusations, full.baseline) == (0.9, 0, None)
+    short = evaluate.load_gates(evaluate.GATES_DIR / "short.json")
+    # the hardest 50 are gated against their own baseline, not fixed shares
+    assert short.min_label_agreement is None and short.min_decided is None
+    assert short.baseline == evaluate.EVALS_DIR / "baselines" / "gold-short.json" and short.max_drop == 2
+    assert short.max_contradicting == 0 and short.max_unstable is None
+    unknown = tmp_path / "gates.json"
+    unknown.write_text(json.dumps({"min_label_agrement": 0.9}))
+    try:
+        evaluate.load_gates(unknown)
+        raise AssertionError("a misspelt gate must be refused, not ignored")
+    except ValueError as exc:
+        assert "min_label_agrement" in str(exc)
+
+
+def test_a_clear_false_accusation_fails_and_a_contested_one_is_only_counted():
+    scored = scored_with({("full", "full"): 9, ("not full", "full"): 2}, false_accusations=2)
+    scored.contested_accusations = ["f"]
+    found = evaluate.measures(scored)
+    assert (found.false_accusations, found.clear_false_accusations) == (2, 1)
+    assert evaluate.failures(found, evaluate.Gates(max_clear_false_accusations=1)) == []
+    assert evaluate.failures(found, evaluate.Gates(max_clear_false_accusations=0)) == [
+        "1 clear false accusations, which no reviewer's reading supports (at most 0)"]
+
+
+def test_a_baseline_gate_allows_a_few_items_worse_and_no_more(tmp_path):
+    gates = evaluate.Gates(baseline=tmp_path / "baseline.json", max_drop=2)
+    found = evaluate.measures(scored_with({("full", "full"): 20, ("full", "not full"): 5, ("undecided", "full"): 5}))
+    assert found.disagreed == 5 and found.decided == 25
+    assert evaluate.failures(found, gates, baseline=None) == [
+        f"no baseline at {tmp_path / 'baseline.json'}: record an accepted run with --write-baseline"]
+    data = evaluate.baseline_data([found], {"sample": "s"})
+    (tmp_path / "baseline.json").write_text(json.dumps(data))
+    baseline = evaluate.read_baseline(tmp_path / "baseline.json")
+    assert (baseline.decided, baseline.disagreed, baseline.runs) == (25, 5, 1)
+    assert evaluate.failures(found, gates, baseline=baseline) == []
+    worse = evaluate.measures(scored_with({("full", "full"): 17, ("full", "not full"): 8, ("undecided", "full"): 5}))
+    assert evaluate.failures(worse, gates, baseline=baseline) == [
+        "8 items disagree with the gold label, the baseline had 5 (at most 2 more)"]
+    fewer = evaluate.measures(scored_with({("full", "full"): 17, ("full", "not full"): 5, ("undecided", "full"): 8}))
+    assert evaluate.failures(fewer, gates, baseline=baseline) == ["22 items decided, the baseline had 25 (at most 2 fewer)"]
+
+
+def test_repeated_runs_gate_the_median_share_and_the_worst_accusations():
+    good = evaluate.measures(scored_with({("full", "full"): 10}))
+    bad = evaluate.measures(scored_with({("full", "full"): 5, ("not full", "full"): 5}, false_accusations=5))
+    gates = evaluate.Gates(min_label_agreement=0.9, max_false_accusations=0, max_unstable=1)
+    failed = evaluate.failures([good, good, bad], gates, unstable=2)
+    assert failed == ["5 false accusations (at most 0)", "2 items changed label between the runs (at most 1)"]
+
+
+def test_items_whose_label_changes_between_runs_are_unstable():
+    first, second = scored_with({}), scored_with({})
+    first.item_labels = {"a": "full", "b": "not full", "c": "undecided"}
+    second.item_labels = {"a": "full", "b": "undecided", "c": "undecided"}
+    assert evaluate.unstable_items([first, second]) == {"b": ["not full", "undecided"]}
+    # moving between a label and undecided is reported; between not full and full it is gated
+    third = scored_with({})
+    third.item_labels = {"a": "not full", "b": "not full", "c": "undecided"}
+    unstable = evaluate.unstable_items([first, second, third])
+    assert evaluate.contradicting_items(unstable, [first, second, third]) == ["a"]
+    assert evaluate.failures(evaluate.measures(first), evaluate.Gates(max_contradicting=0), contradicting=1) == [
+        '1 items were "not full" in one run and "full" in another (at most 0)']
+
+
 def fake_workflow(conn, monkeypatch, tmp_path, label):
     """CTIS, page text and the model faked; a gold dataset of one item labelled `label`. (The test's
     connection stands in for every one the command opens, so it writes as one actor.)"""
@@ -116,7 +183,27 @@ def test_gold_eval_runs_the_whole_workflow_and_passes_the_gates(app_conn, tmp_pa
     assert text.startswith("# Test eval") and "**PASSED** every gate" in text
     assert "| label agreement | 100.0% (1/1) | ≥ 90% |" in text
     # five pages go to the model whole: no search to measure
-    assert "retrieval: 0 trials searched, 1 sent whole" in text and "| search hit rate (retrieval) | — " in text
+    assert "retrieval: 0 trials searched, 1 sent whole" in text and "| search hit rate (retrieval) | —; missed by the search 0 |" in text
+
+
+def test_gold_eval_repeats_the_check_and_records_a_baseline(app_conn, tmp_path, monkeypatch):
+    fake_workflow(app_conn, monkeypatch, tmp_path, "not full")
+    baseline = tmp_path / "baseline.json"
+    gates = tmp_path / "short.json"
+    gates.write_text(json.dumps({"max_clear_false_accusations": 0, "max_unstable": 0, "max_contradicting": 0,
+                                 "baseline": str(baseline), "max_drop": 0}))
+    report = tmp_path / "report.md"
+    first = CliRunner().invoke(cli.app, ["gold", "eval", "--dataset", "test/v1", "--gates", str(gates), "--repeat", "2",
+                                         "--report", str(report), "--write-baseline", str(baseline)])
+    # no baseline yet when it ran: it fails, and records the one to commit
+    assert first.exit_code == 1 and "no baseline at" in first.output
+    recorded = json.loads(baseline.read_text())
+    assert (recorded["runs"], recorded["decided"], recorded["disagreed"], len(recorded["run_ids"])) == (2, 1, 0, 2)
+    text = report.read_text()
+    assert "## Summary · run 2 of 2" in text and "| items that changed label between runs | 0 | ≤ 0 |" in text
+    second = CliRunner().invoke(cli.app, ["gold", "eval", "--dataset", "test/v1", "--gates", str(gates)])
+    assert second.exit_code == 0, second.output
+    assert "| items disagreeing with the gold label | 0 | ≤ baseline 0 + 0 |" in second.output
 
 
 def test_gold_eval_fails_on_a_false_accusation(app_conn, tmp_path, monkeypatch):

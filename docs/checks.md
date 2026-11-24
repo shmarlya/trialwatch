@@ -23,7 +23,7 @@ flowchart TB
     finder -.-> judgements
     judgements --> web["Web interface<br>public: home + charts, trials, /find<br>staff: workflow, sources, jobs, gold<br>admin: users, spend, Grafana"]
     judgements -.-> planned["MCP server for AI agents,<br>reports, e.g. Poland (planned)"]
-    gold["Gold datasets<br>data/gold/ (Bruckner + due-date rules)<br>frozen CTIS snapshot"] --> gold_eval["Gold evaluation in CI<br>gates: evals/gates.json"]
+    gold["Gold datasets<br>data/gold/ (Bruckner + due-date rules)<br>frozen CTIS snapshot"] --> gold_eval["Gold evaluation in CI<br>gates: evals/gates/"]
     gold -- "agreement" --> judgements
     worker -. "OTLP" .-> otel["OpenTelemetry → Grafana<br>traces · metrics · logs · report.* views"]
     web -. "OTLP" .-> otel
@@ -62,7 +62,10 @@ flowchart TB
   document kinds to read, the requirements (a question, or one per registered item such as each primary endpoint,
   with search hints and a rule type), the parts they count towards, and its labels: tried in order, the first
   whose condition on the parts holds (`when_any`, `when_all`; the last has none), each saying what it means next
-  to a gold label (`accusation`, `clears` or `open`). Gold scoring reads those meanings, so a set with other
+  to a gold label (`accusation`, `clears` or `open`). Answer kinds mean "not reported" (`not_reported_kinds`) or
+  leave the question to a person (`open_kinds`: `not_conducted`, a result of a stage of the trial that never
+  started or enrolled nobody, is neither reported nor missing; `partial_result`, data for only some of an
+  endpoint's components). Both are asked again with every page when first seen on retrieved pages. Gold scoring reads those meanings, so a set with other
   labels is scored the same way. The web interface's Requirements page shows every set.
 - **System prompt.** `src/trialwatch/checks/prompts/evidence.md`. It names no registry, document type or
   regulation; the trial, its documents and the questions are given per call from data, each fenced in tags. Text
@@ -77,7 +80,10 @@ flowchart TB
 - **Verified quotes only.** A quote counts only if it is at least 10 characters long and found on the page it
   cites as whole words, ignoring case, spacing, dash and quote-mark variants and line-end hyphens
   (`checks/verify.py`). A page counts as read only if its text layer holds at least 200 letters: on a scanned
-  page "not found" can't mean "not reported".
+  page "not found" can't mean "not reported". A cover, signature, legend or contents page also falls under that
+  line, so the setup allows a few (`unreadable_pages_allowed`, 1 by default): with at most that many such pages,
+  and at least one readable one, answers from every page still count as the whole document. The trial page
+  shows which pages had no text.
 - **Don't know, and widening.** The model may answer `dont_know` (stored as `checks.answer.found` NULL) when it
   can't tell. A question not answered from retrieved pages, or an endpoint found there only as not reported, is
   asked again with every page, so a retrieval miss never becomes "not reported". What the rules still can't
@@ -186,7 +192,7 @@ erDiagram
 | Table | What it holds |
 |---|---|
 | `checks.run` | one check run: who ran it, model, effort, prompt and requirement set (name, sha256, text as sent), params (method, top_k, …), status (running, succeeded, failed, stopped) and why it ended early, counts, job; its tokens and cost are its calls' (`core.llm_call`) |
-| `checks.answer` | each question a run asked about a trial (`participants`, `cancelled`, `endpoint:<registered id>`, …): the registered item it is about, the pages shown, whether it was asked again with every page; and the model's answer, if it gave one (`evidence_id`, which the rules trace names): found (true, false, NULL = don't know), kind (numeric_result, narrative_only, chart_only, redacted, not_analysed, other), the quote, document version, file sha256 and page, and whether the quote is really on that page |
+| `checks.answer` | each question a run asked about a trial (`participants`, `cancelled`, `endpoint:<registered id>`, …): the registered item it is about, the pages shown, whether it was asked again with every page; and the model's answer, if it gave one (`evidence_id`, which the rules trace names): found (true, false, NULL = don't know), kind (numeric_result, narrative_only, chart_only, redacted, not_analysed, not_conducted, partial_result, other), the quote, document version, file sha256 and page, and whether the quote is really on that page |
 | `checks.judgement` | the rules' verdict per trial per run: label (full, not full, undecided; NULL only with an error), parts by name (NULL = undecided), the rule and evidence behind each, the inputs read (trial record, document versions), the models that served it (its rules' trace is its rules step; its tokens and cost its calls'); its `agreement` with gold labels, recorded as its run finished; and its withdrawal by staff (at, by, the reason shown to all; audited) |
 | `checks.step` | the trace of one trial in one run: questions, pages, retrieval, call (naming its `core.llm_call`), widening, verification, rules, error, each with its data |
 | `checks.judgement_current` (view) | the judgement each trial shows, to staff and the public alike: the newest successful one per requirement set from a run that has ended (public from then: `published_at`), whether it is outdated, its agreement and its withdrawal |

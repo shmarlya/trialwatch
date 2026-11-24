@@ -3,12 +3,18 @@ evidence from CTIS, run the evidence check, score the run against the labels) an
 decide whether it passes. The two pipelines in .github/workflows/ run it: eval-full.yml on every
 labelled item, eval-short.yml on the hardest 50 (evals/hard-50.txt, from `trialwatch gold sample`).
 
-The gates (evals/gates.json), all shares of the labelled items in the sample:
+The gates (evals/gates/full.json, evals/gates/short.json); a gate left out is not checked:
 - min_label_agreement: of the items where ours is "full" or "not full", the share that agrees
 - max_false_accusations: ours "not full" where the gold label is "full" (a count)
+- max_clear_false_accusations: of them, those no reviewer's own reading supports
 - min_decided: of the compared items, the share ours did not leave "undecided"
 - max_missing: the share we could not compare: not transferred, not checked, or the check failed
-Items set aside (we read a document posted after the reviewers' day) count for none of them.
+- max_unstable: items whose label differs between repeated runs (--repeat)
+- max_contradicting: of them, items "not full" in one run and "full" in another
+- baseline, max_drop: no more than max_drop items worse than the accepted baseline, in items that
+  disagree with the gold label and in items decided
+Items set aside (we read a document posted after the reviewers' day) count for none of them. With
+repeated runs, shares are the runs' median and accusations the worst run's.
 
 The report also measures retrieval (no gate): the gold labels don't say on which page an answer is, so
 a search miss is seen where it shows: a question asked again with every page whose verified quote is
@@ -26,8 +32,11 @@ from trialwatch.db import checks as checks_db
 from trialwatch.gold import compare
 from trialwatch.gold.datasets import Dataset, Item
 
-EVALS_DIR = Path(__file__).parent.parent.parent.parent / "evals"
-GATES_FILE = EVALS_DIR / "gates.json"
+REPO_DIR = Path(__file__).parent.parent.parent.parent
+EVALS_DIR = REPO_DIR / "evals"
+GATES_DIR = EVALS_DIR / "gates"
+# the full pipeline's gates; the short one passes evals/gates/short.json
+GATES_FILE = GATES_DIR / "full.json"
 
 
 # --- the hardest items ----------------------------------------------------------------------------
@@ -119,16 +128,47 @@ def only_items(dataset: Dataset, keys: list[str]) -> Dataset:
 
 @dataclass(frozen=True)
 class Gates:
-    min_label_agreement: float
-    max_false_accusations: int
-    min_decided: float
-    max_missing: float
+    """What an evaluation must reach. A gate left out of the file (None) is not checked."""
+
+    min_label_agreement: float | None = None
+    max_false_accusations: int | None = None
+    # false accusations no reviewer's own reading supports (compare.py)
+    max_clear_false_accusations: int | None = None
+    min_decided: float | None = None
+    max_missing: float | None = None
+    # items whose label differs between repeated runs (--repeat)
+    max_unstable: int | None = None
+    # of them, items that were an accusation in one run and cleared in another: the flip that could
+    # publish a wrong accusation
+    max_contradicting: int | None = None
+    # a baseline file (relative to the repository): the run may not be worse than it by more than
+    # max_drop items, in disagreements or in decided items
+    baseline: Path | None = None
+    max_drop: int = 0
 
 
 def load_gates(path: Path = GATES_FILE) -> Gates:
     data = json.loads(path.read_text())
-    return Gates(float(data["min_label_agreement"]), int(data["max_false_accusations"]),
-                 float(data["min_decided"]), float(data["max_missing"]))
+    known = {"description", "min_label_agreement", "max_false_accusations", "max_clear_false_accusations",
+             "min_decided", "max_missing", "max_unstable", "max_contradicting", "baseline", "max_drop"}
+    unknown = set(data) - known
+    if unknown:
+        raise ValueError(f"{path}: unknown gates {', '.join(sorted(unknown))}")
+
+    def number(name, kind):
+        if data.get(name) is None:
+            return None
+        return kind(data[name])
+
+    baseline = None
+    if data.get("baseline"):
+        baseline = REPO_DIR / data["baseline"]
+    return Gates(min_label_agreement=number("min_label_agreement", float),
+                 max_false_accusations=number("max_false_accusations", int),
+                 max_clear_false_accusations=number("max_clear_false_accusations", int),
+                 min_decided=number("min_decided", float), max_missing=number("max_missing", float),
+                 max_unstable=number("max_unstable", int), max_contradicting=number("max_contradicting", int),
+                 baseline=baseline, max_drop=int(data.get("max_drop", 0)))
 
 
 @dataclass(frozen=True)
@@ -140,6 +180,11 @@ class Measures:
     false_accusations: int
     missing: int
     set_aside: int
+    clear_false_accusations: int = 0
+
+    @property
+    def disagreed(self) -> int:
+        return self.decided - self.agreed
 
     @property
     def label_agreement(self) -> float:
@@ -164,24 +209,120 @@ def measures(scored: compare.Scored) -> Measures:
             if ours == theirs:
                 agreed += items
     missing = len(scored.not_in_run) + len(scored.errors)
+    clear = len(scored.false_accusations) - len(scored.contested_accusations)
     return Measures(scored.labelled, scored.compared, decided, agreed, len(scored.false_accusations), missing,
-                    len(scored.set_aside))
+                    len(scored.set_aside), clear)
 
 
-def failures(found: Measures, gates: Gates) -> list[str]:
-    """Each gate the evaluation missed, as a sentence; empty when it passes."""
+@dataclass(frozen=True)
+class Baseline:
+    """The measures of the last accepted evaluation of a sample (median over its repeats)."""
+
+    decided: int
+    disagreed: int
+    compared: int
+    runs: int
+    recorded_at: str
+
+
+def read_baseline(path: Path) -> Baseline | None:
+    if not path.is_file():
+        return None
+    data = json.loads(path.read_text())
+    return Baseline(int(data["decided"]), int(data["disagreed"]), int(data["compared"]), int(data["runs"]),
+                    str(data["recorded_at"]))
+
+
+def baseline_data(runs: list[Measures], about: dict) -> dict:
+    """What --write-baseline stores: the median decided and disagreed counts of the runs."""
+    from datetime import UTC, datetime
+
+    data = {"description": "The measures of the last accepted gold evaluation of this sample (median over its "
+                           "repeats); gates with a baseline fail when a run is worse by more than max_drop items",
+            **about,
+            "runs": len(runs),
+            "compared": _median([run.compared for run in runs]),
+            "decided": _median([run.decided for run in runs]),
+            "disagreed": _median([run.disagreed for run in runs]),
+            "recorded_at": datetime.now(UTC).isoformat(timespec="seconds")}
+    return data
+
+
+def _median(values: list):
+    ordered = sorted(values)
+    return ordered[(len(ordered) - 1) // 2]
+
+
+def unstable_items(scores: list[compare.Scored]) -> dict[str, list[str]]:
+    """Item key -> its label in each run, for the items whose label was not the same in every run that
+    compared them (repeated runs on the same evidence)."""
+    labels: dict[str, list[str]] = {}
+    for scored in scores:
+        for key, label in scored.item_labels.items():
+            labels.setdefault(key, []).append(label)
+    unstable = {}
+    for key, found in labels.items():
+        if len(set(found)) > 1:
+            unstable[key] = found
+    return unstable
+
+
+def contradicting_items(unstable: dict[str, list[str]], scores: list[compare.Scored]) -> list[str]:
+    """The unstable items that were an accusation in one run and cleared the trial in another."""
+    if not scores:
+        return []
+    rules = scores[0].label_rules
+    found = []
+    for key, labels in unstable.items():
+        meanings = {meaning_of(rules, label) for label in labels}
+        if "accusation" in meanings and "clears" in meanings:
+            found.append(key)
+    return sorted(found)
+
+
+def failures(found: Measures | list[Measures], gates: Gates, unstable: int = 0,
+             baseline: Baseline | None = None, contradicting: int = 0) -> list[str]:
+    """Each gate the evaluation missed, as a sentence; empty when it passes. With repeated runs, the
+    shares are each run's median and the accusations the worst run's."""
+    runs = found if isinstance(found, list) else [found]
     failed = []
-    if found.label_agreement < gates.min_label_agreement:
-        failed.append(f"label agreement {found.label_agreement:.1%} ({found.agreed}/{found.decided}) is below "
-                      f"{gates.min_label_agreement:.0%}")
-    if found.false_accusations > gates.max_false_accusations:
-        failed.append(f"{found.false_accusations} false accusations (at most {gates.max_false_accusations})")
-    if found.decided_share < gates.min_decided:
-        failed.append(f"decided {found.decided_share:.1%} ({found.decided}/{found.compared}) is below "
-                      f"{gates.min_decided:.0%}")
-    if found.missing_share > gates.max_missing:
-        failed.append(f"missing {found.missing_share:.1%} ({found.missing}/{found.labelled}) is above "
-                      f"{gates.max_missing:.0%}")
+    agreement = _median([run.label_agreement for run in runs])
+    decided = _median([run.decided_share for run in runs])
+    missing = _median([run.missing_share for run in runs])
+    accusations = max(run.false_accusations for run in runs)
+    clear = max(run.clear_false_accusations for run in runs)
+    one = runs[0] if len(runs) == 1 else None
+    if gates.min_label_agreement is not None and agreement < gates.min_label_agreement:
+        counts = f" ({one.agreed}/{one.decided})" if one else " (median of the runs)"
+        failed.append(f"label agreement {agreement:.1%}{counts} is below {gates.min_label_agreement:.0%}")
+    if gates.max_false_accusations is not None and accusations > gates.max_false_accusations:
+        failed.append(f"{accusations} false accusations (at most {gates.max_false_accusations})")
+    if gates.max_clear_false_accusations is not None and clear > gates.max_clear_false_accusations:
+        failed.append(f"{clear} clear false accusations, which no reviewer's reading supports "
+                      f"(at most {gates.max_clear_false_accusations})")
+    if gates.min_decided is not None and decided < gates.min_decided:
+        counts = f" ({one.decided}/{one.compared})" if one else " (median of the runs)"
+        failed.append(f"decided {decided:.1%}{counts} is below {gates.min_decided:.0%}")
+    if gates.max_missing is not None and missing > gates.max_missing:
+        counts = f" ({one.missing}/{one.labelled})" if one else " (median of the runs)"
+        failed.append(f"missing {missing:.1%}{counts} is above {gates.max_missing:.0%}")
+    if gates.max_unstable is not None and unstable > gates.max_unstable:
+        failed.append(f"{unstable} items changed label between the runs (at most {gates.max_unstable})")
+    if gates.max_contradicting is not None and contradicting > gates.max_contradicting:
+        failed.append(f"{contradicting} items were \"not full\" in one run and \"full\" in another "
+                      f"(at most {gates.max_contradicting})")
+    if gates.baseline is not None:
+        if baseline is None:
+            failed.append(f"no baseline at {gates.baseline}: record an accepted run with --write-baseline")
+        else:
+            disagreed = _median([run.disagreed for run in runs])
+            decided_items = _median([run.decided for run in runs])
+            if disagreed > baseline.disagreed + gates.max_drop:
+                failed.append(f"{disagreed} items disagree with the gold label, the baseline had {baseline.disagreed} "
+                              f"(at most {gates.max_drop} more)")
+            if decided_items < baseline.decided - gates.max_drop:
+                failed.append(f"{decided_items} items decided, the baseline had {baseline.decided} "
+                              f"(at most {gates.max_drop} fewer)")
     return failed
 
 
@@ -252,11 +393,43 @@ def retrieval_measures(conn: psycopg.Connection, run_id: int) -> RetrievalMeasur
     return found
 
 
-def report_markdown(title: str, scored: compare.Scored, gates: Gates, run_summary: str,
-                    retrieval: RetrievalMeasures | None = None) -> str:
-    """The evaluation as Markdown, for the pipeline's summary page and its saved report."""
-    found = measures(scored)
-    failed = failures(found, gates)
+@dataclass(frozen=True)
+class RunResult:
+    """One run of a gold evaluation: its score, its summary line and how retrieval did."""
+
+    scored: compare.Scored
+    summary: str
+    retrieval: RetrievalMeasures | None = None
+
+
+def _count_gate(value: int | None) -> str:
+    return "—" if value is None else f"≤ {value}"
+
+
+def _share_gate(sign: str, value: float | None) -> str:
+    return "—" if value is None else f"{sign} {value:.0%}"
+
+
+def _spread(values: list, shown) -> str:
+    """One run: its value; several: the median and every run's value."""
+    if len(values) == 1:
+        return shown(values[0])
+    each = ", ".join(shown(value) for value in values)
+    return f"{shown(_median(values))} (runs: {each})"
+
+
+def report_markdown(title: str, results: RunResult | list[RunResult], gates: Gates,
+                    baseline: Baseline | None = None) -> str:
+    """The evaluation as Markdown, for the pipeline's summary page and its saved report: the gates, the
+    measures (median and each run's, when repeated), the items that changed label between runs, and
+    for each run its disagreements and undecided items with every question's answer and rule."""
+    if isinstance(results, RunResult):
+        results = [results]
+    runs = [measures(result.scored) for result in results]
+    scores = [result.scored for result in results]
+    unstable = unstable_items(scores)
+    contradicting = contradicting_items(unstable, scores)
+    failed = failures(runs, gates, len(unstable), baseline, len(contradicting))
     lines = [f"# {title}", ""]
     if failed:
         lines.append("**FAILED**")
@@ -264,20 +437,64 @@ def report_markdown(title: str, scored: compare.Scored, gates: Gates, run_summar
             lines.append(f"- {reason}")
     else:
         lines.append("**PASSED** every gate")
-    lines += ["", "| Measure | Value | Gate |", "|---|---|---|",
-              f"| label agreement | {found.label_agreement:.1%} ({found.agreed}/{found.decided}) | ≥ {gates.min_label_agreement:.0%} |",
-              f"| false accusations | {found.false_accusations} | ≤ {gates.max_false_accusations} |",
-              f"| decided | {found.decided_share:.1%} ({found.decided}/{found.compared}) | ≥ {gates.min_decided:.0%} |",
-              f"| missing | {found.missing_share:.1%} ({found.missing}/{found.labelled}) | ≤ {gates.max_missing:.0%} |",
-              f"| set aside | {found.set_aside} | — |"]
-    if retrieval is not None:
-        rate = "—" if retrieval.search_hit_rate is None else f"{retrieval.search_hit_rate:.1%}"
-        lines += [f"| search hit rate (retrieval) | {rate} ({retrieval.missed_by_search} missed by the search) | — |"]
-    lines += ["", "```", run_summary]
-    if retrieval is not None:
-        lines.append(retrieval.line())
-    lines += compare.report_lines(scored)
-    lines += ["```", "", "## Disagreements", "", "```"]
-    lines += compare.disagreement_lines(scored)
-    lines += ["```", ""]
+    one = runs[0] if len(runs) == 1 else None
+
+    def counted(share: str, top: int, bottom: int) -> str:
+        return f"{share} ({top}/{bottom})" if one else share
+
+    lines += ["", "| Measure | Value | Gate |", "|---|---|---|"]
+    agreement = _spread([run.label_agreement for run in runs], lambda v: f"{v:.1%}")
+    if one:
+        agreement = counted(agreement, one.agreed, one.decided)
+    decided = _spread([run.decided_share for run in runs], lambda v: f"{v:.1%}")
+    if one:
+        decided = counted(decided, one.decided, one.compared)
+    missing = _spread([run.missing_share for run in runs], lambda v: f"{v:.1%}")
+    if one:
+        missing = counted(missing, one.missing, one.labelled)
+    lines += [f"| label agreement | {agreement} | {_share_gate('≥', gates.min_label_agreement)} |",
+              f"| false accusations | {_spread([run.false_accusations for run in runs], str)} | "
+              f"{_count_gate(gates.max_false_accusations)} |",
+              f"| clear false accusations | {_spread([run.clear_false_accusations for run in runs], str)} | "
+              f"{_count_gate(gates.max_clear_false_accusations)} |",
+              f"| decided | {decided} | {_share_gate('≥', gates.min_decided)} |",
+              f"| missing | {missing} | {_share_gate('≤', gates.max_missing)} |"]
+    if gates.baseline is not None:
+        base = "none" if baseline is None else str(baseline.disagreed)
+        lines.append(f"| items disagreeing with the gold label | {_spread([run.disagreed for run in runs], str)} | "
+                     f"≤ baseline {base} + {gates.max_drop} |")
+        base = "none" if baseline is None else str(baseline.decided)
+        lines.append(f"| items decided | {_spread([run.decided for run in runs], str)} | "
+                     f"≥ baseline {base} − {gates.max_drop} |")
+    if len(runs) > 1:
+        lines.append(f"| items that changed label between runs | {len(unstable)} | "
+                     f"{_count_gate(gates.max_unstable)} |")
+        lines.append(f"| … of them between not full and full | {len(contradicting)} | "
+                     f"{_count_gate(gates.max_contradicting)} |")
+    lines.append(f"| set aside | {_spread([run.set_aside for run in runs], str)} | — |")
+    retrievals = [result.retrieval for result in results if result.retrieval is not None]
+    if retrievals:
+        rates = [retrieval.search_hit_rate for retrieval in retrievals]
+        missed = [retrieval.missed_by_search for retrieval in retrievals]
+        shown = _spread(rates, lambda v: "—" if v is None else f"{v:.1%}") if None not in rates or len(rates) == 1 \
+            else ", ".join("—" if v is None else f"{v:.1%}" for v in rates)
+        lines.append(f"| search hit rate (retrieval) | {shown}; missed by the search {_spread(missed, str)} | — |")
+    if unstable:
+        lines += ["", "## Items that changed label between runs", "", "```"]
+        for key, labels in sorted(unstable.items()):
+            flag = " ← not full and full" if key in contradicting else ""
+            lines.append(f"  {key}: {' · '.join(labels)} (theirs {results[0].scored.expected_labels.get(key)}){flag}")
+        lines += ["```"]
+    for number, result in enumerate(results, start=1):
+        heading = f" · run {number} of {len(results)}" if len(results) > 1 else ""
+        lines += ["", f"## Summary{heading}", "", "```", result.summary]
+        if result.retrieval is not None:
+            lines.append(result.retrieval.line())
+        lines += compare.report_lines(result.scored)
+        lines += ["```", "", f"## Disagreements{heading}", "", "```"]
+        lines += compare.disagreement_lines(result.scored)
+        lines += ["```", "", f"## Undecided{heading}", "", "```"]
+        lines += compare.undecided_lines(result.scored)
+        lines += ["```"]
+    lines.append("")
     return "\n".join(lines)

@@ -37,6 +37,7 @@ FIELDS = {
     "whole_pages": int,
     "top_k": int,
     "max_text_chars": int,
+    "unreadable_pages_allowed": int,
 }
 
 
@@ -63,12 +64,16 @@ class Settings:
     top_k: int
     # widening sends every page only if their text fits (about 4 characters per token)
     max_text_chars: int
+    # text method: a trial's answers still count as reading the whole document when at most this many of
+    # its pages have too few letters to have been read (a cover or signature page), so "not found"
+    # can mean "not reported"
+    unreadable_pages_allowed: int
 
     def params(self) -> dict:
         """What checks.run keeps besides its own columns (model, effort, prompt, requirements)."""
         return {"config": self.config, "method": self.method, "max_tokens": self.max_tokens,
                 "fallbacks": self.fallbacks, "whole_pages": self.whole_pages, "top_k": self.top_k,
-                "max_text_chars": self.max_text_chars}
+                "max_text_chars": self.max_text_chars, "unreadable_pages_allowed": self.unreadable_pages_allowed}
 
     def summary(self) -> str:
         """The setup in one line, for forms and progress."""
@@ -114,8 +119,9 @@ def _problems(name: str, data: object) -> list[str]:
     for field in ("max_tokens", "top_k", "max_text_chars"):
         if data[field] < 1:
             problems.append(f"{field} must be 1 or more")
-    if data["whole_pages"] < 0:
-        problems.append("whole_pages must be 0 or more")
+    for field in ("whole_pages", "unreadable_pages_allowed"):
+        if data[field] < 0:
+            problems.append(f"{field} must be 0 or more")
     return problems
 
 
@@ -136,6 +142,7 @@ def load(name: str) -> Settings:
         method=data["method"], prompt=data["prompt"], requirements=data["requirements"],
         max_tokens=data["max_tokens"], fallbacks=data["fallbacks"], whole_pages=data["whole_pages"],
         top_k=data["top_k"], max_text_chars=data["max_text_chars"],
+        unreadable_pages_allowed=data["unreadable_pages_allowed"],
     )
 
 

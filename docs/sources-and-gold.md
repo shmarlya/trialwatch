@@ -370,23 +370,43 @@ their final verdicts and each reviewer's answers per part, in `bruckner/2026-03-
 
 Two GitHub Actions pipelines run our whole workflow on the Bruckner gold dataset and compare the results with the
 reviewers' labels (ADR-001): they transfer each trial's evidence, run the evidence check with the real model,
-score the run, and fail when a gate in `evals/gates.json` is missed (label agreement at least 90% where we
-decided, no false accusations, at most 20% left undecided, at most 10% not compared). Both are started by hand
-from the Actions tab and cost API money; they need the `ANTHROPIC_API_KEY` repository secret. The report is on
-the run's summary page and kept as an artifact. It also measures retrieval (no gate): how many trials were
-searched rather than sent whole, and of the questions asked again with every page, how many were then answered
-with a verified quote on a page the search had not shown (a search miss), as a search hit rate.
+score the run, and fail when a gate in their gates file (`evals/gates/`) is missed. Both are started by hand
+from the Actions tab and cost API money; they need the `ANTHROPIC_API_KEY` repository secret.
 
-- **Gold evaluation · short** (`.github/workflows/eval-short.yml`): the 50 hardest labelled items, listed in
-  `evals/hard-50.txt` (reviewers disagreed, the team discussed it, the trial was terminated, … ; at least 15 of
-  each label).
-- **Gold evaluation · full** (`.github/workflows/eval-full.yml`): every labelled item (206), up to six hours.
+- **Gold evaluation · full** (`.github/workflows/eval-full.yml`, `evals/gates/full.json`): every labelled item
+  (206), up to six hours. Fixed gates: label agreement at least 90% where we decided, no false accusations, at most
+  20% left undecided, at most 10% not compared.
+- **Gold evaluation · short** (`.github/workflows/eval-short.yml`, `evals/gates/short.json`): the 50 hardest
+  labelled items, listed in `evals/hard-50.txt` (reviewers disagreed, the team discussed it, the trial was
+  terminated, … ; at least 15 of each label), checked **three times** on the same evidence. Most of these are
+  items Bruckner's own reviewers disagreed on, so fixed shares say little about them; the short evaluation is a
+  regression check instead: no **clear** false accusation, at most 2 items worse than its accepted baseline
+  (`evals/baselines/gold-short.json`) in items disagreeing with the gold label and in items decided, no item
+  "not full" in one of the three runs and "full" in another (items moving between a label and "undecided" are
+  listed, not gated), at most 10% not compared.
+
+**Measures.** A false accusation (ours not full, theirs full) is **clear** when no reviewer's own reading of the
+item (their parts, under the requirement set's label rules) was an accusation, and **contested** when at least
+one reviewer read it as we did; both are counted, the gates name which they limit. The report also counts the
+decided items that agree with the final label or with at least one reviewer. With repeated runs (`--repeat N`),
+shares are the runs' median, accusations the worst run's, and the items whose label changed between runs are
+listed. It also measures retrieval (no gate): how many trials were searched rather than sent whole, and of the
+questions asked again with every page, how many were then answered with a verified quote on a page the search
+had not shown (a search miss), as a search hit rate.
+
+**The report** is on the run's summary page and kept as an artifact (30 days) with every answer and judgement
+as CSV (`ops/eval/export.sql`) and the runs' measures as `gold-eval-baseline.json`. For each item ours disagrees
+on or leaves undecided, it shows every question: its value, the rule that set it, and the model's answer (found,
+kind, page, the quote and the model's note), so a failure can be read without the run's database.
+**Accepting a baseline:** when a short run's result is accepted, commit its `gold-eval-baseline.json` as
+`evals/baselines/gold-short.json` (or run `gold eval … --repeat 3 --write-baseline evals/baselines/gold-short.json`
+locally).
 
 Both call `.github/workflows/eval-shared.yml`, which runs the same command you can run locally (it calls the
 model):
 
 ```bash
-uv run trialwatch gold eval --dataset bruckner/2026-03-16 --sample evals/hard-50.txt --snapshot snapshot.tar.gz
+uv run trialwatch gold eval --dataset bruckner/2026-03-16 --sample evals/hard-50.txt --snapshot snapshot.tar.gz --gates evals/gates/short.json --repeat 3
 ```
 
 Without `--snapshot` it reads live CTIS. The sample is made by

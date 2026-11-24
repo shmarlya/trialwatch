@@ -40,7 +40,10 @@ def test_gold_compare_scores_a_run_against_the_newest_dataset_of_its_requirement
     assert result.exit_code == 0
     lines = result.stdout.splitlines()
     assert lines[0].startswith(f"run {run_id} against test/v1 · model claude-test")
-    assert "false accusations (ours not full, theirs full): 1; missed (ours full, theirs not full): 1" in lines
+    assert (
+        "false accusations (ours not full, theirs full): 1 (1 clear, 0 contested: a reviewer read it as we did); "
+        "missed (ours full, theirs not full): 1"
+    ) in lines
     # each disagreement and error, for a person to look at
     assert f"  {ACCUSED} ours not full (" in result.stderr
     assert f"  {FAILED}: InternalServerError: overloaded" in result.stderr

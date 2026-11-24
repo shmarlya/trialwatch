@@ -325,6 +325,45 @@ def retrieval_rows(conn: psycopg.Connection, run_id: int) -> list[RetrievalRow]:
         ).fetchall()
 
 
+@dataclass(frozen=True)
+class AnswerDetail:
+    """One question of one trial in a run: the model's answer and what the rules made of it."""
+
+    trial_id: int
+    key: str
+    item_text: str | None
+    widened: bool
+    # False: the model gave no answer to it
+    answered: bool
+    found: bool | None
+    kind: str | None
+    quote: str | None
+    page_no: int | None
+    note: str | None
+    verified: bool | None
+    # from the trial's rules step: the question's value (None: undecided) and the rule that set it
+    value: bool | None
+    rule: str | None
+
+
+def answer_details(conn: psycopg.Connection, run_id: int) -> list[AnswerDetail]:
+    """Every question the run asked, with its answer and its rule (gold/compare.py shows them for the
+    items a gold evaluation disagrees on or leaves open)."""
+    with conn.cursor(row_factory=class_row(AnswerDetail)) as cur:
+        return cur.execute(
+            """
+            SELECT a.trial_id, a.key, a.item_text, a.widened, a.evidence_id IS NOT NULL AS answered, a.found, a.kind,
+                   a.quote, a.page_no, a.note, a.verified,
+                   (s.data->'trace'->a.key->>'value')::boolean AS value, s.data->'trace'->a.key->>'rule' AS rule
+            FROM checks.answer a
+            LEFT JOIN checks.step s ON s.run_id = a.run_id AND s.trial_id = a.trial_id AND s.name = 'rules'
+            WHERE a.run_id = %s
+            ORDER BY a.trial_id, a.key
+            """,
+            (run_id,),
+        ).fetchall()
+
+
 def trials_needing_check(conn: psycopg.Connection, trial_ids: list[int], requirements: str) -> list[int]:
     """The trials among these that have never been judged against the requirement set, or whose current
     judgement is outdated (checks.judgement_current: a record or document it read changed since)."""

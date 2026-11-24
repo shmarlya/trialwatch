@@ -751,6 +751,10 @@ def gold_compare_run(
         typer.echo(line)
     for line in gold_compare.disagreement_lines(scored):
         typer.echo(line, err=True)
+    if scored.undecided:
+        typer.echo("undecided:", err=True)
+        for line in gold_compare.undecided_lines(scored):
+            typer.echo(line, err=True)
 
 
 @gold_app.command("sample")
@@ -866,10 +870,17 @@ def gold_eval(
                                   help="Read CTIS from this frozen snapshot (.tar.gz) instead of the network")
     ] = None,
     lock: Annotated[Path, typer.Option(help="The lock the snapshot must match")] = snapshot.LOCK_FILE,
+    repeat: Annotated[int, typer.Option(min=1, help="Run the check this many times on the same evidence: the "
+                                                    "report shows the median, each run, and the items whose "
+                                                    "label changed")] = 1,
+    write_baseline: Annotated[
+        Path | None, typer.Option(dir_okay=False, help="Also record these runs' measures here as the accepted "
+                                                       "baseline (a gates file's baseline)")
+    ] = None,
 ) -> None:
     """Our whole workflow on a gold dataset's labelled items: transfer their evidence from CTIS, run the
     evidence check (it calls the model), score the run against the labels, and fail (exit 1) when a
-    gate in evals/gates.json is missed. The two gold pipelines in .github/workflows/ run this."""
+    gate in the gates file (evals/gates/) is missed. The two gold pipelines in .github/workflows/ run this."""
     try:
         chosen = datasets.load(dataset)
         settings = check_settings.load(config)
@@ -918,20 +929,40 @@ def gold_eval(
         for key in gold.keys:
             if key in found:
                 trial_ids.append(found[key])
-        # a trial whose evidence did not come in completely is not checked: it counts as missing
-        summary = evidence.run(conn, llm.client(), trial_ids, settings, progress=typer.echo, unready=evidence.SKIP)
-        typer.echo(f"{len(trial_ids) - len(summary.skipped)} of {len(gold.keys)} trials ready for the check")
-        if summary.run_id is None:
-            raise typer.Exit(1)
-        scored = gold_compare.compare_run(conn, summary.run_id, chosen)
-        retrieval = gold_evaluate.retrieval_measures(conn, summary.run_id)
-    loaded_gates = gold_evaluate.load_gates(gates)
-    text = gold_evaluate.report_markdown(title, scored, loaded_gates, f"evidence: {evidence_from}\n{summary.summary()}",
-                                         retrieval)
+        results = []
+        for number in range(1, repeat + 1):
+            if repeat > 1:
+                typer.echo(f"check {number} of {repeat}")
+            # a trial whose evidence did not come in completely is not checked: it counts as missing
+            summary = evidence.run(conn, llm.client(), trial_ids, settings, progress=typer.echo, unready=evidence.SKIP)
+            typer.echo(f"{len(trial_ids) - len(summary.skipped)} of {len(gold.keys)} trials ready for the check")
+            if summary.run_id is None:
+                raise typer.Exit(1)
+            results.append(gold_evaluate.RunResult(
+                gold_compare.compare_run(conn, summary.run_id, chosen),
+                f"evidence: {evidence_from}\n{summary.summary()}",
+                gold_evaluate.retrieval_measures(conn, summary.run_id)))
+    try:
+        loaded_gates = gold_evaluate.load_gates(gates)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--gates") from exc
+    baseline = None
+    if loaded_gates.baseline is not None:
+        baseline = gold_evaluate.read_baseline(loaded_gates.baseline)
+    text = gold_evaluate.report_markdown(title, results, loaded_gates, baseline)
     typer.echo(text)
     if report is not None:
         report.write_text(text)
-    if gold_evaluate.failures(gold_evaluate.measures(scored), loaded_gates):
+    runs = [gold_evaluate.measures(result.scored) for result in results]
+    if write_baseline is not None:
+        about = {"dataset": chosen.ref, "sample": str(sample) if sample else None, "config": config,
+                 "run_ids": [result.scored.run_id for result in results]}
+        write_baseline.write_text(json.dumps(gold_evaluate.baseline_data(runs, about), indent=2) + "\n")
+        typer.echo(f"baseline written to {write_baseline}")
+    scores = [result.scored for result in results]
+    unstable = gold_evaluate.unstable_items(scores)
+    contradicting = gold_evaluate.contradicting_items(unstable, scores)
+    if gold_evaluate.failures(runs, loaded_gates, len(unstable), baseline, len(contradicting)):
         raise typer.Exit(1)
 
 

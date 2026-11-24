@@ -28,13 +28,21 @@ For each question return exactly one answer:
 - `kind`: what the passage is.
   - `numeric_result`: the result as data: a number, count, estimate, rate, mean, difference,
     interval or p-value. A result of zero or "none" counts ("no objective responses",
-    "0 events"), as does a count from which the result follows directly.
+    "0 events"), as does a count from which the result follows directly. The data must be the
+    endpoint's own result, for the groups it compares; a conclusion without data ("no
+    definitive conclusions could be drawn", "most were positive") is `narrative_only`.
   - `narrative_only`: the result is described only in words, without data ("participants were
     satisfied", "showed improvement", "no significant changes").
   - `chart_only`: the text only points to a figure or chart that holds the result.
   - `redacted`: the data, or which group it belongs to, is redacted.
   - `not_analysed`: the document says this was not analysed or evaluated, or that results are
     still being analysed or will be published later.
+  - `not_conducted`: the result could not exist because the part or stage of the trial it belongs
+    to never started or enrolled nobody (for example "No subjects were enrolled in the Phase 3
+    part"). A trial that started and stopped early, with results for what it did, is not this.
+  - `partial_result`: the endpoint has several components, measures or groups, and the passage
+    gives data for some of them while others are described only in words, only as a threshold
+    ("scores of 6 or more"), or not at all. Say in `note` which part has no data.
   - `other`: anything else, explained in `note`.
 - `note`: one short sentence: what the passage shows, what is missing, or why you don't know.
 

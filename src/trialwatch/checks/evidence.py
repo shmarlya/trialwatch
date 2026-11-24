@@ -36,7 +36,7 @@ from trialwatch.checks.prompts import Prompt, load_prompt
 from trialwatch.checks.requirements import Question, RequirementSet
 from trialwatch.checks.retrieval import pages_to_send_first, search, search_query_for
 from trialwatch.checks.settings import Settings
-from trialwatch.checks.verify import every_page_readable, has_readable_text, some_page_readable, verify
+from trialwatch.checks.verify import has_readable_text, read_enough, some_page_readable, verify
 from trialwatch.db import checks as checks_db
 from trialwatch.db import core
 from trialwatch.db.core import Page
@@ -269,7 +269,9 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
         answers[key] = (answer, first_whole)
 
     # widening: questions not settled from retrieved pages are asked again with every page
-    retry = questions_to_widen(questions, call_answers, whole_first, requirement_set.not_reported_kinds)
+    # an answer that the result is missing, or only partly there, may be overturned by a page retrieval missed
+    retry = questions_to_widen(questions, call_answers, whole_first,
+                               requirement_set.not_reported_kinds | requirement_set.open_kinds)
     widened_keys = set()
     fits = total_text_length(pages) <= settings.max_text_chars
     if retry and not fits:
@@ -353,7 +355,8 @@ class Inputs:
     unread: list[str]
     # what the model is told about the trial and its documents
     context: dict
-    # every page has readable text and nothing is unread: an answer from every page counts as the whole document
+    # nothing is unread and at most the setup's allowed pages lack readable text: an answer from every
+    # page counts as the whole document
     readable: bool
 
 
@@ -382,7 +385,7 @@ def _check_trial(conn: psycopg.Connection, client: MessagesClient, run_id: int, 
     started = time.monotonic()
     result = TrialResult()
     trace = tracing.Trace()
-    inputs = _gather(conn, trial_id, requirement_set, result)
+    inputs = _gather(conn, trial_id, settings, requirement_set, result)
     questions = _questions(requirement_set, inputs, trace)
     result.error = _why_not_asked(settings, requirement_set, inputs)
     if result.error:
@@ -402,7 +405,8 @@ def _check_trial(conn: psycopg.Connection, client: MessagesClient, run_id: int, 
     return result
 
 
-def _gather(conn: psycopg.Connection, trial_id: int, requirement_set: RequirementSet, result: TrialResult) -> Inputs:
+def _gather(conn: psycopg.Connection, trial_id: int, settings: Settings, requirement_set: RequirementSet,
+            result: TrialResult) -> Inputs:
     """What the check reads at this moment: the latest trial record and the current document versions."""
     record = core.trial_current_record(conn, trial_id)
     pages = trial_pages(conn, trial_id, requirement_set)
@@ -414,8 +418,9 @@ def _gather(conn: psycopg.Connection, trial_id: int, requirement_set: Requiremen
             result.document_versions.append(page.document_version_id)
     context = trial_context(conn, trial_id, record, pages)
     # a page without readable text, or a linked document not extracted yet, can't have been read, so
-    # then no answer counts as "the whole document"
-    readable = every_page_readable(pages) and not unread
+    # then no answer counts as "the whole document"; the setup may allow a page or so (a cover, a
+    # signature page) with too few letters
+    readable = read_enough(pages, settings.unreadable_pages_allowed) and not unread
     return Inputs(record, pages, unread, context, readable)
 
 

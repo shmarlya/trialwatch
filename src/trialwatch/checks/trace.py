@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from trialwatch.checks.requirements import Question, RequirementSet
 from trialwatch.checks.settings import Settings
-from trialwatch.checks.verify import has_readable_text
+from trialwatch.checks.verify import every_page_readable, has_readable_text
 from trialwatch.db.core import Page
 
 if TYPE_CHECKING:
@@ -72,7 +72,10 @@ def pages_data(pages: list[Page], unread: list[str], readable: bool) -> dict:
     return {
         "documents": listed,
         "total_pages": len(pages),
-        "every_page_readable": readable,
+        "every_page_readable": every_page_readable(pages),
+        # answers from every page count as reading the whole document (the setup may allow a page or so
+        # without readable text)
+        "read_whole": readable,
         "documents_without_text": unread,
     }
 

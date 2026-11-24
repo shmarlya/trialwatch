@@ -331,6 +331,40 @@ def test_only_numbers_tied_to_people_are_counts():
     assert not requirements.some_number_above_zero("EudraCT 2015-001234-56: 0 subjects")
 
 
+def test_counts_as_results_tables_give_them_and_in_words():
+    # tables in results summaries: the number after its label, with or without a colon
+    assert requirements.participant_numbers("Subjects enrolled 168") == [168]
+    assert requirements.participant_numbers("Number of subjects in the trial 23") == [23]
+    assert requirements.participant_numbers("Enrolled 20") == [20]
+    assert requirements.participant_numbers("Actual enrolment: 166") == [166]
+    assert requirements.participant_numbers("Patients treated, n 23") == [23]
+    assert requirements.participant_numbers("Subjects enrolled 168 (100%)") == [168]
+    assert requirements.participant_numbers("Randomised 82 Treated 80") == [82]
+    # a number found by two patterns counts once
+    assert requirements.participant_numbers("Number of subjects enrolled: 168") == [168]
+    # numbers in words, right before the people
+    assert requirements.participant_numbers("Three patients underwent treatment") == [3]
+    assert requirements.participant_numbers("Twenty participants were randomised") == [20]
+    assert requirements.participant_numbers("Thirty (30) participants were included.") == [30]
+    # an age range in a table's row label is not the count after it
+    assert requirements.participant_numbers("Adults (18-64 years) 31 33 36 34 134") == [31]
+    assert requirements.participant_numbers("Worldwide total number of subjects 99") == [99]
+    # in the other languages of results documents
+    assert requirements.participant_numbers("De un total de 53 pacientes incluidas en el estudio, 49 formaron") == [53, 49]
+    assert requirements.participant_numbers("Le nombre exact de participants inclus dans l'essai clinique dans "
+                                            "l'État membre concerné : 3") == [3]
+    assert requirements.participant_numbers("Insgesamt wurden 24 Patienten randomisiert") == [24]
+    assert requirements.participant_numbers("Sono stati arruolati 12 pazienti") == [12]
+    # not counts: an age, a threshold, a place, a percentage, a decimal, "no one", "one of"
+    assert requirements.participant_numbers("Patients aged 18 to 65") == []
+    assert requirements.participant_numbers("participants with 2 prior lines of therapy") == []
+    assert requirements.participant_numbers("subjects at site 3") == []
+    assert requirements.participant_numbers("Participants 45%") == []
+    assert requirements.participant_numbers("Patients randomised 1.5 times") == []
+    assert requirements.participant_numbers("one of the patients died") == []
+    assert requirements.participant_numbers("NCT01234567 and protocol ABC-123 enrolled no one") == []
+
+
 def test_an_inferred_part_keeps_its_questions_own_trace():
     questions = requirements.questions_for(SET, REGISTERED)
     # "nobody enrolled" was not found in the retrieved pages; a count above zero settles the part
@@ -400,6 +434,40 @@ def test_a_requirement_set_the_rules_would_misread_is_refused(tmp_path, monkeypa
     write_set(tmp_path, "unknown-count", unknown_count)
     with pytest.raises(ValueError, match="inference names an unknown requirement 'enrolment'"):
         requirements.load("unknown-count")
+    unknown_kind = json.loads(SET.text)
+    unknown_kind["name"] = "unknown-kind"
+    unknown_kind["open_kinds"] = ["not_conductd"]
+    write_set(tmp_path, "unknown-kind", unknown_kind)
+    with pytest.raises(ValueError, match="open_kinds names an unknown kind 'not_conductd'"):
+        requirements.load("unknown-kind")
+    both = json.loads(SET.text)
+    both["name"] = "both"
+    both["open_kinds"] = ["not_analysed"]
+    write_set(tmp_path, "both", both)
+    with pytest.raises(ValueError, match="not_analysed can't mean both not reported and open"):
+        requirements.load("both")
+
+
+def test_a_result_that_could_not_exist_or_is_only_partly_there_is_left_to_a_person():
+    """A stage of the trial that never enrolled anyone has no result to report; an endpoint with data for
+    only some of its components is not fully there either: neither is an accusation nor clears the trial."""
+    assert SET.open_kinds == {"not_conducted", "partial_result"}
+    questions = requirements.questions_for(SET, REGISTERED)
+    for kind in ("not_conducted", "partial_result"):
+        evidence = {"participants": _evidence("participants", quote="24 participants"),
+                    "cancelled": _evidence("cancelled", found=False, verified=False),
+                    "endpoint:11": _evidence("endpoint:11", quote="52.1 hours"),
+                    "endpoint:12": _evidence("endpoint:12", kind=kind, quote="No subjects entered Part B")}
+        judged, trace = requirements.judge(SET, questions, evidence)
+        assert judged["parts"]["outcomes"] is None and judged["label"] == "undecided"
+        assert trace["endpoint:12"] == {"value": None, "rule": f"verified {kind}: left for a person"}
+    # first seen on retrieved pages, it is asked again with every page: the rest may be on a page not shown
+    first = {"participants": {"found": "yes", "kind": "numeric_result"},
+             "cancelled": {"found": "no", "kind": "other"},
+             "endpoint:11": {"found": "yes", "kind": "numeric_result"},
+             "endpoint:12": {"found": "yes", "kind": "partial_result"}}
+    retry = ev.questions_to_widen(questions, first, False, SET.not_reported_kinds | SET.open_kinds)
+    assert [question.key for question in retry] == ["cancelled", "endpoint:12"]
 
 
 def test_two_different_answers_to_one_question_are_left_to_a_person(conn):
@@ -485,12 +553,29 @@ def test_pages_with_only_a_header_are_not_read_either(conn):
     assert "no readable page text" in summary.failed[CT]
 
 
-def test_a_blank_page_means_not_found_is_not_not_reported(conn):
-    trial = seed(conn, pages_with([""]))
-    nothing = [answer("participants", found=False, kind="other"), answer("cancelled", found=False, kind="other"),
-               answer("endpoint:11", found=False, kind="other"), answer("endpoint:12", found=False, kind="other")]
-    summary = ev.run(conn, FakeClient(nothing), [trial], default_settings(), PROMPT)
+NOTHING = [answer("participants", found=False, kind="other"), answer("cancelled", found=False, kind="other"),
+           answer("endpoint:11", found=False, kind="other"), answer("endpoint:12", found=False, kind="other")]
+
+
+def test_blank_pages_beyond_the_setups_allowance_mean_not_found_is_not_not_reported(conn):
+    # two blank pages: one of them may hold the result
+    trial = seed(conn, pages_with(["", ""]))
+    summary = ev.run(conn, FakeClient(NOTHING), [trial], default_settings(), PROMPT)
     assert summary.labels == {"undecided": 1}
+
+
+def test_one_blank_page_within_the_allowance_still_counts_as_reading_the_whole_document(conn):
+    """A cover or signature page has too few letters to count as read, though nothing on it holds a
+    result: the default setup allows one, so not found is not reported; a setup that allows none leaves
+    it to a person."""
+    trial = seed(conn, pages_with([""]))
+    summary = ev.run(conn, FakeClient(NOTHING), [trial], default_settings(), PROMPT)
+    assert summary.labels == {"not full": 1}
+    pages = conn.execute("SELECT data FROM checks.step WHERE run_id = %s AND name = 'pages'",
+                         (summary.run_id,)).fetchone()[0]
+    assert pages["every_page_readable"] is False and pages["read_whole"] is True
+    strict = ev.run(conn, FakeClient(NOTHING), [trial], default_settings({"unreadable_pages_allowed": 0}), PROMPT)
+    assert strict.labels == {"undecided": 1}
 
 
 def test_negative_in_retrieved_pages_is_asked_again_and_a_failed_widening_is_an_error(conn):

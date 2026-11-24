@@ -1,5 +1,5 @@
-# Builds the TrialWatch images and pushes them to GitHub's registry: the app, ghcr.io/shmarlya/trialwatch, and the
-# helpers a deploy needs (ops/images/Dockerfile): trialwatch-migrate, -proxy, -grafana, -dbtools. Started by hand
+# Builds the TrialWatch image, ghcr.io/shmarlya/trialwatch (the app, with its migrations and dbmate), and pushes
+# it to GitHub's registry. Started by hand
 # (Actions → Image → Run workflow, or `gh workflow run image.yml --ref main`). The tests run first; a red commit
 # gets no image. Every run tags its image sha-<commit>; a run from main also moves `latest` to it, so `latest`
 # is always the newest deployment. A server runs it with `docker compose pull` (docs/operations.md).
@@ -33,18 +33,6 @@ jobs:
           - suffix: ""
             file: Dockerfile
             target: ""
-          - suffix: -migrate
-            file: ops/images/Dockerfile
-            target: migrate
-          - suffix: -proxy
-            file: ops/images/Dockerfile
-            target: proxy
-          - suffix: -grafana
-            file: ops/images/Dockerfile
-            target: grafana
-          - suffix: -dbtools
-            file: ops/images/Dockerfile
-            target: dbtools
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

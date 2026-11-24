@@ -1,82 +1,76 @@
-# TrialWatch on Coolify (or any host that has only this file): every service runs a published image, so
-# nothing of the repository is needed on the server. Paste it as a Docker Compose resource; give the `proxy`
-# service the domain (https://trialwatch.app); Coolify's own proxy then holds the certificate and sends
-# plain HTTP to it. Set the variables below in Coolify's Environment Variables (`:?` marks the required
-# ones). docs/operations.md ("Coolify") says how. The images come from .github/workflows/image.yml:
-# run it on main first. compose.yaml is the same stack for a server of our own, built from the checkout.
+# TrialWatch on Coolify: the database, the web interface and the worker, nothing else. Coolify already does
+# the rest: its proxy holds the certificate and sends plain HTTP to web, it shows each container's memory
+# and CPU, and it backs the database up (the db service's Backups tab, to S3). Every service runs a
+# published image, so nothing of the repository is needed on the server, and each has a memory and CPU
+# limit, so none can take the server down with it. compose.yaml is the larger stack for a server of our
+# own (Caddy, Grafana, backups to a volume), built from the checkout.
+#
+# Paste it as a Docker Compose resource; give the `web` service the domain with its port
+# (https://trialwatch.app:8010). Set the variables below in Coolify's Environment Variables (`:?` marks
+# the required ones). docs/operations.md ("Coolify") says how. The image comes from
+# .github/workflows/image.yml: run it on main first.
 
-# What web and worker share: the app's image, the database and the settings
+# What web and worker share: the app's image, its limits, the database and the settings. Each applies
+# the migrations baked into the image before it starts (`dbmate --wait up`; a lock makes the second wait
+# for the first, then find nothing to do).
 x-trialwatch: &trialwatch
   image: ghcr.io/shmarlya/trialwatch:${TRIALWATCH_TAG:-latest}
+  entrypoint: ["/bin/sh", "-c", "dbmate --wait up && exec trialwatch \"$$@\"", "--"]
+  restart: unless-stopped
+  mem_limit: 512m
+  cpus: 1.0
   environment: &trialwatch-environment
-    DATABASE_URL: postgresql://${POSTGRES_USER:-trialwatch}:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:-trialwatch}
+    # sslmode=disable: the database is on the stack's own network (dbmate asks for TLS otherwise)
+    DATABASE_URL: postgresql://${POSTGRES_USER:-trialwatch}:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:-trialwatch}?sslmode=disable
     TZ: UTC
     # For checks and AI tags; empty = no model calls
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-    # Traces, metrics and logs to Grafana (lgtm below)
-    OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
   depends_on:
-    migrate:
-      condition: service_completed_successfully
+    db:
+      condition: service_healthy
 
 services:
-  # The front door: everything to web, /grafana/ to Grafana for admins (ops/caddy/Caddyfile.coolify).
-  # Give this service the domain in Coolify; it listens on 80 and publishes no port.
-  proxy:
-    image: ghcr.io/shmarlya/trialwatch-proxy:${TRIALWATCH_TAG:-latest}
-    restart: unless-stopped
-    expose:
-      - "80"
-    volumes:
-      - caddy-data:/data
-      - caddy-config:/config
-    depends_on:
-      web:
-        condition: service_healthy
-
-  # The web interface (`trialwatch web`), reached only through proxy
+  # The web interface (`trialwatch web`) on port 8010, reached through Coolify's proxy
   web:
     <<: *trialwatch
     command: ["web", "--host", "0.0.0.0", "--no-worker"]
-    restart: unless-stopped
     environment:
       <<: *trialwatch-environment
       # The site's public name: requests for any other name are refused (DNS rebinding)
       TRIALWATCH_HOSTS: ${TRIALWATCH_DOMAIN:?}
-      # Only proxy reaches this service, so its X-Forwarded-* headers are trusted
+      # Only Coolify's proxy reaches this service, so its X-Forwarded-* headers are trusted
       # (the client's address for the sign-in throttle, https for the session cookie)
       FORWARDED_ALLOW_IPS: "*"
       # The first admin, added at start if no user has this email (ADR-006)
       TRIALWATCH_ADMIN_EMAIL: ${TRIALWATCH_ADMIN_EMAIL:-}
       TRIALWATCH_ADMIN_PASSWORD: ${TRIALWATCH_ADMIN_PASSWORD:-}
-    # healthy: /healthz answers (the image's HEALTHCHECK)
+    healthcheck:
+      # /healthz answers (the image's own check, with time for the migrations first)
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
-  # Runs queued jobs (web forms, the weekly refresh) and tries failed ones again
+  # Runs queued jobs (web forms, the weekly refresh) one at a time and tries failed ones again
   worker:
     <<: *trialwatch
     command: ["worker"]
-    restart: unless-stopped
+    # a job holds a trial's documents and page text while it works
+    mem_limit: 768m
     healthcheck:
       # touched every loop and every 30 s while a job runs: older than 2 minutes means stuck
       test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/trialwatch-worker.alive') > 120)"]
       interval: 60s
       timeout: 5s
       retries: 3
-      start_period: 30s
-
-  # Applies the migrations baked into its image, then exits; web and worker start only if it succeeds
-  migrate:
-    image: ghcr.io/shmarlya/trialwatch-migrate:${TRIALWATCH_TAG:-latest}
-    restart: "no"
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-trialwatch}:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:-trialwatch}?sslmode=disable
-    depends_on:
-      db:
-        condition: service_healthy
+      start_period: 60s
 
   db:
     image: postgres:18-alpine
     restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1.0
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-trialwatch}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
@@ -91,69 +85,5 @@ services:
       timeout: 3s
       retries: 10
 
-  # Grafana with Prometheus, Tempo and Loki, for admins only, behind proxy at /grafana/ (signed in through
-  # TrialWatch); its dashboards and alerts are in the image (ops/grafana/)
-  lgtm:
-    image: ghcr.io/shmarlya/trialwatch-grafana:${TRIALWATCH_TAG:-latest}
-    restart: unless-stopped
-    environment:
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-      GF_AUTH_DISABLE_LOGIN_FORM: "true"
-      GF_AUTH_DISABLE_SIGNOUT_MENU: "true"
-      GF_AUTH_PROXY_ENABLED: "true"
-      GF_AUTH_PROXY_HEADER_NAME: X-WEBAUTH-USER
-      GF_AUTH_PROXY_HEADER_PROPERTY: email
-      GF_AUTH_PROXY_AUTO_SIGN_UP: "true"
-      GF_USERS_AUTO_ASSIGN_ORG_ROLE: Admin
-      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      GF_SERVER_ROOT_URL: https://${TRIALWATCH_DOMAIN:?}/grafana/
-      GF_ANALYTICS_REPORTING_ENABLED: "false"
-      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
-      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
-      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=90d
-      POSTGRES_DB: ${POSTGRES_DB:-trialwatch}
-      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-}
-    volumes:
-      - lgtm-data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:3000/api/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
-
-  # Gives Grafana's database role (the report views only) its password, then exits
-  grafana-role:
-    image: ghcr.io/shmarlya/trialwatch-dbtools:${TRIALWATCH_TAG:-latest}
-    restart: "no"
-    environment: &psql-environment
-      PGHOST: db
-      PGUSER: ${POSTGRES_USER:-trialwatch}
-      PGPASSWORD: ${POSTGRES_PASSWORD:?}
-      PGDATABASE: ${POSTGRES_DB:-trialwatch}
-      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-}
-    entrypoint: ["/bin/sh", "/grafana-role.sh"]
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
-  # A pg_dump every day into the volume `backups`, kept BACKUP_KEEP_DAYS; copy it off the server too
-  backup:
-    image: ghcr.io/shmarlya/trialwatch-dbtools:${TRIALWATCH_TAG:-latest}
-    restart: unless-stopped
-    environment:
-      <<: *psql-environment
-      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
-    volumes:
-      - backups:/backups
-    entrypoint: ["/bin/sh", "/backup.sh"]
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
 volumes:
   pgdata:
-  caddy-data:
-  caddy-config:
-  lgtm-data:
-  backups:

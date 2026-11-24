@@ -7,4 +7,6 @@ data
 !data/gold
 docs
 db
+# ...except the migrations, which the image carries (dbmate, compose.coolify.yaml)
+!db/migrations
 scripts

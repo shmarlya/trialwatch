@@ -1,9 +1,9 @@
 {
- "description": "The frozen CTIS snapshot the gold pipelines read. This one: CTIS records of 2026-11-21, with each document file from the copy of 2026-11-13 in data/ctis/documents where it holds that version (245 files; the 54 study reports came from CTIS). Made with `trialwatch gold snapshot --files-from`; a new one comes from the Gold snapshot workflow.",
+ "description": "The frozen CTIS snapshot the gold pipelines read (made by the Gold snapshot workflow; commit this file to use it)",
  "dataset": "bruckner/2026-03-16",
- "release": "snapshot-bruckner-2026-03-16-20261121",
- "file": "snapshot-bruckner-2026-03-16-20261121.tar.gz",
- "sha256": "44ba8eb1ff09eae4b846615c243a9e977fb8c2e147841f350df81212d06e2bf8",
- "made_at": "2026-11-21T18:51:36+00:00",
+ "release": "snapshot-bruckner-2026-03-16-20261124-085934",
+ "file": "snapshot-bruckner-2026-03-16-20261124-085934.tar.gz",
+ "sha256": "a0c78637daea9dd3ad39e5bf99d185d40782d8ef57ce22c3fabd1dcd25256ff3",
+ "made_at": "2026-11-24T09:23:52+00:00",
  "trials": 206
 }

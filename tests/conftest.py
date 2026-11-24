@@ -19,6 +19,7 @@ from psycopg import sql
 from trialwatch import config, db
 from trialwatch.checks import settings as check_settings
 from trialwatch.db import SESSION_OPTIONS
+from trialwatch.trials import pages
 
 ROOT = Path(__file__).parent.parent
 MIGRATIONS = ROOT / "db" / "migrations"
@@ -59,6 +60,13 @@ def create_test_database(url: str) -> str:
             with conn.transaction():
                 conn.execute(up_section(migration))
     return test_url
+
+
+@pytest.fixture(autouse=True)
+def read_pages_here(monkeypatch):
+    """PDF text is read in this process, not a child's: a child can't see the test's fake extract_pages
+    nor the rows of its rolled-back transaction. tests/test_pages.py tests the child itself."""
+    monkeypatch.setattr(pages, "READ_IN_CHILD", False)
 
 
 @pytest.fixture(scope="session")

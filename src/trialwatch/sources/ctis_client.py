@@ -22,6 +22,10 @@ CT_NUMBER = re.compile(r"\d{4}-\d{6}-\d{2}-\d{2}")
 SEARCH_LIMIT = 10_000
 # The search page always sends its three text fields, empty when not used
 SEARCH_TEXT_DEFAULTS = {"containAll": "", "containAny": "", "containNot": ""}
+# The largest document downloaded: the largest of CTIS's documents seen so far is 47 MB (2026-11-24).
+# A download costs the worker about three times the file's size for a moment, so 300 MB fits in its
+# 2 GB (compose.coolify.yaml); a larger file fails as too large instead of taking the worker down.
+MAX_DOCUMENT_BYTES = 300 * 1024 * 1024
 DOCUMENT_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -83,11 +87,10 @@ class CtisClient:
         link = link_answer.get("url")
         if not is_https_link(link):
             raise ValueError(f"CTIS gave no https download link for {ct_number}/{uuid}: {link!r}")
-        # An absolute URL bypasses base_url; the link is presigned, so no CTIS headers are needed
-        response = self._request("GET", link, headers={"Accept": "*/*"})
+        response, content = self._download(link)
         media_type = response.headers.get("Content-Type")
         file_name = response.headers.get("x-amz-meta-filename")
-        return DownloadedFile(content=response.content, media_type=media_type, file_name=file_name)
+        return DownloadedFile(content=content, media_type=media_type, file_name=file_name)
 
     def search(self, criteria: dict, page: int, size: int, direction: str = "ASC") -> dict:
         """One page of CTIS's public trial list (the search on euclinicaltrials.eu), sorted by EU CT
@@ -128,6 +131,30 @@ class CtisClient:
             self._sleep_before_retry(attempt)
         raise AssertionError("unreachable")
 
+    def _download(self, link: str) -> tuple[httpx.Response, bytes]:
+        """A file from a presigned link, read piece by piece so one larger than MAX_DOCUMENT_BYTES is
+        refused (ValueError) before it is all in memory; retried like _request."""
+        for attempt in range(1, self._max_attempts + 1):
+            self._wait_turn()
+            is_last_attempt = attempt == self._max_attempts
+            try:
+                # An absolute URL bypasses base_url; the link is presigned, so no CTIS headers are needed
+                with self._http.stream("GET", link, headers={"Accept": "*/*"}) as response:
+                    if response.status_code in RETRY_STATUSES and not is_last_attempt:
+                        retry = True
+                    else:
+                        retry = False
+                        response.raise_for_status()
+                        content = _read_at_most(response, MAX_DOCUMENT_BYTES)
+            except httpx.TransportError:
+                if is_last_attempt:
+                    raise
+                retry = True
+            if not retry:
+                return response, content
+            self._sleep_before_retry(attempt)
+        raise AssertionError("unreachable")
+
     def _sleep_before_retry(self, attempt: int) -> None:
         # Exponential backoff: wait twice as long after each failed attempt
         seconds = self._backoff * 2 ** (attempt - 1)
@@ -140,3 +167,20 @@ class CtisClient:
         if seconds_to_wait > 0:
             time.sleep(seconds_to_wait)
         self._last_request = time.monotonic()
+
+
+def _read_at_most(response: httpx.Response, limit: int) -> bytes:
+    """The body of a streamed response, or ValueError as soon as it is known to be over `limit` bytes."""
+    declared = response.headers.get("Content-Length")
+    if declared is not None and declared.isdigit() and int(declared) > limit:
+        raise ValueError(f"too large to download: {_megabytes(int(declared))} (the limit is {_megabytes(limit)})")
+    body = bytearray()
+    for chunk in response.iter_bytes():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise ValueError(f"too large to download: over {_megabytes(limit)}")
+    return bytes(body)
+
+
+def _megabytes(size: int) -> str:
+    return f"{size / (1024 * 1024):.0f} MB"

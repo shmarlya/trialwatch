@@ -24,6 +24,8 @@ at a time reads a source (an advisory lock), and a run whose process died is clo
 """
 
 import hashlib
+import logging
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -42,6 +44,8 @@ from trialwatch.sources.registry import Adapter, DocumentRef, DownloadedFile, Tr
 from trialwatch.trials.pages import extract_missing
 
 ShouldStop = Callable[[], bool] | None
+# One line per trial transferred, with its errors when it failed, in the worker's log (Coolify shows it)
+log = logging.getLogger("trialwatch.ingest")
 
 
 class SourceBusy(ValueError):
@@ -278,12 +282,14 @@ def transfer(
                     result.stopped = True
                     report(progress, "stopped: the trials transferred so far are kept")
                     break
+                started = time.monotonic()
                 with telemetry.tracer.start_as_current_span("ingest.trial") as span:
                     span.set_attribute("trialwatch.source", source.code)
                     span.set_attribute("trialwatch.source.key", key)
                     status = _transfer_one(conn, source, adapter, key, kinds, extract, result)
                     span.set_attribute("trialwatch.ingest.status", status)
                 result.statuses[key] = status
+                _log_trial(source.code, key, status, time.monotonic() - started, result.failed)
                 report(progress, f"{number}/{len(wanted)} {key}: {status}")
             if result.trial_ids:
                 _refresh_search_words(conn, result)
@@ -297,6 +303,19 @@ def transfer(
     finally:
         core.unlock(conn, core.LOCK_SOURCE, source.id)
     return result
+
+
+def _log_trial(source: str, key: str, status: str, seconds: float, failed: dict[str, str]) -> None:
+    problems = []
+    for where, message in failed.items():
+        if where.startswith(f"{key}/"):
+            problems.append(f"{where.removeprefix(key + '/')}: {message}")
+    if status == "failed":
+        log.warning("transfer %s %s failed in %.0f s: %s", source, key, seconds, "; ".join(problems))
+    elif problems:
+        log.info("transfer %s %s %s in %.0f s, with warnings: %s", source, key, status, seconds, "; ".join(problems))
+    else:
+        log.info("transfer %s %s %s in %.0f s", source, key, status, seconds)
 
 
 def _transfer_one(

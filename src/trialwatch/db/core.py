@@ -424,12 +424,17 @@ def save_document_version(
     version too: the bytes decide, not only the source's label."""
     source_number = source_id(conn, source)
     with conn.transaction():
-        file_cursor = conn.execute(
-            "INSERT INTO core.file (sha256, size_bytes, media_type, content, created_by) "
-            "VALUES (%s, %s, %s, %s, current_setting('trialwatch.actor')::bigint) ON CONFLICT (sha256) DO NOTHING",
-            (sha256, len(content), media_type, content),
-        )
-        new_file = file_cursor.rowcount == 1
+        # A file already stored is not sent again: a refresh downloads every document, most of them
+        # unchanged, and sending tens of MB only to have them ignored costs the worker memory
+        stored_row = conn.execute("SELECT 1 FROM core.file WHERE sha256 = %s", (sha256,)).fetchone()
+        new_file = False
+        if stored_row is None:
+            file_cursor = conn.execute(
+                "INSERT INTO core.file (sha256, size_bytes, media_type, content, created_by) "
+                "VALUES (%s, %s, %s, %s, current_setting('trialwatch.actor')::bigint) ON CONFLICT (sha256) DO NOTHING",
+                (sha256, len(content), media_type, content),
+            )
+            new_file = file_cursor.rowcount == 1
         # The source may retitle or reclassify a document; the audit log keeps the earlier values
         row = conn.execute(
             """

@@ -94,8 +94,10 @@ for a host that has nothing of the repository, such as Coolify: the database, `w
 Coolify does the rest: its proxy holds the certificate and sends plain HTTP to `web` on port 8010, it shows each
 container's memory and CPU, and it backs the database up. `web` and `worker` run the app's image, which carries
 the migrations and dbmate: each runs `dbmate --wait up` before it starts (a lock makes the second wait, then find
-nothing to do). Every service has a memory and CPU limit (web 512 MB, worker 768 MB, db 768 MB; one CPU each),
-so the stack needs about 2 GB beside Coolify's own. No Grafana here: compose.yaml has it, for a server of our own.
+nothing to do). Every service has a memory and CPU limit (web 512 MB, worker 2 GB, db 768 MB; one CPU each;
+the worker reads each PDF in a short-lived child process inside its 2 GB, see
+[page text](sources-and-gold.md)),
+so the stack needs about 3.3 GB beside Coolify's own. No Grafana here: compose.yaml has it, for a server of our own.
 
 1. Run the **Image** workflow on `main`: it pushes the image.
 2. In Coolify: **New resource → Docker Compose Empty**, and paste `compose.coolify.yaml`.
@@ -435,6 +437,13 @@ uv run --group docs mkdocs serve
 - **An alert fired.** Its description says where to look; the dashboards of the same name show what led up to it.
 - **The worker stopped.** `docker compose ps worker`, `docker compose logs worker`; `docker compose up -d worker`.
   A job it was running goes back to the queue once its heartbeat lapses.
+- **A transfer failed, or a document has no text.** The worker's log (Coolify: the worker's **Logs**; or
+  `docker compose logs worker`) has a line per trial and per file read. `trialwatch.ingest`:
+  `transfer ctis <key> complete in 12 s`, or `… failed in 53 s: file 2faf65aa10d3: LimitReachedError: …` with
+  every error of that trial. `trialwatch.pages`: `file <sha> read: 799 pages (5.7 MB, 16 s, child peak 590 MB)`,
+  `file <sha> can't be read (…): <pypdf's error>`, or `file <sha> not read after 40 s: the process reading its
+  text was killed, most likely out of memory`. Search the log for `failed in` or `not read`; the file's sha is
+  on the trial's page under Documents.
 - **Reset the database** (until the first deploy): back it up first (on a server the newest file in
   `data/backups/`; elsewhere `docker compose exec db pg_dump -U <user> -Fc <database> > data/backups/<date>.dump`), then
   `docker compose down -v` and `docker compose run --rm migrate`, and reload: `geo load`, `vocab load`,

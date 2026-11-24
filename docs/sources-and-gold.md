@@ -107,7 +107,12 @@ answer means the trial doesn't exist (`TrialNotFound`).
   `core.document_version` says which file it had from when, keeping replaced ones (CTIS serves only the current
   version, so every version we download is kept). `core.trial_document` links documents to trials with basis and
   confidence. Each file's page text is extracted once with pypdf (`core.page`, `trials/pages.py`); only PDFs are
-  read.
+  read. Each file is read in a child process of its own: pypdf needs about ten times a file's size while it reads
+  (a 38 MB, 3,000-page CTIS study report: 420 MB), and the child gives that memory back when it ends. A child that
+  runs out of memory or takes over 20 minutes fails only its file, like a broken PDF. A CTIS document over 300 MB
+  is not downloaded (failed as too large), and a file already stored is not sent to the database again. pypdf's
+  budget for parsing one page's content stream is raised from 2 to 10 million: pages of dense tables in CTIS
+  study reports went over the default and failed their whole file.
 - **Manual source.** Trials and documents a person enters (`sources/manual.py`): the "Add a trial" form and
   "Upload a document" on a trial page. Identifiers are matched first, so a known trial is never added twice; a
   trial without a registry identifier gets its own TW-number. PDF files only.

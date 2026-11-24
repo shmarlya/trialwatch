@@ -1,5 +1,7 @@
 # Short gold evaluation: our workflow on the 50 hardest items of the Bruckner gold dataset
-# (evals/hard-50.txt, from `trialwatch gold sample`), gated by evals/gates.json. Started by hand from
+# (evals/hard-50.txt, from `trialwatch gold sample`), run 3 times on the same evidence and gated by
+# evals/gates/short.json: against its accepted baseline (evals/baselines/gold-short.json), with no clear
+# false accusation and no item that is "not full" in one run and "full" in another. Started by hand from
 # the Actions tab; it calls the model, so it costs API money.
 name: Gold evaluation · short (hardest 50)
 
@@ -20,6 +22,8 @@ jobs:
       title: "Gold evaluation · hardest 50 of bruckner/2026-03-16"
       sample: evals/hard-50.txt
       config: ${{ inputs.config }}
+      gates: evals/gates/short.json
+      repeat: 3
       timeout: 120
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

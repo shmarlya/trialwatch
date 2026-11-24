@@ -1,0 +1,17 @@
+{
+  "description": "The measures of the last accepted gold evaluation of this sample (median over its repeats); gates with a baseline fail when a run is worse by more than max_drop items",
+  "dataset": "bruckner/2026-03-16",
+  "sample": "evals/hard-50.txt",
+  "config": "default",
+  "run_ids": [
+    4,
+    5,
+    6
+  ],
+  "runs": 3,
+  "compared": 47,
+  "decided": 32,
+  "disagreed": 2,
+  "recorded_at": "2026-11-24T11:26:17+00:00",
+  "note": "Runs 4-6 (local, 2026-11-24) re-judged from their stored answers with unreadable_pages_allowed 1 (no model calls): decided 32, 33, 28; disagreed 2, 2, 2. Replace with the first accepted CI run's gold-eval-baseline.json."
+}

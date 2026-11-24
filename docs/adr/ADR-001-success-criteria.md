@@ -12,7 +12,7 @@
 >
 > **Still standing from this ADR:** our results are measured against Bruckner et al.'s reviewers, and every
 > disagreement is explained (our bug, data changed since their review, or a likely labelling error). That gate
-> now runs as the gold evaluations in CI, against `evals/gates.json`. The text below is the decision as taken
+> now runs as the gold evaluations in CI, against `evals/gates/` (2026-11-24: the full evaluation has fixed gates; the short one, on the hardest 50, mostly items the reviewers disagreed on, is a regression check against its accepted baseline with no clear false accusation, a false accusation no reviewer's own reading supports). The text below is the decision as taken
 > on 2026-11-01.
 
 ## Question

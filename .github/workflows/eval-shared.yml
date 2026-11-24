@@ -3,8 +3,9 @@
 # evals/snapshot.lock.json names (a release file made by gold-snapshot.yml, checked by its sha256),
 # through the same adapter, text extraction and retrieval as a live transfer; runs the evidence check
 # (real model calls: it needs the ANTHROPIC_API_KEY secret and costs API money), scores the run against
-# the labels, and fails when a gate in evals/gates.json is missed. Called by eval-short.yml and
-# eval-full.yml; the report is on the run's summary page and kept as an artifact.
+# the labels, and fails when a gate in its gates file (evals/gates/) is missed. Called by eval-short.yml
+# and eval-full.yml. The report is on the run's summary page; it is kept as an artifact with every answer
+# and judgement as CSV (ops/eval/export.sql) and the runs' measures as a baseline to commit when accepted.
 name: Gold evaluation (shared)
 
 on:
@@ -23,6 +24,14 @@ on:
       config:
         type: string
         default: default
+      gates:
+        description: "The gates file the evaluation must pass"
+        type: string
+        default: evals/gates/full.json
+      repeat:
+        description: "How many times the check runs on the same evidence"
+        type: number
+        default: 1
       timeout:
         type: number
         default: 120
@@ -90,18 +99,31 @@ jobs:
           DATASET: ${{ inputs.dataset }}
           SAMPLE: ${{ inputs.sample }}
           CONFIG: ${{ inputs.config }}
+          GATES: ${{ inputs.gates }}
+          REPEAT: ${{ inputs.repeat }}
         run: |
-          args=(--dataset "$DATASET" --config "$CONFIG" --title "$TITLE" --report gold-eval.md --snapshot "$SNAPSHOT")
+          args=(--dataset "$DATASET" --config "$CONFIG" --title "$TITLE" --report gold-eval.md --snapshot "$SNAPSHOT"
+                --gates "$GATES" --repeat "$REPEAT" --write-baseline gold-eval-baseline.json)
           if [ -n "$SAMPLE" ]; then args+=(--sample "$SAMPLE"); fi
           status=0
           uv run --locked trialwatch gold eval "${args[@]}" || status=$?
           if [ -f gold-eval.md ]; then cat gold-eval.md >> "$GITHUB_STEP_SUMMARY"; fi
           exit "$status"
 
+      - name: Every answer and judgement as CSV
+        if: always()
+        run: >-
+          docker run --rm --network host -v "$PWD:/out" -w /out -e PGPASSWORD=trialwatch postgres:18-alpine
+          psql -h localhost -U trialwatch -d trialwatch -q -f ops/eval/export.sql
+
       - name: Keep the report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gold-eval
-          path: gold-eval.md
+          path: |
+            gold-eval.md
+            gold-eval-*.csv
+            gold-eval-baseline.json
           if-no-files-found: ignore
+          retention-days: 30

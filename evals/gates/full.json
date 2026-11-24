@@ -1,0 +1,8 @@
+{
+  "description": "What the full gold evaluation (every labelled item) must reach, or its pipeline fails. Shares are of the labelled items in the run. A false accusation is clear when no reviewer's own reading of the item was an accusation.",
+  "min_label_agreement": 0.90,
+  "max_false_accusations": 0,
+  "max_clear_false_accusations": 0,
+  "min_decided": 0.80,
+  "max_missing": 0.10
+}

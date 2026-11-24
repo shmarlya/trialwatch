@@ -1,0 +1,14 @@
+{
+  "description": "The default setup on Sonnet: to compare a stronger model on the same page text and questions",
+  "model": "claude-sonnet-5-5",
+  "effort": "high",
+  "method": "text",
+  "prompt": "evidence",
+  "requirements": "eu-ctr-results",
+  "max_tokens": 16000,
+  "fallbacks": true,
+  "whole_pages": 15,
+  "top_k": 4,
+  "max_text_chars": 1600000,
+  "unreadable_pages_allowed": 1
+}

@@ -137,6 +137,17 @@ def every_page_readable(pages: list[Page]) -> bool:
     return True
 
 
+def read_enough(pages: list[Page], unreadable_allowed: int) -> bool:
+    """Answers from these pages count as reading the whole document: some page is readable, and at
+    most `unreadable_allowed` are not (a cover, signature or contents page has too few letters, though
+    nothing on it can hold a result)."""
+    unreadable = 0
+    for page in pages:
+        if not has_readable_text(page):
+            unreadable += 1
+    return unreadable <= unreadable_allowed and unreadable < len(pages)
+
+
 def some_page_readable(pages: list[Page]) -> bool:
     for page in pages:
         if has_readable_text(page):

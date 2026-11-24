@@ -221,7 +221,7 @@ Measure it, handle failure, keep a person where it matters.
 - **Terms:** Gold set = inputs with known right answers. Code grader = exact check. LLM-as-judge = a model grades with a rubric (check it against humans first). Regression gate = CI fails if the score drops.
 - **Practice:** Build the eval before tuning prompts. Report precision and recall per check and per category. Read the failures, not only the score. Keep a held-out test split.
 - **Pitfall:** Tuning on the test set; one overall number hiding a weak category.
-- **TrialWatch:** Built: gold datasets (ADR-003) and gold evaluations with gates in evals/gates.json, run by hand in CI on a frozen snapshot.
+- **TrialWatch:** Built: gold datasets (ADR-003) and gold evaluations with gates in evals/gates/ (full: fixed; short: baseline, 3 repeats), run by hand in CI on a frozen snapshot.
 - **Lab:** Read a full gold eval's misses; add the five hardest to evals/hard-50.txt.
 
 ### 12 Reliability & failure

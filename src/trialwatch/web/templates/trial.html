@@ -178,7 +178,7 @@
               {% endfor %}
             </table></div>
           {% elif step.name == "pages" %}
-            <p class="small">{{ step.data.total_pages }} pages{% if not step.data.every_page_readable %} · <span class="flag">not every page could be read</span>{% endif %}</p>
+            <p class="small">{{ step.data.total_pages }} pages{% if not step.data.every_page_readable %} · <span class="flag">not every page could be read</span>{% if step.data.read_whole %} <span class="muted">(few enough to count as reading the whole document)</span>{% endif %}{% endif %}</p>
             <ul class="small">{% for document in step.data.documents %}<li>document {{ document.doc }}: <a href="/files/{{ document.file }}">{{ document.title or document.file[:12] }}</a> ({{ document.kind }}, {{ document.pages }} pages{% if document.unreadable_pages %}; no text on pages {{ document.unreadable_pages | join(", ") }}{% endif %})</li>{% endfor %}</ul>
             {% if step.data.documents_without_text %}<p class="small flag">Linked but not read yet: {{ step.data.documents_without_text | join(", ") }}</p>{% endif %}
           {% elif step.name == "retrieval" and not step.data.whole %}

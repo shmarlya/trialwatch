@@ -60,6 +60,15 @@ services:
     # takes about ten times the file's size (a 47 MB report: 550 MB); one that runs out fails only
     # its file (src/trialwatch/trials/pages.py)
     mem_limit: 2g
+    # two PDFs read at once, a child process each (TRIALWATCH_PDF_READERS, default 2), within a memory
+    # budget for the children together (TRIALWATCH_PDF_MEMORY_MB, default 1400). Two CPUs: the server
+    # needs at least two (on one, set cpus: 1.0 and TRIALWATCH_PDF_READERS=1). The web server reads
+    # uploads one at a time whatever these say.
+    cpus: 2.0
+    environment:
+      <<: *trialwatch-environment
+      TRIALWATCH_PDF_READERS: ${TRIALWATCH_PDF_READERS:-2}
+      TRIALWATCH_PDF_MEMORY_MB: ${TRIALWATCH_PDF_MEMORY_MB:-1400}
     healthcheck:
       # touched every loop and every 30 s while a job runs: older than 2 minutes means stuck
       test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/trialwatch-worker.alive') > 120)"]

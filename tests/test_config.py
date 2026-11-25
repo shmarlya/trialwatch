@@ -102,3 +102,16 @@ def test_the_gazetteer_covers_the_eu_eea_unless_configured(monkeypatch):
     assert "FR" in default and "NO" in default and "US" not in default
     monkeypatch.setenv("TRIALWATCH_COUNTRIES", "fr, us ,")
     assert config.gazetteer_countries() == ["FR", "US"]
+
+
+def test_a_pdf_setting_that_is_not_a_whole_number_is_named(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("TRIALWATCH_PDF_MEMORY_MB", "1400MB")
+    with pytest.raises(ValueError, match="TRIALWATCH_PDF_MEMORY_MB must be a whole number"):
+        config.pdf_memory_mb()
+    monkeypatch.setenv("TRIALWATCH_PDF_READERS", "0")
+    with pytest.raises(ValueError, match="TRIALWATCH_PDF_READERS must be 1 or more"):
+        config.pdf_readers()
+    monkeypatch.delenv("TRIALWATCH_PDF_READERS")
+    assert config.pdf_readers() == 2

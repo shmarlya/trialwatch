@@ -398,6 +398,23 @@ def test_page_text_is_extracted_once_and_fingerprinted(conn, monkeypatch):
     assert text_fingerprint(["", "  "]) is None  # scanned: no fingerprint, so never "the same" as another
 
 
+def test_the_worker_reads_a_trials_files_in_children_several_at_once(conn, monkeypatch):
+    # extract_missing's own path in the worker: sizes from the database, read_in_children, each saved
+    core.act_as(conn, "ctis-adapter", "process")
+    transfer(conn, FakeCtis(RECORD), extract=unreadable)
+    monkeypatch.setattr("trialwatch.trials.pages.READ_IN_CHILD", True)
+    read = []
+
+    def read_in_child(sha256, stop=None):  # in this process: a child can't see the test's transaction
+        read.append(sha256)
+        return ["page one", "page two"]
+
+    monkeypatch.setattr("trialwatch.trials.pages.read_in_child", read_in_child)
+    result = extract_missing(conn, readers=2)
+    assert (result.files, result.pages, result.failed) == (2, 4, {})
+    assert len(read) == 2
+
+
 def unreadable(content):
     raise ValueError("not read in this test")
 

@@ -9,6 +9,11 @@ size while it reads it (a 38 MB CTIS study report of 3,000 pages: 420 MB), and a
 it once used: in the worker, a few such files took it past its memory limit, and the kernel killed it
 in the middle of a transfer (2026-11-24). A child gives its memory back when it ends; if it runs out
 or takes too long, only that file fails, recorded like any broken file.
+
+Several files are read at once (read_in_children): pypdf is pure Python, so one process reads on one CPU,
+and a trial's dozens of documents read one after another kept the worker on one of its CPUs. Up to
+config.pdf_readers() children run together, and a file starts only when its memory estimate fits beside
+those being read (config.pdf_memory_mb()); the text is saved here, in the calling thread, as each ends.
 """
 
 import hashlib
@@ -18,8 +23,12 @@ import multiprocessing
 import resource
 import sys
 import time
+import contextvars
+import functools
+import threading
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from importlib.metadata import version
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -53,6 +62,14 @@ READ_TIMEOUT_SECONDS = 20 * 60
 # "spawn", not "fork": the worker has threads (the job's heartbeat) and open connections, which a
 # forked child would inherit in whatever state they were
 CHILDREN = multiprocessing.get_context("spawn")
+# A child's memory while it reads a file, for deciding how many read at once: about ten times the file
+# plus the interpreter and pypdf it starts with (the 47 MB report: 550 MB), and never less than a small
+# file of dense pages has taken (5.7 MB: child peak 590 MB)
+CHILD_BASE_MB = 150
+CHILD_MB_PER_FILE_MB = 10
+CHILD_MIN_MB = 600
+# How often a thread waiting for its child looks whether the reading was interrupted
+STOP_CHECK_SECONDS = 1.0
 
 
 class FileNotRead(Exception):
@@ -108,13 +125,17 @@ def text_fingerprint(texts: Sequence[str]) -> bytes | None:
 
 
 def read_in_child(
-    sha256: bytes, timeout: float = READ_TIMEOUT_SECONDS, child_reads: Callable[[bytes, Connection], None] | None = None
+    sha256: bytes,
+    timeout: float = READ_TIMEOUT_SECONDS,
+    child_reads: Callable[[bytes, Connection], None] | None = None,
+    stop: threading.Event | None = None,
 ) -> list[str]:
     """The pages of a stored file, read by a child process that fetches the file itself (so this
     process never holds its bytes). A file that can't be read raises UnreadableFile (a ValueError, as
     from extract_pages); a child that is killed or too slow raises FileNotRead. Each outcome is logged.
     `child_reads` is what the child runs (default _child_reads; tests give their own, a module-level
-    function the child can import)."""
+    function the child can import). Once `stop` is set (read_in_children, when its caller is
+    interrupted), the child is killed and FileNotRead raised within a second."""
     if child_reads is None:
         child_reads = _child_reads
     short_sha = sha256.hex()[:12]
@@ -126,12 +147,14 @@ def read_in_child(
     sending_end.close()
     try:
         # The answer is read before waiting for the child: a long text would fill the pipe and the
-        # child would wait for it to be read
-        answered = receiving_end.poll(timeout)
-        if not answered:
-            problem = f"reading its text took longer than {timeout / 60:.0f} min"
-            log.warning("file %s not read: %s", short_sha, problem)
-            raise FileNotRead(problem)
+        # child would wait for it to be read. Polled a second at a time, so `stop` is seen.
+        while not receiving_end.poll(min(STOP_CHECK_SECONDS, max(0.0, started + timeout - time.monotonic()))):
+            if stop is not None and stop.is_set():
+                raise FileNotRead("stopped: the reading was interrupted")
+            if time.monotonic() - started >= timeout:
+                problem = f"reading its text took longer than {timeout / 60:.0f} min"
+                log.warning("file %s not read: %s", short_sha, problem)
+                raise FileNotRead(problem)
         try:
             outcome, value, measures = receiving_end.recv()
         except EOFError:
@@ -160,9 +183,13 @@ def _measured(measures: dict) -> str:
 
 
 def _ended_without_text(exitcode: int | None) -> str:
-    # -9: SIGKILL, which is what the kernel sends a process when the container's memory runs out
+    # -9: SIGKILL, which is what the kernel sends a process when the container's memory runs out.
+    # None: another thread starting a child reaped this one first (multiprocessing's cleanup), so its
+    # exit code is lost; reading files at once, that is most often a child killed for memory too.
     if exitcode == -9:
         return "the process reading its text was killed, most likely out of memory"
+    if exitcode is None:
+        return "the process reading its text ended without it (exit code lost), possibly killed out of memory"
     return f"the process reading its text ended without it (exit code {exitcode})"
 
 
@@ -202,6 +229,71 @@ def _first_to_go() -> None:
         pass
 
 
+def child_estimate_mb(size_bytes: int) -> float:
+    """The memory a child is expected to take reading a file of this size."""
+    return max(CHILD_MIN_MB, CHILD_BASE_MB + CHILD_MB_PER_FILE_MB * size_bytes / 2**20)
+
+
+@dataclass
+class Read:
+    """A file's outcome from read_in_children: its pages, or the exception reading it raised."""
+
+    sha256: bytes
+    texts: list[str] | None = None
+    error: Exception | None = None
+
+
+def read_in_children(
+    files: Sequence[bytes],
+    sizes: Mapping[bytes, int],
+    readers: int,
+    memory_mb: float,
+    read: Callable[[bytes], list[str]] | None = None,
+) -> Iterator[Read]:
+    """Read these files, up to `readers` at once, each by `read` (default: a child process each,
+    read_in_child) in a thread of its own that only waits for it; yield each file's outcome as it ends.
+    The next file to start is the first, in the order given, whose estimate fits in `memory_mb` beside
+    the files being read; with none being read, the first starts whatever its size.
+
+    If the caller stops early (an exception, Ctrl-C), the children still reading are killed and their
+    threads end within a second, rather than the caller waiting for their files."""
+    stop = threading.Event()
+    if read is None:
+        read = functools.partial(read_in_child, stop=stop)
+    waiting = list(files)
+    running: dict[Future, tuple[bytes, float]] = {}
+    in_use = 0.0
+    pool = ThreadPoolExecutor(max_workers=readers, thread_name_prefix="trialwatch-pages")
+    try:
+        while waiting or running:
+            while waiting and len(running) < readers:
+                chosen = None
+                for index, sha in enumerate(waiting):
+                    cost = child_estimate_mb(sizes.get(sha, 0))
+                    if not running or in_use + cost <= memory_mb:
+                        chosen = index
+                        break
+                if chosen is None:
+                    break
+                sha = waiting.pop(chosen)
+                # the thread runs in this one's context, so its log lines carry the job's trace
+                running[pool.submit(contextvars.copy_context().run, read, sha)] = (sha, cost)
+                in_use += cost
+            ended, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in ended:
+                sha, cost = running.pop(future)
+                in_use -= cost
+                try:
+                    texts = future.result()
+                except Exception as exc:  # recorded by the caller, as any file that can't be read
+                    yield Read(sha, error=exc)
+                    continue
+                yield Read(sha, texts=texts)
+    finally:
+        stop.set()
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 @dataclass
 class PagesResult:
     files: int = 0
@@ -217,39 +309,61 @@ def extract_missing(
     progress: Progress = None,
     kinds: Sequence[str] | None = None,
     extract: Callable[[bytes], list[str]] | None = None,
+    readers: int | None = None,
 ) -> PagesResult:
     """Read the page text of the files not read yet (of these trials, or all; of every document kind,
-    or only these `kinds`). `extract` reads a file's pages here (tests give their own); without it, a
-    child process reads each file (read_in_child)."""
+    or only these `kinds`). `extract` reads a file's pages here (tests give their own); without it,
+    child processes read the files, `readers` at once (default config.pdf_readers(); the web server
+    reads one at a time, see sources/manual.py)."""
     result = PagesResult()
-    for sha in core.files_without_pages(conn, trial_ids, kinds):
-        short_sha = sha.hex()[:12]
-        try:
-            texts = _read(conn, sha, extract)
-            same = core.save_pages(conn, sha, texts, EXTRACTOR, text_fingerprint(texts))
-        except (UnreadableFile, FileNotRead) as exc:  # the message already says what went wrong
-            result.failed[short_sha] = str(exc)
-            report(progress, f"{short_sha}: failed: {result.failed[short_sha]}")
-            continue
-        except Exception as exc:  # a broken file is recorded, the others go on
-            result.failed[short_sha] = f"{type(exc).__name__}: {exc}"
-            log.warning("file %s not read: %s", short_sha, result.failed[short_sha])
-            report(progress, f"{short_sha}: failed: {result.failed[short_sha]}")
-            continue
-        result.files += 1
-        result.pages += len(texts)
-        if same:
-            others = []
-            for other in same:
-                others.append(other.hex()[:12])
-            result.same_text[short_sha] = others
-        report(progress, f"{short_sha}: {len(texts)} pages")
+    files = core.files_without_pages(conn, trial_ids, kinds)
+    if not files:
+        return result
+    if extract is not None or not READ_IN_CHILD:
+        for sha in files:
+            try:
+                texts = _read_here(conn, sha, extract)
+            except Exception as exc:  # recorded below, as any file that can't be read
+                _record(conn, result, Read(sha, error=exc), progress)
+                continue
+            _record(conn, result, Read(sha, texts=texts), progress)
+        return result
+    if readers is None:
+        readers = config.pdf_readers()
+    sizes = core.file_sizes(conn, files)
+    for outcome in read_in_children(files, sizes, readers, config.pdf_memory_mb()):
+        _record(conn, result, outcome, progress)
     return result
 
 
-def _read(conn: psycopg.Connection, sha256: bytes, extract: Callable[[bytes], list[str]] | None) -> list[str]:
-    if extract is not None:
-        return extract(core.file_content(conn, sha256))
-    if READ_IN_CHILD:
-        return read_in_child(sha256)
-    return extract_pages(core.file_content(conn, sha256))
+def _record(conn: psycopg.Connection, result: PagesResult, outcome: Read, progress: Progress) -> None:
+    """Save a file's pages and count them, or record why it has none; a broken file never stops the rest."""
+    short_sha = outcome.sha256.hex()[:12]
+    try:
+        if outcome.error is not None:
+            raise outcome.error
+        texts = outcome.texts
+        same = core.save_pages(conn, outcome.sha256, texts, EXTRACTOR, text_fingerprint(texts))
+    except (UnreadableFile, FileNotRead) as exc:  # the message already says what went wrong
+        result.failed[short_sha] = str(exc)
+        report(progress, f"{short_sha}: failed: {result.failed[short_sha]}")
+        return
+    except Exception as exc:  # a broken file is recorded, the others go on
+        result.failed[short_sha] = f"{type(exc).__name__}: {exc}"
+        log.warning("file %s not read: %s", short_sha, result.failed[short_sha])
+        report(progress, f"{short_sha}: failed: {result.failed[short_sha]}")
+        return
+    result.files += 1
+    result.pages += len(texts)
+    if same:
+        others = []
+        for other in same:
+            others.append(other.hex()[:12])
+        result.same_text[short_sha] = others
+    report(progress, f"{short_sha}: {len(texts)} pages")
+
+
+def _read_here(conn: psycopg.Connection, sha256: bytes, extract: Callable[[bytes], list[str]] | None) -> list[str]:
+    if extract is None:
+        extract = extract_pages
+    return extract(core.file_content(conn, sha256))

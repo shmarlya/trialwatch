@@ -5,6 +5,7 @@ import io
 import logging
 import os
 import signal
+import threading
 import time
 
 import pytest
@@ -36,6 +37,13 @@ def is_killed(sha256, answer):
 
 
 def hangs(sha256, answer):
+    time.sleep(60)
+
+
+def answers_the_first_hangs_on_others(sha256, answer):
+    if sha256 == bytes([1]) * 32:
+        answer.send(("pages", ["page one"], MEASURES))
+        return
     time.sleep(60)
 
 
@@ -97,3 +105,104 @@ def pdf_with_page(operations: bytes) -> bytes:
     buffer = io.BytesIO()
     writer.write(buffer)
     return buffer.getvalue()
+
+
+# Several files at once (pages.read_in_children), with a `read` that only notes who reads together
+
+
+class Readers:
+    """A `read` for read_in_children that holds each file a moment and notes the most read at once."""
+
+    def __init__(self, failing: bytes | None = None):
+        self.lock = threading.Lock()
+        self.now: set[bytes] = set()
+        self.together: list[set[bytes]] = []
+        self.failing = failing
+
+    def __call__(self, sha256: bytes) -> list[str]:
+        with self.lock:
+            self.now.add(sha256)
+            self.together.append(set(self.now))
+        time.sleep(0.05)
+        with self.lock:
+            self.now.discard(sha256)
+        if sha256 == self.failing:
+            raise pages.UnreadableFile("PdfReadError: broken")
+        return [sha256.hex()[:2]]
+
+    def most_at_once(self) -> int:
+        return max(len(group) for group in self.together)
+
+
+def sha(number: int) -> bytes:
+    return bytes([number]) * 32
+
+
+MB = 2**20
+
+
+def test_files_are_read_several_at_once_up_to_the_readers():
+    files = [sha(n) for n in range(6)]
+    readers = Readers()
+    outcomes = list(pages.read_in_children(files, dict.fromkeys(files, MB), readers=3, memory_mb=10_000, read=readers))
+    assert sorted(outcome.sha256 for outcome in outcomes) == files
+    assert readers.most_at_once() == 3
+
+
+def test_a_file_starts_only_when_its_memory_fits_beside_the_others():
+    # 100 MB files: 150 + 1,000 MB each, so a budget of 2,000 MB holds one at a time
+    files = [sha(n) for n in range(3)]
+    readers = Readers()
+    list(pages.read_in_children(files, dict.fromkeys(files, 100 * MB), readers=3, memory_mb=2_000, read=readers))
+    assert readers.most_at_once() == 1
+
+
+def test_small_files_go_beside_a_large_one_and_a_file_over_the_budget_is_still_read():
+    large, small_one, small_two = sha(1), sha(2), sha(3)
+    sizes = {large: 300 * MB, small_one: MB, small_two: MB}
+    readers = Readers()
+    outcomes = list(
+        pages.read_in_children([large, small_one, small_two], sizes, readers=2, memory_mb=1_000, read=readers)
+    )
+    assert len(outcomes) == 3
+    assert {large} in readers.together
+    assert all(large not in group or len(group) == 1 for group in readers.together)
+
+
+def test_a_file_that_cannot_be_read_is_yielded_with_its_error_and_the_rest_go_on():
+    files = [sha(n) for n in range(4)]
+    readers = Readers(failing=sha(2))
+    outcomes = {o.sha256: o for o in pages.read_in_children(files, {}, readers=2, memory_mb=10_000, read=readers)}
+    assert isinstance(outcomes[sha(2)].error, pages.UnreadableFile)
+    assert outcomes[sha(0)].texts == ["00"]
+    assert len(outcomes) == 4
+
+
+def test_a_caller_that_stops_early_does_not_wait_for_the_children_still_reading(monkeypatch):
+    # e.g. Ctrl-C, or `trialwatch web` stopping its worker: the child still reading is killed
+    monkeypatch.setattr(pages, "_child_reads", answers_the_first_hangs_on_others)
+    started = time.monotonic()
+    for outcome in pages.read_in_children([sha(1), sha(2)], {}, readers=2, memory_mb=10_000):
+        assert outcome.texts == ["page one"]
+        break
+    assert time.monotonic() - started < 20
+
+
+def test_the_reading_threads_run_in_the_callers_context_for_its_trace():
+    import contextvars
+
+    where = contextvars.ContextVar("where", default="none")
+    where.set("the job")
+    seen = []
+
+    def read(sha256):
+        seen.append(where.get())
+        return []
+
+    list(pages.read_in_children([sha(1), sha(2)], {}, readers=2, memory_mb=10_000, read=read))
+    assert seen == ["the job", "the job"]
+
+
+def test_small_dense_files_are_not_estimated_below_what_one_took():
+    assert pages.child_estimate_mb(int(5.7 * MB)) >= 590
+    assert pages.child_estimate_mb(47 * MB) == 150 + 470

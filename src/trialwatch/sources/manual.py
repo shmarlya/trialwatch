@@ -25,6 +25,9 @@ from trialwatch.trials.pages import extract_missing
 from trialwatch.sources.registry import Adapter
 
 SOURCE = "manual"
+# Uploads are read in the web server, whose container has 512 MB and one CPU (compose.coolify.yaml):
+# one PDF at a time there, whatever the worker's TRIALWATCH_PDF_READERS
+WEB_PDF_READERS = 1
 
 
 class ManualAdapter(Adapter):
@@ -134,7 +137,7 @@ def add_trial(conn: psycopg.Connection, entry: TrialEntry, files: list[UploadedF
         for file in files:
             add_document(conn, saved.trial_id, file, kind, title=None, extract=False)
     if files:
-        extract_missing(conn, [saved.trial_id])
+        extract_missing(conn, [saved.trial_id], readers=WEB_PDF_READERS)
     record_transfer(conn, saved.trial_id)
     return saved.trial_id
 
@@ -177,6 +180,6 @@ def add_document(conn: psycopg.Connection, trial_id: int, file: UploadedFile, ki
     )
     core.link_document(conn, trial_id=trial_id, document_id=saved.document_id, basis="manual", source=SOURCE)
     if extract:
-        extract_missing(conn, [trial_id])
+        extract_missing(conn, [trial_id], readers=WEB_PDF_READERS)
         record_transfer(conn, trial_id)
     return saved.document_id

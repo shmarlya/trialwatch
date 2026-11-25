@@ -137,6 +137,9 @@ def worker(
     logging.config.dictConfig(telemetry.log_config())
     # to Grafana when OTEL_EXPORTER_OTLP_ENDPOINT is set (compose)
     telemetry.setup("trialwatch-worker")
+    # a mistyped setting stops the worker here, not each transfer that reaches a PDF
+    config.pdf_readers()
+    config.pdf_memory_mb()
     try:
         ran = job_worker.run(once=once)
     except KeyboardInterrupt:

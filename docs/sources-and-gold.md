@@ -109,7 +109,12 @@ answer means the trial doesn't exist (`TrialNotFound`).
   confidence. Each file's page text is extracted once with pypdf (`core.page`, `trials/pages.py`); only PDFs are
   read. Each file is read in a child process of its own: pypdf needs about ten times a file's size while it reads
   (a 38 MB, 3,000-page CTIS study report: 420 MB), and the child gives that memory back when it ends. A child that
-  runs out of memory or takes over 20 minutes fails only its file, like a broken PDF. A CTIS document over 300 MB
+  runs out of memory or takes over 20 minutes fails only its file, like a broken PDF. A trial's files are read
+  two at a time in the worker (pypdf is pure Python: one process uses one CPU), and a file starts only when
+  its estimate (150 MB plus ten times its size, at least 600 MB) fits beside those being read in 1,400 MB;
+  one over that is read alone. When the memory runs out anyway, the kernel kills the larger child, so a
+  file can fail because of the one read beside it; it is read again on the next transfer. Uploads in the
+  web server are read one at a time (its container has 512 MB). A CTIS document over 300 MB
   is not downloaded (failed as too large), and a file already stored is not sent to the database again. pypdf's
   budget for parsing one page's content stream is raised from 2 to 10 million: pages of dense tables in CTIS
   study reports went over the default and failed their whole file.

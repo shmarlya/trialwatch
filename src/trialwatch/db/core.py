@@ -1164,8 +1164,21 @@ def files_without_pages(conn: psycopg.Connection, trial_ids: Sequence[int] | Non
     return files
 
 
+def file_sizes(conn: psycopg.Connection, sha256s: Sequence[bytes]) -> dict[bytes, int]:
+    """The size in bytes of each of these stored files."""
+    rows = conn.execute(
+        "SELECT sha256, size_bytes FROM core.file WHERE sha256 = ANY(%s)", (list(sha256s),)
+    ).fetchall()
+    sizes = {}
+    for row in rows:
+        sizes[bytes(row[0])] = row[1]
+    return sizes
+
+
 def file_content(conn: psycopg.Connection, sha256: bytes) -> bytes:
-    row = conn.execute("SELECT content FROM core.file WHERE sha256 = %s", (sha256,)).fetchone()
+    # binary: in text format the database writes the content out as hex, twice its size, in its own
+    # memory and in ours (two PDF readers fetching large files at once took the db container near its limit)
+    row = conn.execute("SELECT content FROM core.file WHERE sha256 = %s", (sha256,), binary=True).fetchone()
     return bytes(row[0])
 
 

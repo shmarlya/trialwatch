@@ -13,6 +13,8 @@ The settings (each read by a function below):
 - TRIALWATCH_GOLD_DIR: the gold datasets (default: the repository's data/gold/)
 - TRIALWATCH_COUNTRIES: whose places `trialwatch geo load` loads, ISO codes, comma-separated (default:
   the EU/EEA, where CTIS trials have sites)
+- TRIALWATCH_PDF_READERS / TRIALWATCH_PDF_MEMORY_MB: how many PDFs the worker reads at once, and the
+  memory their child processes may take together (trialwatch.trials.pages)
 """
 
 import os
@@ -127,6 +129,32 @@ def gazetteer_countries() -> list[str]:
     from trialwatch.geo import geonames
 
     return geonames.eea_countries()
+
+
+def pdf_readers() -> int:
+    """How many PDFs the worker reads at once, each in a child process (TRIALWATCH_PDF_READERS,
+    default 2: one per CPU of the worker's limit)."""
+    return _positive_int("TRIALWATCH_PDF_READERS", 2)
+
+
+def pdf_memory_mb() -> int:
+    """The memory, in MB, the children reading PDFs may take together (TRIALWATCH_PDF_MEMORY_MB,
+    default 1400 of the worker's 2 GB): a file starts only when its estimate fits beside those being
+    read. A file larger than the whole budget is still read, alone."""
+    return _positive_int("TRIALWATCH_PDF_MEMORY_MB", 1400)
+
+
+def _positive_int(name: str, default: int) -> int:
+    configured = os.environ.get(name, "").strip()
+    if not configured:
+        return default
+    try:
+        value = int(configured)
+    except ValueError:
+        raise ValueError(f"{name} must be a whole number, not {configured!r}") from None
+    if value < 1:
+        raise ValueError(f"{name} must be 1 or more, not {configured}")
+    return value
 
 
 def gold_dir() -> Path:

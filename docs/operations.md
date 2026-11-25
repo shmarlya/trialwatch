@@ -94,10 +94,12 @@ for a host that has nothing of the repository, such as Coolify: the database, `w
 Coolify does the rest: its proxy holds the certificate and sends plain HTTP to `web` on port 8010, it shows each
 container's memory and CPU, and it backs the database up. `web` and `worker` run the app's image, which carries
 the migrations and dbmate: each runs `dbmate --wait up` before it starts (a lock makes the second wait, then find
-nothing to do). Every service has a memory and CPU limit (web 512 MB, worker 2 GB, db 768 MB; one CPU each;
-the worker reads each PDF in a short-lived child process inside its 2 GB, see
-[page text](sources-and-gold.md)),
-so the stack needs about 3.3 GB beside Coolify's own. No Grafana here: compose.yaml has it, for a server of our own.
+nothing to do). Every service has a memory and CPU limit (web 512 MB and one CPU, worker 2 GB and two CPUs, db
+768 MB and one CPU; the worker reads PDFs in short-lived child processes, two at once while their estimated
+memory fits in 1,400 MB of its 2 GB (`TRIALWATCH_PDF_READERS`, `TRIALWATCH_PDF_MEMORY_MB`, set in Coolify's
+Environment Variables), see [page text](sources-and-gold.md)),
+so the stack needs about 3.3 GB and at least two CPUs beside Coolify's own (on one CPU, Docker refuses the
+worker's `cpus: 2.0`: set it to 1.0 and `TRIALWATCH_PDF_READERS` to 1). No Grafana here: compose.yaml has it, for a server of our own.
 
 1. Run the **Image** workflow on `main`: it pushes the image.
 2. In Coolify: **New resource → Docker Compose Empty**, and paste `compose.coolify.yaml`.

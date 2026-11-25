@@ -30,7 +30,7 @@
   <div class="panel">
     <h3 class="panel-title">Sources</h3>
     {% for transfer in transfers %}
-    <div class="stat"><span><a href="/sources/{{ transfer.source }}">{{ transfer.source }}</a> · {{ transfer.source_key }}</span>{{ evidence_state(transfer.status) }}</div>
+    <div class="stat"><span><a href="/sources/{{ transfer.source }}">{{ transfer.source }}</a> · {{ transfer.source_key }}</span>{{ evidence_state(transfer.status) }}{% if transfer.stuck %}<span class="small">stuck: failed on {{ transfer.failures }} days in a row; the refresh leaves it until {{ transfer.source }} changes it or a person transfers it again</span>{% endif %}</div>
     <div class="small muted">
       {% if transfer.delisted_at %}no longer listed since {{ when(transfer.delisted_at) }}{% elif transfer.listed %}listed{% if transfer.source_updated_on %}, changed at the source {{ transfer.source_updated_on }}{% endif %}{% else %}not in the source's list{% endif %}
       {% if transfer.transferred_at %}<br>transferred {{ when(transfer.transferred_at) }}: {{ transfer.documents }} documents, {{ transfer.pages }} pages{% endif %}

@@ -628,3 +628,52 @@ def test_a_pdf_still_cut_short_is_kept_with_a_warning(conn):
     result = transfer(conn, fake)
     assert result.failed == {f"{CT}/document {SUMMARY['uuid']}": "no %%EOF at its end: the file may be cut short"}
     assert result.statuses == {CT: "complete"}  # a warning: the file is stored, its pages read
+
+
+def failing_days(conn):
+    return conn.execute(
+        "SELECT e.failures, e.stuck FROM core.evidence_status e WHERE e.source_key = %s", (CT,)
+    ).fetchone()
+
+
+def a_day_earlier(conn):
+    conn.execute("UPDATE core.evidence_transfer SET failed_on = failed_on - 1 WHERE source_key = %s", (CT,))
+
+
+def test_a_trial_failing_on_three_days_is_stuck_until_it_completes(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.download_errors[REPORT["uuid"]] = ValueError("too large to download: 400 MB")
+    transfer(conn, fake)
+    transfer(conn, fake)  # a retry the same day (a job's attempts during an outage) counts once
+    assert failing_days(conn) == (1, False)
+    a_day_earlier(conn)
+    transfer(conn, fake)
+    a_day_earlier(conn)
+    transfer(conn, fake)
+    assert failing_days(conn) == (3, True)
+    assert core.keys_to_transfer(conn, "ctis", "failed") == []
+    assert core.keys_to_transfer(conn, "ctis", "stuck") == [CT]
+    fake.download_errors.clear()
+    transfer(conn, fake)  # a person transfers it again
+    assert failing_days(conn) == (0, False)
+
+
+def test_a_stuck_trial_the_source_changed_is_taken_again(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.download_errors[REPORT["uuid"]] = ValueError("too large to download: 400 MB")
+    for _ in range(3):
+        transfer(conn, fake)
+        a_day_earlier(conn)
+    assert failing_days(conn) == (3, True)
+    source = conn.execute("SELECT id FROM core.source WHERE code = 'ctis'").fetchone()[0]
+    run = core.start_ingest(conn, "ctis", {}, kind="list")
+    conn.execute(
+        "INSERT INTO core.source_listing (source_id, source_key, source_updated_on, last_run) "
+        "VALUES (%s, %s, current_date, %s) "
+        "ON CONFLICT (source_id, source_key) DO UPDATE SET source_updated_on = current_date",
+        (source, CT, run),
+    )
+    assert failing_days(conn)[1] is False
+    assert core.keys_to_transfer(conn, "ctis", "failed") == [CT]

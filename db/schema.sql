@@ -837,7 +837,10 @@ CREATE TABLE core.evidence_transfer (
     documents integer DEFAULT 0 NOT NULL,
     pages integer DEFAULT 0 NOT NULL,
     errors jsonb DEFAULT '{}'::jsonb NOT NULL,
+    failures integer DEFAULT 0 NOT NULL,
+    failed_on date,
     CONSTRAINT evidence_transfer_check CHECK (((status = 'complete'::text) = (errors = '{}'::jsonb))),
+    CONSTRAINT evidence_transfer_failures_check CHECK ((failures >= 0)),
     CONSTRAINT evidence_transfer_status_check CHECK ((status = ANY (ARRAY['complete'::text, 'failed'::text])))
 );
 
@@ -892,7 +895,9 @@ CREATE VIEW core.evidence_status AS
     e.documents,
     e.pages,
     e.errors,
-    l.recruiting
+    l.recruiting,
+    COALESCE(e.failures, 0) AS failures,
+    COALESCE(((e.status = 'failed'::text) AND (e.failures >= 3) AND (NOT COALESCE((l.source_updated_on >= e.failed_on), false))), false) AS stuck
    FROM ((core.trial_source ts
      LEFT JOIN core.source_listing l USING (source_id, source_key))
      LEFT JOIN core.evidence_transfer e USING (source_id, source_key));
@@ -3761,4 +3766,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261124160000'),
     ('20261124170000'),
     ('20261124180000'),
-    ('20261124190000');
+    ('20261124190000'),
+    ('20261125100000');

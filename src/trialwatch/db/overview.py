@@ -1171,10 +1171,13 @@ class SourceTrialRow:
     documents: int | None
     pages: int | None
     errors: dict | None
+    # days in a row its transfer failed; stuck: left for a person (core.evidence_status)
+    failures: int = 0
+    stuck: bool = False
 
 
 # What the source page filters on: a state of core.evidence_status, or no longer listed
-SOURCE_TRIAL_FILTERS = ("not transferred", "complete", "stale", "failed", "no longer listed")
+SOURCE_TRIAL_FILTERS = ("not transferred", "complete", "stale", "failed", "stuck", "no longer listed")
 
 
 def _source_trial_filter() -> str:
@@ -1187,7 +1190,8 @@ def _source_trial_filter() -> str:
         WHERE s.code = %(source)s
           AND (%(state)s::text IS NULL
                OR (%(state)s = 'no longer listed' AND e.delisted_at IS NOT NULL)
-               OR (%(state)s <> 'no longer listed' AND e.status = %(state)s))
+               OR (%(state)s = 'stuck' AND e.stuck)
+               OR (%(state)s NOT IN ('no longer listed', 'stuck') AND e.status = %(state)s))
           AND (%(search)s::text IS NULL OR e.source_key ILIKE '%%' || %(search)s || '%%'
                OR coalesce(e.title, rec.registered->>'public_title') ILIKE '%%' || %(search)s || '%%'
                OR e.summary::text ILIKE '%%' || %(search)s || '%%')
@@ -1202,7 +1206,7 @@ def source_trials(conn: psycopg.Connection, code: str, state: str | None = None,
             """
             SELECT e.source_key, e.trial_id, coalesce(e.title, rec.registered->>'public_title') AS title,
                    e.listed, e.delisted_at, e.source_updated_on, e.summary, e.status, e.transferred_at,
-                   e.ingest_run_id, e.documents, e.pages, e.errors
+                   e.ingest_run_id, e.documents, e.pages, e.errors, e.failures, e.stuck
             """ + _source_trial_filter() + " ORDER BY e.source_key OFFSET %(offset)s LIMIT %(limit)s",
             {"source": code, "state": state, "search": like_text(search), "offset": offset, "limit": limit},
         ).fetchall()
@@ -1254,6 +1258,8 @@ class TransferRow:
     documents: int | None
     pages: int | None
     errors: dict | None
+    failures: int = 0
+    stuck: bool = False
 
 
 def trial_transfers(conn: psycopg.Connection, trial_id: int) -> list[TransferRow]:
@@ -1262,7 +1268,7 @@ def trial_transfers(conn: psycopg.Connection, trial_id: int) -> list[TransferRow
         return cur.execute(
             """
             SELECT s.code AS source, s.adapter, e.source_key, e.listed, e.delisted_at, e.source_updated_on, e.status,
-                   e.transferred_at, e.ingest_run_id, e.documents, e.pages, e.errors
+                   e.transferred_at, e.ingest_run_id, e.documents, e.pages, e.errors, e.failures, e.stuck
             FROM core.evidence_status e JOIN core.source s ON s.id = e.source_id
             WHERE e.trial_id = %s ORDER BY s.id, e.source_key
             """,

@@ -1024,7 +1024,8 @@ def save_transfer(conn: psycopg.Connection, *, source: str, source_key: str, run
                   pages: int, errors: dict[str, str], document_kinds: Sequence[str] | None) -> str:
     """Record how a trial's evidence transfer from a source ended: 'complete' without errors, else
     'failed', with the document kinds it brought in (None: every kind). Replaces the previous
-    transfer's row (its history is in the audit log)."""
+    transfer's row (its history is in the audit log). A failure counts the days in a row its transfer
+    failed (once per day); a complete transfer starts them again (core.evidence_status.stuck)."""
     status = "complete"
     if errors:
         status = "failed"
@@ -1034,15 +1035,23 @@ def save_transfer(conn: psycopg.Connection, *, source: str, source_key: str, run
     conn.execute(
         """
         INSERT INTO core.evidence_transfer (source_id, source_key, status, transferred_by, ingest_run_id, document_kinds,
-                                            source_updated_on, documents, pages, errors)
+                                            source_updated_on, documents, pages, errors, failures, failed_on)
         VALUES (%(source)s, %(key)s, %(status)s, current_setting('trialwatch.actor')::bigint, %(run)s, %(kinds)s,
                 (SELECT source_updated_on FROM core.source_listing WHERE source_id = %(source)s AND source_key = %(key)s),
-                %(documents)s, %(pages)s, %(errors)s)
+                %(documents)s, %(pages)s, %(errors)s,
+                CASE WHEN %(status)s = 'failed' THEN 1 ELSE 0 END,
+                CASE WHEN %(status)s = 'failed' THEN current_date END)
         ON CONFLICT (source_id, source_key) DO UPDATE SET
             status = EXCLUDED.status, transferred_at = clock_timestamp(), transferred_by = EXCLUDED.transferred_by,
             ingest_run_id = EXCLUDED.ingest_run_id, document_kinds = EXCLUDED.document_kinds,
             source_updated_on = EXCLUDED.source_updated_on, documents = EXCLUDED.documents, pages = EXCLUDED.pages,
-            errors = EXCLUDED.errors
+            errors = EXCLUDED.errors,
+            failures = CASE
+                WHEN EXCLUDED.status <> 'failed' THEN 0
+                WHEN core.evidence_transfer.failed_on = current_date THEN core.evidence_transfer.failures
+                ELSE core.evidence_transfer.failures + 1
+            END,
+            failed_on = EXCLUDED.failed_on
         """,
         {"source": source_id(conn, source), "key": source_key, "status": status, "run": run_id, "kinds": kinds,
          "documents": documents, "pages": pages, "errors": Jsonb(errors)},
@@ -1053,7 +1062,8 @@ def save_transfer(conn: psycopg.Connection, *, source: str, source_key: str, run
 # Which of a source's trials a transfer takes, by their state in core.evidence_status
 TRANSFER_CHOICES = {
     "pending": "listed, evidence not transferred yet",
-    "failed": "the last transfer failed (and the source has not delisted it)",
+    "failed": "the last transfer failed (and the source has not delisted it), unless it is stuck",
+    "stuck": "failed on 3 days in a row and unchanged since: left for a person, not taken by a refresh",
     "stale": "transferred, but the source changed the trial since (and has not delisted it)",
     "recruiting": "listed as recruiting now, and not transferred since it last changed",
     "listed": "every trial the source lists",
@@ -1061,7 +1071,8 @@ TRANSFER_CHOICES = {
 _TRANSFER_CONDITIONS = {
     "pending": "e.listed AND e.delisted_at IS NULL AND e.status = 'not transferred'",
     # a trial the source no longer lists is not asked for again: it would fail at every refresh
-    "failed": "e.delisted_at IS NULL AND e.status = 'failed'",
+    "failed": "e.delisted_at IS NULL AND e.status = 'failed' AND NOT e.stuck",
+    "stuck": "e.delisted_at IS NULL AND e.stuck",
     "stale": "e.delisted_at IS NULL AND e.status = 'stale'",
     "recruiting": "e.listed AND e.delisted_at IS NULL AND e.recruiting AND e.status <> 'complete'",
     "listed": "e.listed AND e.delisted_at IS NULL",

@@ -333,7 +333,7 @@ def source_transfer(
     from_file: Annotated[
         Path | None, typer.Option("--file", exists=True, dir_okay=False, help="A file with one key per line")
     ] = None,
-    which: Annotated[str | None, typer.Option(help="Instead of keys: pending | failed | stale | recruiting | listed")] = None,
+    which: Annotated[str | None, typer.Option(help="Instead of keys: pending | failed | stuck | stale | recruiting | listed")] = None,
     limit: Annotated[int | None, typer.Option(min=1, help="Transfer at most this many trials")] = None,
     recheck: Annotated[
         bool, typer.Option("--recheck", help="Download every document again, even those held at the listed version")

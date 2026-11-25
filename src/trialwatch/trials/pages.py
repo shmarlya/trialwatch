@@ -128,7 +128,7 @@ def read_in_child(
     sha256: bytes,
     timeout: float = READ_TIMEOUT_SECONDS,
     child_reads: Callable[[bytes, Connection], None] | None = None,
-    stop: threading.Event | None = None,
+    stop: "threading.Event | _Either | None" = None,
 ) -> list[str]:
     """The pages of a stored file, read by a child process that fetches the file itself (so this
     process never holds its bytes). A file that can't be read raises UnreadableFile (a ValueError, as
@@ -249,23 +249,28 @@ def read_in_children(
     readers: int,
     memory_mb: float,
     read: Callable[[bytes], list[str]] | None = None,
+    stop: threading.Event | None = None,
 ) -> Iterator[Read]:
     """Read these files, up to `readers` at once, each by `read` (default: a child process each,
     read_in_child) in a thread of its own that only waits for it; yield each file's outcome as it ends.
     The next file to start is the first, in the order given, whose estimate fits in `memory_mb` beside
     the files being read; with none being read, the first starts whatever its size.
 
-    If the caller stops early (an exception, Ctrl-C), the children still reading are killed and their
-    threads end within a second, rather than the caller waiting for their files."""
-    stop = threading.Event()
+    If the caller stops early (an exception, Ctrl-C), or sets `stop`, the children still reading are
+    killed and their threads end within a second, rather than the caller waiting for their files; no
+    other file starts once `stop` is set."""
+    halt = threading.Event()
+    either = _Either(halt, stop)
     if read is None:
-        read = functools.partial(read_in_child, stop=stop)
+        read = functools.partial(read_in_child, stop=either)
     waiting = list(files)
     running: dict[Future, tuple[bytes, float]] = {}
     in_use = 0.0
     pool = ThreadPoolExecutor(max_workers=readers, thread_name_prefix="trialwatch-pages")
     try:
         while waiting or running:
+            if either.is_set():
+                waiting.clear()
             while waiting and len(running) < readers:
                 chosen = None
                 for index, sha in enumerate(waiting):
@@ -290,8 +295,19 @@ def read_in_children(
                     continue
                 yield Read(sha, texts=texts)
     finally:
-        stop.set()
+        halt.set()
         pool.shutdown(wait=True, cancel_futures=True)
+
+
+class _Either:
+    """Set when either event is (the second may be None)."""
+
+    def __init__(self, first: threading.Event, second: threading.Event | None) -> None:
+        self.first = first
+        self.second = second
+
+    def is_set(self) -> bool:
+        return self.first.is_set() or (self.second is not None and self.second.is_set())
 
 
 @dataclass
@@ -367,3 +383,83 @@ def _read_here(conn: psycopg.Connection, sha256: bytes, extract: Callable[[bytes
     if extract is None:
         extract = extract_pages
     return extract(core.file_content(conn, sha256))
+
+
+class Reading:
+    """A trial's files being read in the background while the caller does something else (a transfer
+    fetches the next trial): child processes read them (read_in_children) and a thread only waits for
+    them and keeps their outcomes; finish() saves those outcomes on the caller's connection, in its
+    thread. So every database write stays on one connection, and the reading overlaps the caller's work."""
+
+    def __init__(self, conn: psycopg.Connection, trial_ids: Sequence[int], kinds: Sequence[str] | None) -> None:
+        self._files = core.files_without_pages(conn, trial_ids, kinds)
+        self._outcomes: list[Read] = []
+        self._error: BaseException | None = None
+        self._stop = threading.Event()
+        self._thread = None
+        if self._files:
+            sizes = core.file_sizes(conn, self._files)
+            context = contextvars.copy_context()
+            self._thread = threading.Thread(
+                target=context.run,
+                args=(self._read, sizes, config.pdf_readers(), config.pdf_memory_mb()),
+                name="trialwatch-reading",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def _read(self, sizes: Mapping[bytes, int], readers: int, memory_mb: int) -> None:
+        try:
+            for outcome in read_in_children(self._files, sizes, readers, memory_mb, stop=self._stop):
+                self._outcomes.append(outcome)
+                # each file read is the work moving (the worker's watchdog), while the caller is busy
+                report(None, f"{outcome.sha256.hex()[:12]}: read")
+        except BaseException as exc:  # given to the caller by finish()
+            self._error = exc
+
+    def finish(self, conn: psycopg.Connection, progress: Progress = None) -> PagesResult:
+        """Wait for the reading to end, then save each file's pages (or record why it has none)."""
+        result = PagesResult()
+        if self._thread is not None:
+            self._thread.join()
+        if self._error is not None:
+            raise self._error
+        for outcome in self._outcomes:
+            _record(conn, result, outcome, progress)
+        return result
+
+    def cancel(self) -> None:
+        """Stop reading: the children still reading are killed, within a second or so."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+
+
+class ReadingHere:
+    """Reading's stand-in where files are read in this process (tests, or `extract`): finish() reads
+    and saves them then, one after another (extract_missing)."""
+
+    def __init__(
+        self, trial_ids: Sequence[int], kinds: Sequence[str] | None, extract: Callable[[bytes], list[str]] | None
+    ) -> None:
+        self._trial_ids = list(trial_ids)
+        self._kinds = kinds
+        self._extract = extract
+
+    def finish(self, conn: psycopg.Connection, progress: Progress = None) -> PagesResult:
+        return extract_missing(conn, self._trial_ids, progress, self._kinds, self._extract)
+
+    def cancel(self) -> None:
+        pass
+
+
+def start_reading(
+    conn: psycopg.Connection,
+    trial_ids: Sequence[int],
+    kinds: Sequence[str] | None = None,
+    extract: Callable[[bytes], list[str]] | None = None,
+) -> "Reading | ReadingHere":
+    """Start reading the page text these trials' files still lack, to save it later with finish()."""
+    if extract is not None or not READ_IN_CHILD:
+        return ReadingHere(trial_ids, kinds, extract)
+    return Reading(conn, trial_ids, kinds)

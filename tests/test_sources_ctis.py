@@ -1,6 +1,9 @@
 """The CTIS adapter into the central model (ADR-003, ADR-005), against a fake CTIS."""
 
 import copy
+import threading
+import time
+import pytest
 import dataclasses
 from datetime import UTC, datetime
 
@@ -8,7 +11,7 @@ from trialwatch.db import core, overview
 from trialwatch.db.core import Identifier
 from trialwatch.hashing import storable
 from trialwatch.sources import ctis
-from trialwatch.trials import ingest, readiness
+from trialwatch.trials import ingest, pages, readiness
 from trialwatch.sources.ctis_client import DownloadedFile
 from trialwatch.trials.pages import extract_missing, text_fingerprint
 
@@ -677,3 +680,75 @@ def test_a_stuck_trial_the_source_changed_is_taken_again(conn):
     )
     assert failing_days(conn)[1] is False
     assert core.keys_to_transfer(conn, "ctis", "failed") == [CT]
+
+
+# The next trial is fetched while the last one's files are read (children; here, threads in this process)
+
+CT2 = "1999-000000-00-12"
+
+
+def second_trial():
+    record = copy.deepcopy(RECORD)
+    record["ctNumber"] = CT2
+    del record["authorizedApplication"]["authorizedPartI"]["trialDetails"]["clinicalTrialIdentifiers"][
+        "secondaryIdentifyingNumbers"]
+    for number, document in enumerate(record["documents"], start=11):
+        document["uuid"] = f"00000000-0000-4000-8000-0000000000{number}"
+    return record
+
+
+class TwoTrials(FakeCtis):
+    def __init__(self):
+        super().__init__(RECORD)
+        self.records = {CT: RECORD, CT2: second_trial()}
+        self.second_fetched = threading.Event()
+
+    def retrieve(self, ct_number):
+        if ct_number == CT2:
+            self.second_fetched.set()
+            if self.retrieve_error is not None:
+                raise self.retrieve_error
+        self.record = self.records[ct_number]
+        return copy.deepcopy(self.record)
+
+
+def test_a_trials_files_are_read_while_the_next_trial_is_fetched(conn, monkeypatch):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = TwoTrials()
+    overlapped = []
+
+    def read_in_child(sha256, stop=None):
+        # the first trial's files wait for the second trial's fetch: only an overlap lets them finish
+        overlapped.append(fake.second_fetched.wait(5))
+        return ["page one"]
+
+    monkeypatch.setattr("trialwatch.trials.pages.READ_IN_CHILD", True)
+    monkeypatch.setattr("trialwatch.trials.pages.read_in_child", read_in_child)
+    result = transfer(conn, fake, keys=(CT, CT2), extract=None)
+    assert result.statuses == {CT: "complete", CT2: "complete"}
+    assert result.pages == 4
+    assert overlapped and all(overlapped)
+
+
+def test_an_interrupted_transfer_stops_the_reading_of_the_trial_in_hand(conn, monkeypatch):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = TwoTrials()
+    fake.retrieve_error = KeyboardInterrupt()
+    stopped = []
+
+    def read_in_child(sha256, stop=None):
+        deadline = time.monotonic() + 10
+        while not stop.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        stopped.append(stop.is_set())
+        raise pages.FileNotRead("stopped: the reading was interrupted")
+
+    monkeypatch.setattr("trialwatch.trials.pages.READ_IN_CHILD", True)
+    monkeypatch.setattr("trialwatch.trials.pages.read_in_child", read_in_child)
+    started = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        transfer(conn, fake, keys=(CT, CT2), extract=None)
+    assert time.monotonic() - started < 5
+    assert stopped and all(stopped)
+    status = conn.execute("SELECT status FROM core.evidence_transfer WHERE source_key = %s", (CT,)).fetchone()
+    assert status in (None, ("failed",))  # never complete without its page text

@@ -41,7 +41,7 @@ from trialwatch.progress import Progress, beat, report
 from trialwatch.search import index as search_index
 from trialwatch.sources import profile
 from trialwatch.sources.registry import Adapter, DocumentRef, DownloadedFile, TrialNotFound
-from trialwatch.trials.pages import extract_missing
+from trialwatch.trials import pages
 
 ShouldStop = Callable[[], bool] | None
 # Where a PDF's end-of-file marker is looked for: it ends the file, give or take trailing bytes
@@ -293,6 +293,9 @@ def transfer(
     _hold_source(conn, source)
     try:
         result = TransferResult(run_id=core.start_ingest(conn, source.code, run_args, kind="transfer"), recheck=recheck)
+        # The trial whose files are being read while the next one is fetched: its page text is saved,
+        # and its status recorded, once that next trial's record and documents are in
+        reading: _Reading | None = None
         try:
             for number, key in enumerate(wanted, start=1):
                 if _stopping(should_stop):
@@ -303,17 +306,27 @@ def transfer(
                 with telemetry.tracer.start_as_current_span("ingest.trial") as span:
                     span.set_attribute("trialwatch.source", source.code)
                     span.set_attribute("trialwatch.source.key", key)
-                    status = _transfer_one(conn, source, adapter, key, kinds, extract, result, recheck)
-                    span.set_attribute("trialwatch.ingest.status", status)
-                result.statuses[key] = status
-                _log_trial(source.code, key, status, time.monotonic() - started, result.failed)
-                report(progress, f"{number}/{len(wanted)} {key}: {status}")
+                    fetched = _fetch_one(conn, source, adapter, key, kinds, result, recheck)
+                if reading is not None:
+                    _finish_and_tell(conn, source, kinds, result, reading, len(wanted), progress)
+                    reading = None
+                if fetched is None:
+                    _tell(source, key, number, len(wanted), "failed", started, result, progress)
+                    continue
+                reading = _Reading(
+                    key, number, started, fetched, pages.start_reading(conn, [fetched.trial_id], kinds, extract)
+                )
+            if reading is not None:
+                _finish_and_tell(conn, source, kinds, result, reading, len(wanted), progress)
+                reading = None
             if result.trial_ids:
                 _refresh_search_words(conn, result)
         except BaseException as exc:
-            # Ctrl-C or a database error: the run is closed as failed (the trial in hand stays failed),
-            # then the error goes on
+            # Ctrl-C or a database error: the run is closed as failed (the trials in hand stay failed:
+            # marked so before their evidence changed), then the error goes on
             result.failed["run"] = f"interrupted: {type(exc).__name__}: {exc}"
+            if reading is not None:
+                reading.pages.cancel()
             raise
         finally:
             core.finish_ingest(conn, result.run_id, counts=result.counts(), errors=result.failed)
@@ -335,16 +348,60 @@ def _log_trial(source: str, key: str, status: str, seconds: float, failed: dict[
         log.info("transfer %s %s %s in %.0f s", source, key, status, seconds)
 
 
-def _transfer_one(
+@dataclass
+class _Reading:
+    """A trial fetched and saved whose files are being read; its status comes when they are."""
+
+    key: str
+    number: int
+    started: float
+    fetched: "Saved"
+    pages: "pages.Reading | pages.ReadingHere"
+
+
+def _tell(
+    source: RegisteredSource,
+    key: str,
+    number: int,
+    total: int,
+    status: str,
+    started: float,
+    result: TransferResult,
+    progress: Progress,
+) -> None:
+    result.statuses[key] = status
+    _log_trial(source.code, key, status, time.monotonic() - started, result.failed)
+    report(progress, f"{number}/{total} {key}: {status}")
+
+
+def _finish_and_tell(
+    conn: psycopg.Connection,
+    source: RegisteredSource,
+    kinds: Sequence[str] | None,
+    result: TransferResult,
+    reading: _Reading,
+    total: int,
+    progress: Progress,
+) -> None:
+    with telemetry.tracer.start_as_current_span("ingest.trial.pages") as span:
+        span.set_attribute("trialwatch.source", source.code)
+        span.set_attribute("trialwatch.source.key", reading.key)
+        status = _finish_one(conn, source, kinds, result, reading)
+        span.set_attribute("trialwatch.ingest.status", status)
+    _tell(source, reading.key, reading.number, total, status, reading.started, result, progress)
+
+
+def _fetch_one(
     conn: psycopg.Connection,
     source: RegisteredSource,
     adapter: Adapter,
     key: str,
     kinds: Sequence[str] | None,
-    extract: Callable[[bytes], list[str]] | None,
     result: TransferResult,
     recheck: bool = False,
-) -> str:
+) -> "Saved | None":
+    """The trial's record and documents, saved; None when even its record could not be (its failed
+    transfer recorded then, if the trial is known)."""
     result.trials += 1
     known = core.source_key_known(conn, source.code, key)
     if known:
@@ -353,11 +410,8 @@ def _transfer_one(
         fetched = save(conn, source.code, key, adapter, kinds, recheck)
     except Exception as exc:  # save reports errors itself; this keeps the run going if not
         fetched = Saved(trial_id=None, errors={"record": f"{type(exc).__name__}: {exc}"})
-    errors = {}
-    for where, message in fetched.errors.items():
-        errors[where] = message
     if fetched.trial_id is None:
-        for where, message in errors.items():
+        for where, message in fetched.errors.items():
             result.failed[f"{key}/{where}"] = message
         if known:
             core.save_transfer(
@@ -367,11 +421,11 @@ def _transfer_one(
                 run_id=result.run_id,
                 documents=0,
                 pages=0,
-                errors=errors,
+                errors=dict(fetched.errors),
                 document_kinds=kinds,
             )
         # else: neither listed nor fetched before, so there is no trial to record the failed transfer on
-        return "failed"
+        return None
     for where, message in fetched.warnings.items():
         result.failed[f"{key}/{where}"] = message
     if fetched.trial_id not in result.trial_ids:
@@ -384,18 +438,32 @@ def _transfer_one(
     result.unchanged += fetched.unchanged
     result.known += fetched.known
     result.unlinked += fetched.unlinked
-    pages = extract_missing(conn, [fetched.trial_id], kinds=kinds, extract=extract)
-    result.pages += pages.pages
-    for sha, message in pages.failed.items():
+    return fetched
+
+
+def _finish_one(
+    conn: psycopg.Connection,
+    source: RegisteredSource,
+    kinds: Sequence[str] | None,
+    result: TransferResult,
+    reading: _Reading,
+) -> str:
+    """Save the trial's page text as its reading ends, index it, and record its transfer's status."""
+    key = reading.key
+    trial_id = reading.fetched.trial_id
+    errors = dict(reading.fetched.errors)
+    read = reading.pages.finish(conn)
+    result.pages += read.pages
+    for sha, message in read.failed.items():
         errors[f"file {sha}"] = message
-    unread = core.files_without_pages(conn, [fetched.trial_id], kinds=kinds)
-    if unread and not pages.failed:
+    unread = core.files_without_pages(conn, [trial_id], kinds=kinds)
+    if unread and not read.failed:
         errors["pages"] = f"{len(unread)} files without page text"
-    problem = _index(conn, fetched.trial_id)
+    problem = _index(conn, trial_id)
     if problem is not None:
         # what search reads is not evidence: reported, the transfer can still complete
         result.failed[f"{key}/search"] = problem
-    documents, page_count = core.evidence_counts(conn, fetched.trial_id, kinds)
+    documents, page_count = core.evidence_counts(conn, trial_id, kinds)
     status = core.save_transfer(
         conn,
         source=source.code,

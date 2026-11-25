@@ -752,3 +752,39 @@ def test_an_interrupted_transfer_stops_the_reading_of_the_trial_in_hand(conn, mo
     assert stopped and all(stopped)
     status = conn.execute("SELECT status FROM core.evidence_transfer WHERE source_key = %s", (CT,)).fetchone()
     assert status in (None, ("failed",))  # never complete without its page text
+
+
+def test_a_pdf_kept_cut_short_is_downloaded_again_by_the_next_transfer(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.cut_short[SUMMARY["uuid"]] = 2
+    transfer(conn, fake)
+    fake.downloads.clear()
+    again = transfer(conn, fake)  # the same version, but its file was suspect: downloaded, now whole
+    assert fake.downloads == [SUMMARY["uuid"]]
+    assert again.failed == {}
+    fake.downloads.clear()
+    transfer(conn, fake)  # whole now: held at its version
+    assert fake.downloads == []
+
+
+def test_the_last_trials_pages_are_saved_while_the_next_trial_downloads(conn, monkeypatch):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = TwoTrials()
+    saved_meanwhile = []
+    original = fake.download_document
+
+    def download_document(ct_number, uuid):
+        if ct_number == CT2:
+            time.sleep(0.2)  # the first trial's files are read by now
+            pages_saved = conn.execute("SELECT count(*) FROM core.page").fetchone()[0]
+            saved_meanwhile.append(pages_saved)
+        return original(ct_number, uuid)
+
+    fake.download_document = download_document
+    monkeypatch.setattr("trialwatch.trials.pages.READ_IN_CHILD", True)
+    monkeypatch.setattr("trialwatch.trials.pages.read_in_child", lambda sha256, stop=None: ["page one"])
+    result = transfer(conn, fake, keys=(CT, CT2), extract=None)
+    assert result.statuses == {CT: "complete", CT2: "complete"}
+    # by the second trial's last document, the first trial's two files were saved
+    assert saved_meanwhile[-1] == 2

@@ -385,18 +385,28 @@ def _read_here(conn: psycopg.Connection, sha256: bytes, extract: Callable[[bytes
     return extract(core.file_content(conn, sha256))
 
 
+# The most page text read but not saved yet that a Reading holds: past it, no other file starts until
+# the caller saves what is held (drain), so a trial of many long reports never piles up in memory
+HELD_TEXT_BYTES = 64 * 1024 * 1024
+
+
 class Reading:
     """A trial's files being read in the background while the caller does something else (a transfer
     fetches the next trial): child processes read them (read_in_children) and a thread only waits for
-    them and keeps their outcomes; finish() saves those outcomes on the caller's connection, in its
-    thread. So every database write stays on one connection, and the reading overlaps the caller's work."""
+    them and keeps their outcomes. The caller saves what is read so far whenever it can (drain(), e.g.
+    between the next trial's documents) and the rest at the end (finish()), on its own connection and in
+    its own thread, so every database write stays on one connection. Once HELD_TEXT_BYTES of text wait
+    to be saved, the thread starts no other file until they are."""
 
     def __init__(self, conn: psycopg.Connection, trial_ids: Sequence[int], kinds: Sequence[str] | None) -> None:
         self._files = core.files_without_pages(conn, trial_ids, kinds)
         self._outcomes: list[Read] = []
+        self._held = 0
+        self._ready = threading.Condition()
         self._error: BaseException | None = None
         self._stop = threading.Event()
         self._thread = None
+        self.result = PagesResult()
         if self._files:
             sizes = core.file_sizes(conn, self._files)
             context = contextvars.copy_context()
@@ -408,31 +418,62 @@ class Reading:
             )
             self._thread.start()
 
+    @property
+    def files(self) -> list[bytes]:
+        """The files this reading set out to read."""
+        return list(self._files)
+
     def _read(self, sizes: Mapping[bytes, int], readers: int, memory_mb: int) -> None:
         try:
             for outcome in read_in_children(self._files, sizes, readers, memory_mb, stop=self._stop):
-                self._outcomes.append(outcome)
+                with self._ready:
+                    self._outcomes.append(outcome)
+                    self._held += _text_bytes(outcome)
+                    # the generator starts the next file only when asked for its next outcome: wait
+                    # here while too much text waits to be saved
+                    while self._held > HELD_TEXT_BYTES and not self._stop.is_set():
+                        self._ready.wait(1.0)
                 # each file read is the work moving (the worker's watchdog), while the caller is busy
                 report(None, f"{outcome.sha256.hex()[:12]}: read")
         except BaseException as exc:  # given to the caller by finish()
             self._error = exc
 
+    def drain(self, conn: psycopg.Connection, progress: Progress = None) -> None:
+        """Save the files read so far (their pages, or why they have none)."""
+        with self._ready:
+            outcomes = self._outcomes
+            self._outcomes = []
+            self._held = 0
+            self._ready.notify_all()
+        for outcome in outcomes:
+            _record(conn, self.result, outcome, progress)
+
     def finish(self, conn: psycopg.Connection, progress: Progress = None) -> PagesResult:
-        """Wait for the reading to end, then save each file's pages (or record why it has none)."""
-        result = PagesResult()
-        if self._thread is not None:
-            self._thread.join()
+        """Wait for the reading to end, saving each file as it comes; returns every file's outcome."""
+        while self._thread is not None and self._thread.is_alive():
+            self.drain(conn, progress)
+            self._thread.join(0.5)
         if self._error is not None:
             raise self._error
-        for outcome in self._outcomes:
-            _record(conn, result, outcome, progress)
-        return result
+        self.drain(conn, progress)
+        return self.result
 
     def cancel(self) -> None:
         """Stop reading: the children still reading are killed, within a second or so."""
         self._stop.set()
+        with self._ready:
+            self._ready.notify_all()
         if self._thread is not None:
             self._thread.join()
+
+
+def _text_bytes(outcome: Read) -> int:
+    if outcome.texts is None:
+        return 0
+    size = 0
+    for text in outcome.texts:
+        size += len(text)
+    return size
 
 
 class ReadingHere:
@@ -445,6 +486,14 @@ class ReadingHere:
         self._trial_ids = list(trial_ids)
         self._kinds = kinds
         self._extract = extract
+
+    @property
+    def files(self) -> None:
+        """Not known ahead: read at the end."""
+        return None
+
+    def drain(self, conn: psycopg.Connection, progress: Progress = None) -> None:
+        pass
 
     def finish(self, conn: psycopg.Connection, progress: Progress = None) -> PagesResult:
         return extract_missing(conn, self._trial_ids, progress, self._kinds, self._extract)

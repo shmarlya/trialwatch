@@ -24,6 +24,7 @@ errors. Both can be stopped between trials (or list pages): what was done so far
 at a time reads a source (an advisory lock), and a run whose process died is closed by the next one.
 """
 
+import functools
 import logging
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -305,10 +306,18 @@ def transfer(
                     report(progress, "stopped: the trials transferred so far are kept")
                     break
                 started = time.monotonic()
+                if reading is not None and core.trial_of_key(conn, source.code, key) == reading.fetched.trial_id:
+                    # another key of the trial being read: its fetch would change that trial's evidence
+                    # before its status is recorded, so that comes first
+                    _finish_and_tell(conn, source, kinds, result, reading, len(wanted), progress)
+                    reading = None
+                between = None
+                if reading is not None:
+                    between = functools.partial(reading.pages.drain, conn)
                 with telemetry.tracer.start_as_current_span("ingest.trial") as span:
                     span.set_attribute("trialwatch.source", source.code)
                     span.set_attribute("trialwatch.source.key", key)
-                    fetched = _fetch_one(conn, source, adapter, key, kinds, result, recheck)
+                    fetched = _fetch_one(conn, source, adapter, key, kinds, result, recheck, between)
                 if reading is not None:
                     _finish_and_tell(conn, source, kinds, result, reading, len(wanted), progress)
                     reading = None
@@ -422,6 +431,7 @@ def _fetch_one(
     kinds: Sequence[str] | None,
     result: TransferResult,
     recheck: bool = False,
+    between: Callable[[], None] | None = None,
 ) -> "Saved | None":
     """The trial's record and documents, saved; None when even its record could not be (its failed
     transfer recorded then, if the trial is known)."""
@@ -430,7 +440,7 @@ def _fetch_one(
     if known:
         core.mark_transfer_started(conn, source=source.code, source_key=key, run_id=result.run_id)
     try:
-        fetched = save(conn, source.code, key, adapter, kinds, recheck)
+        fetched = save(conn, source.code, key, adapter, kinds, recheck, between)
     except Exception as exc:  # save reports errors itself; this keeps the run going if not
         fetched = Saved(trial_id=None, errors={"record": f"{type(exc).__name__}: {exc}"})
     if fetched.trial_id is None:
@@ -480,6 +490,11 @@ def _finish_one(
     for sha, message in read.failed.items():
         errors[f"file {sha}"] = message
     unread = core.files_without_pages(conn, [trial_id], kinds=kinds)
+    own = reading.pages.files
+    if own is not None:
+        # a file another trial's fetch linked meanwhile (a document they share, at a new version) is
+        # that trial's to read: it is not this one's failure
+        unread = [sha for sha in unread if sha in own]
     if unread and not read.failed:
         errors["pages"] = f"{len(unread)} files without page text"
     problem = _index(conn, trial_id)
@@ -572,11 +587,13 @@ def save(
     adapter: Adapter,
     kinds: Sequence[str] | None,
     recheck: bool = False,
+    between: Callable[[], None] | None = None,
 ) -> Saved:
     """Fetch one trial from its source and save what its record says: the record (a new version if it
     changed), its sponsors, sites and profile, and every listed document of these kinds (None: every
     kind); documents of these kinds the source no longer lists are unlinked. A document held at the
-    listed version is linked without downloading it, unless `recheck`."""
+    listed version is linked without downloading it, unless `recheck`. `between` runs after each
+    document (a transfer saves the previous trial's page text read meanwhile)."""
     try:
         # text fields can hold characters Postgres can't store (a NUL): cleaned before anything else
         payload = storable(_fetch(source, adapter, key))
@@ -633,6 +650,8 @@ def save(
         try:
             _save_document(conn, adapter, source, key, record.trial_id, document, saved, recheck)
             beat(f"{key}: document {document.key}")
+            if between is not None:
+                between()
         except Exception as exc:  # recorded per document, the others go on
             saved.errors[f"document {document.key}"] = f"{type(exc).__name__}: {exc}"
     saved.unlinked = core.unlink_documents_not_listed(
@@ -657,14 +676,18 @@ def _cut_short(document: DocumentRef, file: DownloadedFile) -> bool:
     return document.listed_as_pdf and b"%%EOF" not in file.tail(PDF_END_BYTES)
 
 
-def _download(adapter: Adapter, key: str, document: DocumentRef, saved: Saved) -> DownloadedFile:
-    """The document's file, checked; a PDF that looks cut short is downloaded once more, and kept with a
-    warning if it still does (pypdf may read it anyway; if not, its pages fail as a broken file)."""
+CUT_SHORT = "no %%EOF at its end: the file may be cut short"
+
+
+def _download(adapter: Adapter, key: str, document: DocumentRef, saved: Saved) -> tuple[DownloadedFile, str | None]:
+    """The document's file, checked, and why it is suspect, if it is: a PDF that looks cut short is
+    downloaded once more, and kept with a warning if it still does (pypdf may read it anyway; if not,
+    its pages fail as a broken file). A suspect version is downloaded again by the next transfer."""
     file = adapter.download(key, document)
     try:
         _check_file(document, file)
         if not _cut_short(document, file):
-            return file
+            return file, None
     except BaseException:
         file.close()
         raise
@@ -676,8 +699,9 @@ def _download(adapter: Adapter, key: str, document: DocumentRef, saved: Saved) -
         file.close()
         raise
     if _cut_short(document, file):
-        saved.warnings[f"document {document.key}"] = "no %%EOF at its end: the file may be cut short"
-    return file
+        saved.warnings[f"document {document.key}"] = CUT_SHORT
+        return file, CUT_SHORT
+    return file, None
 
 
 def _save_document(
@@ -705,7 +729,8 @@ def _save_document(
             saved.known += 1
             core.link_document(conn, trial_id=trial_id, document_id=known, basis="listed-by-source", source=source)
             return
-    with _download(adapter, key, document, saved) as file:
+    file, suspect = _download(adapter, key, document, saved)
+    with file:
         stored = core.save_document_version(
             conn,
             source=source,
@@ -719,6 +744,7 @@ def _save_document(
             media_type=file.media_type,
             sha256=file.sha256(),
             published_at=document.published_at,
+            suspect=suspect,
         )
     if stored.new_version:
         saved.new_versions += 1

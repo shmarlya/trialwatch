@@ -206,3 +206,33 @@ def test_the_reading_threads_run_in_the_callers_context_for_its_trace():
 def test_small_dense_files_are_not_estimated_below_what_one_took():
     assert pages.child_estimate_mb(int(5.7 * MB)) >= 590
     assert pages.child_estimate_mb(47 * MB) == 150 + 470
+
+
+def test_a_reading_stops_starting_files_while_too_much_text_waits_to_be_saved(monkeypatch):
+    # the cap of text held: the first file's text is over it, so the second waits until it is saved
+    monkeypatch.setattr(pages, "HELD_TEXT_BYTES", 5)
+    reading = pages.Reading.__new__(pages.Reading)
+    reading._files = [sha(1), sha(2)]
+    reading._outcomes = []
+    reading._held = 0
+    reading._ready = threading.Condition()
+    reading._error = None
+    reading._stop = threading.Event()
+    reading.result = pages.PagesResult()
+    started = []
+
+    def read(sha256, stop=None):
+        started.append(sha256)
+        return ["a long page of text"]
+
+    monkeypatch.setattr(pages, "read_in_child", read)
+    thread = threading.Thread(target=reading._read, args=({}, 1, 10_000))
+    thread.start()
+    time.sleep(0.3)
+    assert started == [sha(1)]  # held: the second has not started
+    saved = []
+    monkeypatch.setattr(pages, "_record", lambda conn, result, outcome, progress: saved.append(outcome.sha256))
+    reading.drain(None)
+    thread.join(5)
+    reading.drain(None)
+    assert started == [sha(1), sha(2)] and saved == [sha(1), sha(2)]

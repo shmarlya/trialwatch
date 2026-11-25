@@ -416,7 +416,7 @@ class SavedVersion:
 def save_document_version(
     conn: psycopg.Connection, *, source: str, source_key: str, kind: str, title: str | None, language: str | None,
     version: str, content: bytes | Callable[[], bytes], media_type: str | None, sha256: bytes,
-    published_at: datetime | None = None,
+    published_at: datetime | None = None, suspect: str | None = None,
 ) -> SavedVersion:
     """Store what a source gives as a document's current version, in one transaction: the file once by
     its hash, the document by its source key, and a new version (with when the source says it was
@@ -452,10 +452,13 @@ def save_document_version(
         ).fetchone()
         the_document = row[0]
         current = conn.execute(
-            "SELECT version, file_sha256 FROM core.document_version WHERE document_id = %s AND replaced_at IS NULL",
+            "SELECT id, version, file_sha256 FROM core.document_version WHERE document_id = %s AND replaced_at IS NULL",
             (the_document,),
         ).fetchone()
-        if current is not None and current[0] == version and bytes(current[1]) == sha256:
+        if current is not None and current[1] == version and bytes(current[2]) == sha256:
+            # the same file again: still suspect if it looks incomplete now, no longer if it doesn't
+            conn.execute("UPDATE core.document_version SET suspect = %s WHERE id = %s AND suspect IS DISTINCT FROM %s",
+                         (suspect, current[0], suspect))
             return SavedVersion(the_document, new_file, False)
         conn.execute(
             "UPDATE core.document_version SET replaced_at = clock_timestamp() "
@@ -463,9 +466,9 @@ def save_document_version(
             (the_document,),
         )
         conn.execute(
-            "INSERT INTO core.document_version (document_id, version, file_sha256, published_at, created_by) "
-            "VALUES (%s, %s, %s, %s, current_setting('trialwatch.actor')::bigint)",
-            (the_document, version, sha256, published_at),
+            "INSERT INTO core.document_version (document_id, version, file_sha256, published_at, suspect, created_by) "
+            "VALUES (%s, %s, %s, %s, %s, current_setting('trialwatch.actor')::bigint)",
+            (the_document, version, sha256, published_at, suspect),
         )
     return SavedVersion(the_document, new_file, True)
 
@@ -476,14 +479,14 @@ def known_document(
 ) -> int | None:
     """The document's id when its current version has this label, after taking the kind, title and
     language the source gives now (as save_document_version would); None when it is new or its label
-    changed, so it must be downloaded. Trusts the label: a file replaced under the same label is only
-    found by downloading it (a transfer with recheck)."""
+    changed, or its file is suspect (it looked cut short), so it must be downloaded. Trusts the label:
+    a file replaced under the same label is only found by downloading it (a transfer with recheck)."""
     with conn.transaction():
         row = conn.execute(
             """
             SELECT d.id FROM core.document d
             JOIN core.document_version v ON v.document_id = d.id AND v.replaced_at IS NULL
-            WHERE d.source_id = %s AND d.source_key = %s AND v.version = %s
+            WHERE d.source_id = %s AND d.source_key = %s AND v.version = %s AND v.suspect IS NULL
             """,
             (source_id(conn, source), source_key, version),
         ).fetchone()
@@ -1139,6 +1142,18 @@ def evidence_rows(conn: psycopg.Connection, trial_ids: Sequence[int]) -> list[Ev
             """,
             (list(trial_ids),),
         ).fetchall()
+
+
+def trial_of_key(conn: psycopg.Connection, source: str, source_key: str) -> int | None:
+    """The trial (after merges) a source key belongs to, if we hold it."""
+    row = conn.execute(
+        "SELECT ts.trial_id FROM core.trial_source ts JOIN core.source s ON s.id = ts.source_id "
+        "WHERE s.code = %s AND ts.source_key = %s",
+        (source, source_key),
+    ).fetchone()
+    if row is None:
+        return None
+    return resolved_trial(conn, row[0])
 
 
 def mark_transfer_started(conn: psycopg.Connection, *, source: str, source_key: str, run_id: int) -> None:

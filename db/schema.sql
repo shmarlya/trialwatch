@@ -491,7 +491,8 @@ CREATE TABLE core.document_version (
     published_at timestamp with time zone,
     fetched_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     replaced_at timestamp with time zone,
-    created_by bigint NOT NULL
+    created_by bigint NOT NULL,
+    suspect text
 );
 
 
@@ -3774,4 +3775,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261124180000'),
     ('20261124190000'),
     ('20261125100000'),
-    ('20261125110000');
+    ('20261125110000'),
+    ('20261125120000');

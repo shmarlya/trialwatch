@@ -191,6 +191,7 @@ run the same steps here and now, without the queue. Jobs survive restarts. A fai
 failed for a passing reason such as an overload). An error that a retry can't fix (an unknown source, an invalid
 setup, a bad API key) fails the job at once. A job whose worker died (no heartbeat for 5 minutes) goes back to the
 queue. Jobs can be cancelled; a running one stops after the trial or page it is on, and what it did so far is kept.
+A long transfer says every 50 trials how long a trial takes and about how long is left.
 `/admin/jobs` lists them by status, with the failed and held ones first (every staff page shows a banner while
 there are any), their errors and their progress per attempt; an admin can try one again.
 
@@ -243,7 +244,14 @@ recording costs next to nothing (the tests, the command line). Either way their 
   addresses (`httpx`, `httpx2`) log warnings only. `tests/test_telemetry.py` searches with a marker word and checks
   it appears in no span, event, metric or log.
 - **The worker's heartbeat**: it touches `TRIALWATCH_HEARTBEAT_FILE` (default `/tmp/trialwatch-worker.alive`) every
-  loop and every 30 seconds while a job runs; compose's healthcheck reads its age.
+  loop and every 30 seconds while a job runs; compose's healthcheck reads its age. A job that has not moved (no
+  progress line, document, file read or download chunk) for `TRIALWATCH_STUCK_MINUTES` (45) is not kept alive by
+  it: the worker logs "has not moved for … (last: …)" and exits, the container's restart policy starts a new one,
+  and the job, queued again 5 minutes later, resumes where it was. Outside a container (`trialwatch web` with its
+  own worker) nothing restarts it: start it again.
+- **The database going away**: connections give up connecting after 10 s and notice a database that vanished
+  within about 90 s (TCP keepalives); a job's statements stop after 15 minutes. The worker connects again with a
+  growing pause; the job in hand fails its attempt and is tried again later, the trial it was on left failed.
 
 ## Grafana
 

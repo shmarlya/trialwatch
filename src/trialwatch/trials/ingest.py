@@ -8,8 +8,8 @@ reads its source and says what it read (trialwatch.sources.registry); everything
    `save` stores the record as a new version if it changed (the trial matched by all its identifiers
    or created), its sponsors, sites and profile, and every listed document of the configured kinds
    (downloaded when new or at a new version label; with recheck, every time, a new version when its
-   bytes changed), and unlinks the ones the source no
-   longer lists; then their page text is read. The trial's
+   bytes changed), and unlinks the ones the source no longer lists; then their page text is read, in
+   child processes, while the next trial is fetched (pages.Reading). The trial's
    core.evidence_transfer row says 'complete' only when the record, every configured document and
    every page came in, else 'failed' and why. While a trial is being transferred its row says
    failed, so an interrupted transfer never leaves half-new evidence looking complete. Each trial is
@@ -293,6 +293,7 @@ def transfer(
     _hold_source(conn, source)
     try:
         result = TransferResult(run_id=core.start_ingest(conn, source.code, run_args, kind="transfer"), recheck=recheck)
+        run_started = time.monotonic()
         # The trial whose files are being read while the next one is fetched: its page text is saved,
         # and its status recorded, once that next trial's record and documents are in
         reading: _Reading | None = None
@@ -312,10 +313,11 @@ def transfer(
                     reading = None
                 if fetched is None:
                     _tell(source, key, number, len(wanted), "failed", started, result, progress)
-                    continue
-                reading = _Reading(
-                    key, number, started, fetched, pages.start_reading(conn, [fetched.trial_id], kinds, extract)
-                )
+                else:
+                    reading = _Reading(
+                        key, number, started, fetched, pages.start_reading(conn, [fetched.trial_id], kinds, extract)
+                    )
+                _rate(number, len(wanted), run_started, progress)
             if reading is not None:
                 _finish_and_tell(conn, source, kinds, result, reading, len(wanted), progress)
                 reading = None
@@ -389,6 +391,25 @@ def _finish_and_tell(
         status = _finish_one(conn, source, kinds, result, reading)
         span.set_attribute("trialwatch.ingest.status", status)
     _tell(source, reading.key, reading.number, total, status, reading.started, result, progress)
+
+
+# A long transfer says how it goes every this many trials
+RATE_EVERY = 50
+
+
+def _rate(number: int, total: int, run_started: float, progress: Progress) -> None:
+    """Every RATE_EVERY trials: how long a trial takes, and about how long is left."""
+    if number % RATE_EVERY != 0 or number >= total:
+        return
+    per_trial = (time.monotonic() - run_started) / number
+    left = per_trial * (total - number)
+    report(progress, f"{number}/{total}: {per_trial:.0f} s a trial, about {_duration(left)} left")
+
+
+def _duration(seconds: float) -> str:
+    if seconds < 90 * 60:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"
 
 
 def _fetch_one(

@@ -479,3 +479,13 @@ def test_listing_recruiting_reads_ctis_status_codes():
     assert ctis.listing_recruiting({"ctStatus": True}) is None
     assert ctis.listing_recruiting({"ctStatus": "Ended"}) is None
     assert ctis.listing_recruiting({}) is None
+
+
+def test_a_long_transfer_says_how_fast_it_goes(monkeypatch):
+    lines = []
+    # 50 trials in 10 minutes: 12 s each, 150 left
+    monkeypatch.setattr(ingest.time, "monotonic", lambda: 600.0)
+    ingest._rate(49, 200, 0.0, lines.append)
+    ingest._rate(50, 200, 0.0, lines.append)
+    ingest._rate(200, 200, 0.0, lines.append)  # the last trial: nothing left to estimate
+    assert lines == ["50/200: 12 s a trial, about 30 min left"]

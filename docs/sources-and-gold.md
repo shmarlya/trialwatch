@@ -36,7 +36,20 @@ Trials come in in two stages:
    `core.evidence_transfer` records the transfer as `complete` (everything came in and was read) or `failed`
    (with what), and the document kinds it brought. While a trial is being transferred its row says failed, so an
    interrupted transfer never looks complete. Trials are chosen by key, or all `pending` (listed, never
-   transferred), `failed`, `stale`, `recruiting` or `listed` ones.
+   transferred), `failed`, `stuck`, `stale`, `recruiting` or `listed` ones.
+
+   A document already held at the version the source lists (CTIS: its uuid and `systemVersion`) is not downloaded
+   again: a stale trial, or a retry after one failed file, fetches only what is new or missing. A transfer with
+   **recheck** (`source transfer --recheck`, the checkbox on a source's page; a trial page's "Transfer again"
+   always) downloads every document and lets the bytes decide; each run records whether it did. While a trial's
+   files are read (child processes), the next trial is already being fetched; its page text is saved, and its
+   status recorded, once that next trial's documents are in.
+
+   Downloads are spooled to a temporary file and hashed as they arrive (a file is read into memory only to be
+   stored, once). A presigned link that expired, or a download past its deadline (10 minutes, plus a minute per
+   20 MB), gets a fresh link from CTIS (three in all); a body shorter than its `Content-Length` is tried again,
+   never kept; `Retry-After` is honoured up to 5 minutes; a PDF without `%%EOF` at its end is downloaded once
+   more, and kept with a warning if it still lacks it.
 
 Both stages are **ingest runs** (`core.ingest_run`, kind `list` or `transfer`) that log the config they used, their
 counts and errors; their audit entries carry the note "ingest run N". One process at a time syncs or transfers
@@ -47,8 +60,12 @@ from a source (an advisory lock).
 `core.evidence_status` says, per trial and source: not transferred, failed, stale (complete, but the source changed
 the trial since) or complete. The source's list gives the day of a trial's last change, not the time, so a trial
 counts as stale when that day is the transfer's day or later: a trial changed on the day of its transfer stays
-stale until a transfer on a later day. Every transfer also downloads each listed document again and compares its
-bytes, so a file replaced without a new version number is caught too.
+stale until a transfer on a later day. A transfer with recheck downloads each listed document again and compares
+its bytes, so a file replaced without a new version number is caught too (run one now and then, e.g. monthly).
+
+A trial whose transfer failed on three days in a row (`core.evidence_transfer.failures`; a day's retries count
+once) is **stuck**: the refresh leaves it out of `failed` until the source changes it, a transfer completes, or a
+person transfers it again (`--which stuck`, or its page). The source's and the trial's pages show it.
 
 A check reads a trial only when every source that holds it is complete and current, and its transfer brought
 every document kind the check reads that the source can give (`not_ready` in `trials/readiness.py`). A trial entered

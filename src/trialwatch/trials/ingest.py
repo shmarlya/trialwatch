@@ -38,6 +38,7 @@ from trialwatch.db.core import RegisteredSource
 from trialwatch.geo import load as geo_load
 from trialwatch.hashing import storable
 from trialwatch.progress import Progress, beat, report
+from trialwatch.progress import count as count_done
 from trialwatch.search import index as search_index
 from trialwatch.sources import profile
 from trialwatch.sources.registry import Adapter, DocumentRef, DownloadedFile, TrialNotFound
@@ -374,6 +375,7 @@ def _tell(
     result.statuses[key] = status
     _log_trial(source.code, key, status, time.monotonic() - started, result.failed)
     report(progress, f"{number}/{total} {key}: {status}")
+    count_done(len(result.statuses), total)
 
 
 def _finish_and_tell(

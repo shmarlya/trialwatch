@@ -24,7 +24,7 @@
     <td>{{ steps[job.kind] }}{% if job.params.source %} · {{ job.params.source }}{% endif %}{% if job.params.get("keys") %} · {{ job.params.get("keys") | length }} trials{% endif %}{% if job.params.trial_ids %} · {{ job.params.trial_ids | length }} trials{% endif %}</td>
     <td class="small">{{ who(job.actor) }}</td>
     <td class="small">{{ when(job.created_at) }}</td>
-    <td>{{ run_status(job.status) }}</td>
+    <td>{{ run_status(job.status) }}{% set timing = timings[job.id] %}{% if timing.total %}<div class="small">{{ timing.done }}/{{ timing.total }} · {{ timing.percent }}%{% if timing.left_seconds is not none %} · ~{{ duration(timing.left_seconds) }} left{% endif %}</div>{% endif %}</td>
     <td class="num">{{ job.attempts }}/{{ job.max_attempts }}</td>
     <td class="small">{% if job.status == "queued" %}{{ when(job.run_after) }}{% endif %}</td>
     <td class="num">{{ dollars(costs.get(job.id)) }}</td>

@@ -42,6 +42,7 @@ from trialwatch.db import core
 from trialwatch.db.core import Page
 from trialwatch.llm import CallResult, MessagesClient
 from trialwatch.progress import Progress, report
+from trialwatch.progress import count as count_done
 from trialwatch.trials import readiness
 
 
@@ -697,6 +698,7 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
                 report(progress, f"{number}/{len(wanted)} {name}: error: {trial_result.error}")
             else:
                 report(progress, f"{number}/{len(wanted)} {name}: {trial_result.label}")
+            count_done(number, len(wanted))
             summary.input_tokens += trial_result.input_tokens
             summary.output_tokens += trial_result.output_tokens
             summary.cache_write_tokens += trial_result.cache_write_tokens

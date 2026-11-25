@@ -191,7 +191,12 @@ run the same steps here and now, without the queue. Jobs survive restarts. A fai
 failed for a passing reason such as an overload). An error that a retry can't fix (an unknown source, an invalid
 setup, a bad API key) fails the job at once. A job whose worker died (no heartbeat for 5 minutes) goes back to the
 queue. Jobs can be cancelled; a running one stops after the trial or page it is on, and what it did so far is kept.
-A long transfer says every 50 trials how long a trial takes and about how long is left.
+A long transfer says every 50 trials how long a trial takes and about how long is left. A job's page shows how
+far it is (trials done of trials to do, a percentage, how long it has run and about how long is left; transfers,
+checks and tagging count their trials, written with the heartbeat), its lines 200 at a time (the latest page
+follows a running job; "only what went wrong" keeps the lines about failures), and after an attempt what failed,
+trial by trial: each with its page (Inspect) and a button that does it again (a transfer of that trial, every
+document downloaded again, or a check with the same setup), and for a transfer one that redoes them all.
 `/admin/jobs` lists them by status, with the failed and held ones first (every staff page shows a banner while
 there are any), their errors and their progress per attempt; an admin can try one again.
 

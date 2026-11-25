@@ -30,22 +30,92 @@
 <p class="small">Runs: {% for run_id in runs.check_runs %}<a href="/runs/{{ run_id }}">check run {{ run_id }}</a> {% endfor %}{% for run_id in runs.ingest_runs %}ingest run {{ run_id }} {% endfor %}</p>
 {% endif %}
 <h2>Progress</h2>
+<div class="job-progress" id="progress">
+  {% if timing.total %}
+  <div class="job-bar" role="progressbar" aria-valuemin="0" aria-valuemax="{{ timing.total }}" aria-valuenow="{{ timing.done }}" aria-label="Items done"><span id="bar" style="width: {{ timing.percent }}%"></span></div>
+  {% endif %}
+  <p class="small">
+    <span id="counted">{% if timing.total %}<b>{{ timing.done }}</b> of {{ timing.total }} done · {{ timing.percent }}%{% else %}not counted yet{% endif %}</span>
+    · <span id="elapsed">{% if timing.total_seconds is not none %}{{ "took" if job.ended else "running for" }} {{ duration(timing.total_seconds) }}{% if timing.attempt_seconds is not none and job.attempts > 1 %} (this attempt {{ duration(timing.attempt_seconds) }}){% endif %}{% else %}not started{% endif %}</span>
+    <span id="left">{% if timing.left_seconds is not none %} · about {{ duration(timing.left_seconds) }} left{% endif %}</span>
+  </p>
+</div>
+
+{% if failed %}
+<h2 id="failed">What failed <span class="muted small">({{ failed | length }})</span></h2>
+<p class="small muted">From the last attempt. Look at a trial on its page, or do it again: a transfer downloads every document again; a check runs with the same setup.</p>
+{% if redo_all and can("trial.transfer") %}
+<form method="post" action="/jobs" class="inline">
+  {% for name, value in redo_all.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+  <input type="hidden" name="back" value="/jobs/{{ job.id }}">
+  <button class="small">Transfer all {{ failed | selectattr("redo") | list | length }} again</button>
+</form>
+{% endif %}
+<div class="table-wrap"><table class="failed">
+  <tr><th>Trial</th><th>What went wrong</th><th></th></tr>
+  {% for item in failed %}
+  <tr>
+    <td>{% if item.trial_id %}<a href="/trials/{{ item.trial_id }}">{{ item.label }}</a>{% else %}{{ item.label }}{% endif %}</td>
+    <td class="small">{% for where, why in item.problems %}<div>{% if where %}<b>{{ where }}</b>: {% endif %}{{ why }}</div>{% endfor %}</td>
+    <td><div class="actions">
+      {% if item.trial_id %}<a class="button small secondary" href="/trials/{{ item.trial_id }}">Inspect</a>{% endif %}
+      {% if item.redo and ((item.redo.step == "transfer" and can("trial.transfer")) or (item.redo.step == "evidence" and can("check.run"))) %}
+      <form method="post" action="/jobs">
+        {% for name, value in item.redo.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+        <input type="hidden" name="back" value="/jobs/{{ job.id }}">
+        <button class="small">{% if item.redo.step == "transfer" %}Transfer again{% else %}Check again{% endif %}</button>
+      </form>
+      {% endif %}
+    </div></td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+
+<h2 id="lines">Lines <span class="muted small">({{ line_total }}{% if problems %} that say something went wrong{% endif %})</span></h2>
+{% macro pager() %}<div class="pager small">
+  {% set only = "&problems=true" if problems else "" %}
+  {% if page > 1 %}<a href="/jobs/{{ job.id }}?page=1{{ only }}#lines">« first</a> <a href="/jobs/{{ job.id }}?page={{ page - 1 }}{{ only }}#lines">← earlier</a>{% endif %}
+  <span>page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="/jobs/{{ job.id }}?page={{ page + 1 }}{{ only }}#lines">later →</a> <a href="/jobs/{{ job.id }}?page={{ pages }}{{ only }}#lines">latest »</a>{% endif %}
+  {% if problems %}<a href="/jobs/{{ job.id }}#lines">every line</a>{% else %}<a href="/jobs/{{ job.id }}?problems=true#lines">only what went wrong</a>{% endif %}
+</div>{% endmacro %}
+{{ pager() }}
 <pre id="log">{% for line in lines %}{% if loop.first or line.attempt != loop.previtem.attempt %}— attempt {{ line.attempt }} —
 {% endif %}{{ line.line }}
 {% endfor %}</pre>
+{% if pages > 1 %}{{ pager() }}{% endif %}
 {% if job.result %}<details class="prompt"><summary class="small">Result</summary><pre>{{ job.result | tojson(indent=2) }}</pre></details>{% endif %}
 <p class="small"><a href="/admin/jobs">← Jobs</a>{% if job.params.source %} · <a href="/sources/{{ job.params.source }}">{{ job.params.source }}</a>{% endif %}</p>
 <script>
-  // Poll the job's progress every two seconds until it ends, appending new lines to the log
+  // Poll the job every two seconds until it ends: its progress, and on the latest page its new lines
+  // (the log keeps the last {{ page_lines }} of them; a burst of more reloads the page)
   const log = document.getElementById("log");
   const statusEl = document.getElementById("status");
   const ended = ["succeeded", "failed", "cancelled"];
-  let last = {% if lines %}{{ lines[-1].id }}{% else %}0{% endif %};
+  const live = {{ "true" if live else "false" }};
+  const keep = {{ page_lines }};
+  let last = {{ last_line }};
+  function showProgress(p) {
+    const bar = document.getElementById("bar");
+    if (p.total) {
+      if (bar) bar.style.width = p.percent + "%"; else if (p.total) { location.reload(); return; }
+      document.getElementById("counted").innerHTML = `<b>${p.done}</b> of ${p.total} done · ${p.percent}%`;
+    }
+    document.getElementById("elapsed").textContent = `running for ${p.elapsed}`;
+    document.getElementById("left").textContent = p.left ? ` · about ${p.left} left` : "";
+  }
   async function poll() {
     const response = await fetch(`/jobs/{{ job.id }}/progress?after=${last}`);
     const data = await response.json();
-    for (const line of data.lines) log.textContent += line + "\n";
+    if (live) {
+      if (data.more) { location.reload(); return; }
+      for (const line of data.lines) log.textContent += line + "\n";
+      const shown = log.textContent.split("\n");
+      if (shown.length > keep + 1) log.textContent = shown.slice(shown.length - keep - 1).join("\n");
+    }
     last = data.last;
+    showProgress(data.progress);
     const changed = statusEl.textContent !== data.status;
     statusEl.textContent = data.status;
     document.getElementById("attempts").textContent = data.attempts;

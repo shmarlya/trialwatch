@@ -15,6 +15,9 @@ Progress = Callable[[str], None] | None
 # When the work last moved, and what it was doing then (written by the job's threads, read by the
 # heartbeat's: one tuple assigned at once)
 _last = (time.monotonic(), "started")
+# How far the work is: (items done, items to do), when the step counts its items (the heartbeat writes
+# it to the job, so its page shows a percentage and the time left)
+_counted: tuple[int, int] | None = None
 
 
 def report(progress: Progress, message: str) -> None:
@@ -34,3 +37,21 @@ def since_last_beat() -> tuple[float, str]:
     """Seconds since the work last moved, and what it did then."""
     moved_at, what = _last
     return time.monotonic() - moved_at, what
+
+
+def count(done: int, total: int) -> None:
+    """The step has done `done` of its `total` items (trials); the work has moved."""
+    global _counted
+    _counted = (done, total)
+    beat(f"{done} of {total}")
+
+
+def counted() -> tuple[int, int] | None:
+    """(items done, items to do) as the running step last said, or None."""
+    return _counted
+
+
+def start_counting() -> None:
+    """A new job begins: nothing counted yet."""
+    global _counted
+    _counted = None

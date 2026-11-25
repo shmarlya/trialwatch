@@ -2,7 +2,7 @@
 section of db/migrations/*_init.sql). The worker (src/trialwatch/jobs/) claims jobs, the web interface adds them
 and shows them."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -41,6 +41,12 @@ class Job:
     actor: str
     # the trace of its latest attempt, when tracing is on (telemetry.py)
     trace_id: str | None = None
+    # items done of items to do in its latest attempt (trials of a transfer or a check), when it counts
+    progress_done: int | None = None
+    progress_total: int | None = None
+    attempt_started_at: datetime | None = None
+    # what failed, item by item: a trial's key or name (or a step) -> why
+    failures: dict = field(default_factory=dict)
 
     @property
     def ended(self) -> bool:
@@ -50,7 +56,8 @@ class Job:
 _JOB_COLUMNS = """
     j.id, j.kind, j.params, j.automatic, j.schedule_id, j.priority, j.status, j.attempts,
     j.max_attempts, j.run_after, j.cancel_requested, j.last_error, j.result, j.locked_by, j.heartbeat_at,
-    j.created_by, j.created_at, j.started_at, j.finished_at, a.name AS actor, j.trace_id
+    j.created_by, j.created_at, j.started_at, j.finished_at, a.name AS actor, j.trace_id,
+    j.progress_done, j.progress_total, j.attempt_started_at, j.failures
 """
 _JOBS = f"SELECT {_JOB_COLUMNS} FROM jobs.job j JOIN core.actor a ON a.id = j.created_by"
 
@@ -111,7 +118,8 @@ def claim_next(conn: psycopg.Connection, worker: str) -> Job | None:
         row = conn.execute(
             """
             UPDATE jobs.job SET status = 'running', attempts = attempts + 1, locked_by = %s,
-                   heartbeat_at = clock_timestamp(), started_at = coalesce(started_at, clock_timestamp())
+                   heartbeat_at = clock_timestamp(), started_at = coalesce(started_at, clock_timestamp()),
+                   attempt_started_at = clock_timestamp(), progress_done = NULL, progress_total = NULL
              WHERE id = (SELECT id FROM jobs.job WHERE status = 'queued' AND run_after <= clock_timestamp()
                           ORDER BY priority, id FOR UPDATE SKIP LOCKED LIMIT 1)
             RETURNING id
@@ -139,9 +147,26 @@ def limit_statements(conn: psycopg.Connection, longest: timedelta) -> None:
     conn.execute("SELECT set_config('statement_timeout', %s, false)", (f"{int(longest.total_seconds() * 1000)}ms",))
 
 
-def heartbeat(conn: psycopg.Connection, job_id: int, worker: str) -> None:
-    conn.execute("UPDATE jobs.job SET heartbeat_at = clock_timestamp() WHERE id = %s AND locked_by = %s "
-                 "AND status = 'running'", (job_id, worker))
+def heartbeat(conn: psycopg.Connection, job_id: int, worker: str,
+              counted: tuple[int, int] | None = None) -> None:
+    """The job is alive; with `counted`, how far it is (items done, items to do)."""
+    done, total = counted if counted is not None else (None, None)
+    conn.execute(
+        "UPDATE jobs.job SET heartbeat_at = clock_timestamp(), progress_done = coalesce(%s, progress_done), "
+        "progress_total = coalesce(%s, progress_total) WHERE id = %s AND locked_by = %s AND status = 'running'",
+        (done, total, job_id, worker),
+    )
+
+
+def record_attempt(conn: psycopg.Connection, job_id: int, failures: dict[str, str],
+                   counted: tuple[int, int] | None) -> None:
+    """What the attempt that just ended failed on, item by item, and how far it got."""
+    done, total = counted if counted is not None else (None, None)
+    conn.execute(
+        "UPDATE jobs.job SET failures = %s, progress_done = coalesce(%s, progress_done), "
+        "progress_total = coalesce(%s, progress_total) WHERE id = %s",
+        (Jsonb(failures), done, total, job_id),
+    )
 
 
 def add_line(conn: psycopg.Connection, job_id: int, attempt: int, line: str) -> None:
@@ -165,11 +190,40 @@ def forget_lines(conn: psycopg.Connection, older_than: timedelta) -> int:
     return cursor.rowcount
 
 
-def lines(conn: psycopg.Connection, job_id: int, after: int = 0) -> list[JobLine]:
-    """The job's progress lines with an id above `after`, in order."""
+def lines(conn: psycopg.Connection, job_id: int, after: int = 0, limit: int | None = None) -> list[JobLine]:
+    """The job's progress lines with an id above `after`, in order (the first `limit` of them)."""
     with conn.cursor(row_factory=class_row(JobLine)) as cursor:
         return cursor.execute("SELECT id, attempt, at, line FROM jobs.job_line WHERE job_id = %s AND id > %s "
-                              "ORDER BY id", (job_id, after)).fetchall()
+                              "ORDER BY id LIMIT %s", (job_id, after, limit)).fetchall()
+
+
+def last_line_id(conn: psycopg.Connection, job_id: int) -> int:
+    """The id of the job's newest line (0 without any): where its page's polling starts."""
+    row = conn.execute("SELECT coalesce(max(id), 0) FROM jobs.job_line WHERE job_id = %s", (job_id,)).fetchone()
+    return row[0]
+
+
+# The lines a job's page shows that say something went wrong
+PROBLEM_LINES = r"(fail|error|stopped|stuck|warning|can't|not read|not moved)"
+
+
+def line_count(conn: psycopg.Connection, job_id: int, problems: bool = False) -> int:
+    """How many lines the job wrote (only those that say something went wrong, with `problems`)."""
+    row = conn.execute(
+        "SELECT count(*)::int FROM jobs.job_line WHERE job_id = %s AND (NOT %s OR line ~* %s)",
+        (job_id, problems, PROBLEM_LINES),
+    ).fetchone()
+    return row[0]
+
+
+def line_page(conn: psycopg.Connection, job_id: int, offset: int, limit: int, problems: bool = False) -> list[JobLine]:
+    """One page of the job's lines, oldest first (only those that say something went wrong, with `problems`)."""
+    with conn.cursor(row_factory=class_row(JobLine)) as cursor:
+        return cursor.execute(
+            "SELECT id, attempt, at, line FROM jobs.job_line WHERE job_id = %s AND (NOT %s OR line ~* %s) "
+            "ORDER BY id OFFSET %s LIMIT %s",
+            (job_id, problems, PROBLEM_LINES, offset, limit),
+        ).fetchall()
 
 
 def cancel_requested(conn: psycopg.Connection, job_id: int) -> bool:

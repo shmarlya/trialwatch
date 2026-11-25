@@ -405,6 +405,15 @@ def test_a_failed_transfer_fails_the_attempt_and_the_next_carries_on(app_conn, f
     job = jobs_db.job(app_conn, job_id)
     assert (job.status, job.attempts) == ("queued", 1)
     assert job.last_error.startswith("1 failed: transfer ctis, ") and "CTIS is down" in job.last_error
+    # what failed, item by item, for its page: the trial, what went wrong, and a transfer to redo it
+    assert list(job.failures) == [f"transfer ctis, {CT_2}/record"]
+    from trialwatch.jobs import failures
+
+    [item] = failures.failed_items(app_conn, job)
+    assert (item.label, item.problems[0][0]) == (CT_2, "record") and "CTIS is down" in item.problems[0][1]
+    assert item.redo == {"step": "transfer", "source": "ctis", "key_text": CT_2, "recheck": "true"}
+    # the transfer counted its trials as it went
+    assert job.progress_total is not None and job.progress_done == job.progress_total
     # the trial that came in was still checked
     assert checked_trials(model) == 1
 
@@ -698,3 +707,78 @@ def test_a_job_whose_queue_connection_went_away_keeps_working():
     ctx = JobContext(Gone(), SimpleNamespace(id=7, attempts=1, automatic=False))
     ctx.add("1/3 a trial: complete")  # not written, not raised
     assert ctx.should_stop() is False
+
+
+
+# A job's page: how far it is, what failed, and its lines a page at a time
+
+
+def test_a_jobs_timing_says_how_far_it_is_and_how_long_is_left():
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from trialwatch.jobs.routes import duration, job_timing
+
+    now = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
+    running = SimpleNamespace(status="running", started_at=now - timedelta(hours=2), attempt_started_at=now - timedelta(minutes=30),
+                              finished_at=None, heartbeat_at=now, progress_done=100, progress_total=400)
+    timing = job_timing(running, now)
+    assert (timing.percent, timing.attempt_seconds, timing.left_seconds) == (25, 1800, 5400)
+    assert (duration(timing.total_seconds), duration(timing.left_seconds), duration(45)) == ("2 h 0 min", "1 h 30 min", "45 s")
+    not_counted = SimpleNamespace(**{**vars(running), "progress_done": None, "progress_total": None})
+    assert (job_timing(not_counted, now).percent, job_timing(not_counted, now).left_seconds) == (None, None)
+
+
+def test_a_check_and_a_refresh_name_their_failed_trials_to_look_at_and_redo(app_conn):
+    from types import SimpleNamespace
+
+    from trialwatch.jobs import failures
+
+    trial = seed(app_conn)
+    name = core.trial_names(app_conn, [trial])[trial]
+    check = SimpleNamespace(kind="check", params={"config": "default"}, failures={name: "RateLimitError: busy"})
+    [item] = failures.failed_items(app_conn, check)
+    assert (item.trial_id, item.redo) == (trial, {"step": "evidence", "trial_ids": str(trial), "config": "default"})
+    refresh = SimpleNamespace(kind="refresh", params={}, failures={
+        "transfer ctis, 2025-000001-01-00/document a": "too large", "transfer ctis, 2025-000001-01-00/file b": "broken",
+        "transfer ctis, 2025-000002-01-00/record": "down", "annotate": "OverloadedError",
+    })
+    items = failures.failed_items(app_conn, refresh)
+    assert [(i.label, len(i.problems)) for i in items] == [
+        ("2025-000001-01-00", 2), ("2025-000002-01-00", 1), ("annotate", 1)]
+    assert items[0].redo["step"] == "transfer" and items[2].redo is None
+    transfer = SimpleNamespace(kind="transfer", params={"source": "ctis"}, failures={
+        "2025-000001-01-00/record": "down", "2025-000002-01-00/record": "down", "run": "interrupted"})
+    assert failures.redo_all(transfer, failures.failed_items(app_conn, transfer))["key_text"] == (
+        "2025-000001-01-00 2025-000002-01-00")
+
+
+def test_a_jobs_page_shows_its_lines_a_page_at_a_time_and_only_problems_on_asking(app_conn, admin_client):
+    job_id = queue(app_conn, "sync", {"source": "ctis"}, actor="admin@test.example")
+    for number in range(1, 451):
+        text = f"line {number}"
+        if number % 100 == 0:
+            text = f"line {number}: failed: something broke"
+        jobs_db.add_line(app_conn, job_id, 1, text)
+    latest = admin_client.get(f"/jobs/{job_id}")
+    assert latest.status_code == 200
+    # the latest page: lines 401-450 of three pages of 200
+    assert "page 3 of 3" in latest.text and "line 401\n" in latest.text and "line 450\n" in latest.text
+    assert "line 400:" not in latest.text
+    first = admin_client.get(f"/jobs/{job_id}?page=1")
+    assert "line 1\n" in first.text and "line 201\n" not in first.text
+    problems = admin_client.get(f"/jobs/{job_id}?problems=true")
+    assert "(4 that say something went wrong)" in problems.text and "line 7\n" not in problems.text
+    polled = admin_client.get(f"/jobs/{job_id}/progress?after=0").json()
+    assert len(polled["lines"]) == 450 and polled["more"] is False
+
+
+def test_a_finished_jobs_page_offers_to_redo_what_failed(app_conn, admin_client):
+    job_id = queue(app_conn, "transfer", {"source": "ctis", "keys": ["2025-000001-01-00", "2025-000002-01-00"]},
+                   actor="admin@test.example")
+    jobs_db.record_attempt(app_conn, job_id, {"2025-000001-01-00/document a": "too large to download: 400 MB",
+                                              "2025-000002-01-00/record": "ReadTimeout"}, (2, 2))
+    page = admin_client.get(f"/jobs/{job_id}")
+    assert "What failed" in page.text and "too large to download: 400 MB" in page.text
+    assert page.text.count(">Transfer again<") == 2 and "Transfer all 2 again" in page.text
+    assert "<b>2</b> of 2 done · 100%" in page.text

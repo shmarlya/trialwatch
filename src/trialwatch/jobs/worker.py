@@ -109,6 +109,7 @@ class Heartbeat:
         self._thread = threading.Thread(target=self._beat, name=f"heartbeat-{job_id}", daemon=True)
 
     def __enter__(self) -> "Heartbeat":
+        progress.start_counting()
         progress.beat(f"job {self.job_id} started")
         self._thread.start()
         return self
@@ -127,7 +128,7 @@ class Heartbeat:
                     while not self._stop.wait(self.every.total_seconds()):
                         if self._is_stuck():
                             return
-                        jobs_db.heartbeat(conn, self.job_id, self.worker)
+                        jobs_db.heartbeat(conn, self.job_id, self.worker, progress.counted())
                         # the worker itself is alive too, while a long job runs
                         telemetry.heartbeat()
                 return
@@ -212,8 +213,11 @@ def _record(
     queue: psycopg.Connection, ctx: JobContext, job: Job, outcome: Outcome | None, error: str | None, permanent: bool
 ) -> str:
     result = job.result
+    failures = {}
     if outcome is not None:
         result = outcome.result
+        failures = dict(outcome.failed)
+    jobs_db.record_attempt(queue, job.id, failures, progress.counted())
     if ctx.cancelled:
         jobs_db.finish(queue, job.id, "cancelled", result, "cancelled by a person")
         ctx.add("cancelled")

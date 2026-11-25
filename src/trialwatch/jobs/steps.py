@@ -9,12 +9,13 @@ created, a check the trials not judged in the job's runs or whose call failed fo
 tagging the trials still untagged.
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import psycopg
 
-from trialwatch import llm
+from trialwatch import llm, progress
 from trialwatch.checks import evidence
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
@@ -29,6 +30,7 @@ from trialwatch.search import annotate
 from trialwatch.sources import profile, registry
 from trialwatch.trials import ingest, readiness
 
+log = logging.getLogger("trialwatch.jobs")
 CAP_REACHED = "held: this month's spend reached the monthly cap (/admin/spend)"
 
 
@@ -71,9 +73,20 @@ class JobContext(Context):
         self.watch_cap = job.automatic and capped
 
     def add(self, line: str) -> None:
-        jobs_db.add_line(self.queue, self.job.id, self.job.attempts, line)
+        progress.beat(line)
+        try:
+            jobs_db.add_line(self.queue, self.job.id, self.job.attempts, line)
+        except psycopg.OperationalError as exc:  # the queue's database went away: the work goes on
+            log.warning("job %s: progress line not written (%s): %s", self.job.id, exc, line)
 
     def should_stop(self) -> bool:
+        try:
+            return self._should_stop()
+        except psycopg.OperationalError as exc:  # can't ask now: carry on, and ask again after the next item
+            log.warning("job %s: could not ask whether to stop (%s)", self.job.id, exc)
+            return False
+
+    def _should_stop(self) -> bool:
         if jobs_db.cancel_requested(self.queue, self.job.id):
             if not self.cancelled:
                 self.add("cancel asked: stopping after the current item")

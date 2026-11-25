@@ -69,6 +69,9 @@ services:
       <<: *trialwatch-environment
       TRIALWATCH_PDF_READERS: ${TRIALWATCH_PDF_READERS:-2}
       TRIALWATCH_PDF_MEMORY_MB: ${TRIALWATCH_PDF_MEMORY_MB:-1400}
+      # a job that has not moved for this long makes the worker exit; restart: unless-stopped starts
+      # a fresh one and the job resumes (src/trialwatch/jobs/worker.py)
+      TRIALWATCH_STUCK_MINUTES: ${TRIALWATCH_STUCK_MINUTES:-45}
     healthcheck:
       # touched every loop and every 30 s while a job runs: older than 2 minutes means stuck
       test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/trialwatch-worker.alive') > 120)"]

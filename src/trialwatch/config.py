@@ -15,6 +15,8 @@ The settings (each read by a function below):
   the EU/EEA, where CTIS trials have sites)
 - TRIALWATCH_PDF_READERS / TRIALWATCH_PDF_MEMORY_MB: how many PDFs the worker reads at once, and the
   memory their child processes may take together (trialwatch.trials.pages)
+- TRIALWATCH_STUCK_MINUTES: how long a job may go without moving before the worker restarts
+  (trialwatch.jobs.worker)
 """
 
 import os
@@ -142,6 +144,12 @@ def pdf_memory_mb() -> int:
     default 1400 of the worker's 2 GB): a file starts only when its estimate fits beside those being
     read. A file larger than the whole budget is still read, alone."""
     return _positive_int("TRIALWATCH_PDF_MEMORY_MB", 1400)
+
+
+def stuck_minutes() -> int:
+    """How long a job may go without moving before the worker stops itself to be started afresh
+    (TRIALWATCH_STUCK_MINUTES, default 45: longer than a PDF's 20 minutes and a download's deadline)."""
+    return _positive_int("TRIALWATCH_STUCK_MINUTES", 45)
 
 
 def _positive_int(name: str, default: int) -> int:

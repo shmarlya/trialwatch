@@ -14,6 +14,8 @@ from importlib.metadata import version
 
 import httpx
 
+from trialwatch import progress
+
 # Shared with every source (the snapshot replays them for any adapter)
 from trialwatch.sources.registry import DownloadedFile, TrialNotFound
 
@@ -197,6 +199,8 @@ class CtisClient:
                     raise LinkUnusable(f"the download took over {seconds / 60:.0f} min")
                 digest.update(chunk)
                 spool.write(chunk)
+                # a download that is moving is work moving (the worker's watchdog)
+                progress.beat("downloading a document")
             # the bytes received as sent (before any Content-Encoding is undone), as Content-Length counts
             # them; a body httpx had whole already (tests' transports) counts none, so its size stands
             received = response.num_bytes_downloaded or size

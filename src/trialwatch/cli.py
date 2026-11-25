@@ -140,6 +140,7 @@ def worker(
     # a mistyped setting stops the worker here, not each transfer that reaches a PDF
     config.pdf_readers()
     config.pdf_memory_mb()
+    config.stuck_minutes()
     try:
         ran = job_worker.run(once=once)
     except KeyboardInterrupt:

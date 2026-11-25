@@ -37,7 +37,7 @@ import psycopg
 import pypdf
 from pypdf import PdfReader
 
-from trialwatch import config
+from trialwatch import config, db
 from trialwatch.db import core
 from trialwatch.progress import Progress, report
 
@@ -200,7 +200,7 @@ def _child_reads(sha256: bytes, answer: Connection) -> None:
     started = time.monotonic()
     size = 0
     try:
-        with psycopg.connect(config.database_url()) as conn:
+        with psycopg.connect(config.database_url(), **db.LIVENESS) as conn:
             content = core.file_content(conn, sha256)
         size = len(content)
         texts = extract_pages(content)

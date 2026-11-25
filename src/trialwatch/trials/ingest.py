@@ -37,7 +37,7 @@ from trialwatch.db import search as search_db
 from trialwatch.db.core import RegisteredSource
 from trialwatch.geo import load as geo_load
 from trialwatch.hashing import storable
-from trialwatch.progress import Progress, report
+from trialwatch.progress import Progress, beat, report
 from trialwatch.search import index as search_index
 from trialwatch.sources import profile
 from trialwatch.sources.registry import Adapter, DocumentRef, DownloadedFile, TrialNotFound
@@ -541,6 +541,7 @@ def save(
             continue
         try:
             _save_document(conn, adapter, source, key, record.trial_id, document, saved, recheck)
+            beat(f"{key}: document {document.key}")
         except Exception as exc:  # recorded per document, the others go on
             saved.errors[f"document {document.key}"] = f"{type(exc).__name__}: {exc}"
     saved.unlinked = core.unlink_documents_not_listed(

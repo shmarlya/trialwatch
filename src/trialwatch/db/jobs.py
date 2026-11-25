@@ -134,6 +134,11 @@ def set_trace_id(conn: psycopg.Connection, job_id: int, trace_id: str) -> None:
     conn.execute("UPDATE jobs.job SET trace_id = %s WHERE id = %s", (trace_id, job_id))
 
 
+def limit_statements(conn: psycopg.Connection, longest: timedelta) -> None:
+    """A statement of this session running longer than `longest` fails (statement_timeout)."""
+    conn.execute("SELECT set_config('statement_timeout', %s, false)", (f"{int(longest.total_seconds() * 1000)}ms",))
+
+
 def heartbeat(conn: psycopg.Connection, job_id: int, worker: str) -> None:
     conn.execute("UPDATE jobs.job SET heartbeat_at = clock_timestamp() WHERE id = %s AND locked_by = %s "
                  "AND status = 'running'", (job_id, worker))

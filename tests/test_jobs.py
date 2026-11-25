@@ -587,3 +587,114 @@ def test_a_transfer_asked_to_recheck_keeps_it_in_its_params():
     assert (kind, params) == ("transfer", {"source": "ctis", "which": "stale", "recheck": True})
     _, plain = job_params(JobRequest(step="transfer", source="ctis", which="stale"))
     assert "recheck" not in plain
+
+
+# The worker when a job hangs or the database goes away
+
+
+def test_a_job_that_stops_moving_is_stopped_by_its_heartbeat(database_url):
+    import threading
+    from datetime import timedelta
+
+    from trialwatch.jobs import worker as job_worker
+
+    stopped = threading.Event()
+    heartbeat = job_worker.Heartbeat(0, "test-worker", stuck=timedelta(seconds=0.3), on_stuck=stopped.set,
+                                     every=timedelta(seconds=0.05))
+    with heartbeat:
+        assert stopped.wait(5)
+
+
+def test_a_slow_job_that_keeps_moving_is_not_stopped(database_url):
+    import threading
+    import time
+    from datetime import timedelta
+
+    from trialwatch import progress
+    from trialwatch.jobs import worker as job_worker
+
+    stopped = threading.Event()
+    heartbeat = job_worker.Heartbeat(0, "test-worker", stuck=timedelta(seconds=0.5), on_stuck=stopped.set,
+                                     every=timedelta(seconds=0.05))
+    with heartbeat:
+        for number in range(15):
+            progress.beat(f"file {number}")
+            time.sleep(0.1)
+    assert not stopped.is_set()
+
+
+def test_a_heartbeat_whose_database_session_ended_connects_again(database_url):
+    import time
+    from datetime import timedelta
+
+    import psycopg
+
+    from trialwatch import progress
+    from trialwatch.jobs import worker as job_worker
+
+    heartbeat = job_worker.Heartbeat(0, "test-worker", stuck=timedelta(minutes=5), on_stuck=lambda: None,
+                                     every=timedelta(seconds=0.05))
+    with heartbeat:
+        progress.beat("working")
+        deadline = time.monotonic() + 5
+        while heartbeat.backend_pid is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        first = heartbeat.backend_pid
+        with psycopg.connect(database_url, autocommit=True) as admin:
+            admin.execute("SELECT pg_terminate_backend(%s)", (first,))
+        deadline = time.monotonic() + 10
+        while heartbeat.backend_pid == first and time.monotonic() < deadline:
+            progress.beat("working")
+            time.sleep(0.05)
+        assert heartbeat.backend_pid not in (None, first)
+
+
+def test_the_worker_connects_again_when_its_database_goes_away(monkeypatch, database_url):
+    import psycopg
+
+    from trialwatch.jobs import worker as job_worker
+
+    calls = []
+
+    def work(queue, worker, once, should_stop, ran):
+        calls.append(queue.info.backend_pid)
+        if len(calls) == 1:
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+        ran[0] += 2
+
+    slept = []
+    monkeypatch.setattr(job_worker, "_work", work)
+    monkeypatch.setattr(job_worker.time, "sleep", slept.append)
+    assert job_worker.run() == 2
+    assert len(calls) == 2 and slept == [2.0]
+
+
+def test_a_statement_of_a_job_that_runs_too_long_fails(database_url):
+    from datetime import timedelta
+
+    import psycopg
+    import pytest
+
+    from trialwatch import db
+    from trialwatch.db import jobs as jobs_db
+
+    with db.connect_system() as conn:
+        jobs_db.limit_statements(conn, timedelta(milliseconds=100))
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            conn.execute("SELECT pg_sleep(2)")
+
+
+def test_a_job_whose_queue_connection_went_away_keeps_working():
+    from types import SimpleNamespace
+
+    import psycopg
+
+    from trialwatch.jobs.steps import JobContext
+
+    class Gone:
+        def execute(self, *args, **kwargs):
+            raise psycopg.OperationalError("the connection is closed")
+
+    ctx = JobContext(Gone(), SimpleNamespace(id=7, attempts=1, automatic=False))
+    ctx.add("1/3 a trial: complete")  # not written, not raised
+    assert ctx.should_stop() is False

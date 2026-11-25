@@ -17,10 +17,12 @@ source profiles`, `source locations`). A source that is not read from anywhere (
 trials in) has no list and no transfer.
 """
 
+import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import IO
 
 from trialwatch.db.core import Identifier, Listed, Location, Sponsor
 from trialwatch.sources.profile import TrialProfile
@@ -30,12 +32,73 @@ class TrialNotFound(Exception):
     """The source does not know the trial."""
 
 
-@dataclass(frozen=True)
 class DownloadedFile:
-    content: bytes
-    media_type: str | None
-    # the file name the source gives it, if any
-    file_name: str | None
+    """A file a source gave: its bytes in memory, or spooled to a temporary file as it was downloaded
+    (with its sha256 and size counted on the way), so a large one is read into memory only if it must
+    be stored, and then once. close() (or `with`) removes the spool."""
+
+    def __init__(
+        self,
+        content: bytes | None = None,
+        media_type: str | None = None,
+        file_name: str | None = None,
+        *,
+        spool: IO[bytes] | None = None,
+        sha256: bytes | None = None,
+        size: int | None = None,
+    ) -> None:
+        if (content is None) == (spool is None):
+            raise ValueError("a downloaded file is its content or its spool")
+        if spool is not None and (sha256 is None or size is None):
+            raise ValueError("a spooled file comes with its sha256 and size")
+        self._content = content
+        self._spool = spool
+        self.media_type = media_type
+        # the file name the source gives it, if any
+        self.file_name = file_name
+        self._sha256 = sha256
+        self._size = size
+
+    @property
+    def content(self) -> bytes:
+        """The bytes (read from the spool each time: hold them only while they are needed)."""
+        if self._content is not None:
+            return self._content
+        self._spool.seek(0)
+        return self._spool.read()
+
+    @property
+    def size(self) -> int:
+        if self._content is not None:
+            return len(self._content)
+        return self._size
+
+    def sha256(self) -> bytes:
+        if self._sha256 is None:
+            self._sha256 = hashlib.sha256(self._content).digest()
+        return self._sha256
+
+    def head(self, count: int) -> bytes:
+        if self._content is not None:
+            return self._content[:count]
+        self._spool.seek(0)
+        return self._spool.read(count)
+
+    def tail(self, count: int) -> bytes:
+        if self._content is not None:
+            return self._content[-count:]
+        self._spool.seek(max(0, self._size - count))
+        return self._spool.read()
+
+    def close(self) -> None:
+        if self._spool is not None:
+            self._spool.close()
+
+    def __enter__(self) -> "DownloadedFile":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
 
 @dataclass

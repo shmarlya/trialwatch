@@ -24,7 +24,6 @@ errors. Both can be stopped between trials (or list pages): what was done so far
 at a time reads a source (an advisory lock), and a run whose process died is closed by the next one.
 """
 
-import hashlib
 import logging
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -45,6 +44,8 @@ from trialwatch.sources.registry import Adapter, DocumentRef, DownloadedFile, Tr
 from trialwatch.trials.pages import extract_missing
 
 ShouldStop = Callable[[], bool] | None
+# Where a PDF's end-of-file marker is looked for: it ends the file, give or take trailing bytes
+PDF_END_BYTES = 2048
 # One line per trial transferred, with its errors when it failed, in the worker's log (Coolify shows it)
 log = logging.getLogger("trialwatch.ingest")
 
@@ -553,10 +554,38 @@ def save(
 
 
 def _check_file(document: DocumentRef, file: DownloadedFile) -> None:
-    if not file.content:
+    if file.size == 0:
         raise ValueError("empty file")
-    if document.listed_as_pdf and not file.content.startswith(b"%PDF"):
-        raise ValueError(f"listed as PDF but is not one (starts {file.content[:20]!r})")
+    if document.listed_as_pdf and not file.head(5).startswith(b"%PDF"):
+        raise ValueError(f"listed as PDF but is not one (starts {file.head(20)!r})")
+
+
+def _cut_short(document: DocumentRef, file: DownloadedFile) -> bool:
+    """A PDF without its end-of-file marker near its end: most likely cut short on the way."""
+    return document.listed_as_pdf and b"%%EOF" not in file.tail(PDF_END_BYTES)
+
+
+def _download(adapter: Adapter, key: str, document: DocumentRef, saved: Saved) -> DownloadedFile:
+    """The document's file, checked; a PDF that looks cut short is downloaded once more, and kept with a
+    warning if it still does (pypdf may read it anyway; if not, its pages fail as a broken file)."""
+    file = adapter.download(key, document)
+    try:
+        _check_file(document, file)
+        if not _cut_short(document, file):
+            return file
+    except BaseException:
+        file.close()
+        raise
+    file.close()
+    file = adapter.download(key, document)
+    try:
+        _check_file(document, file)
+    except BaseException:
+        file.close()
+        raise
+    if _cut_short(document, file):
+        saved.warnings[f"document {document.key}"] = "no %%EOF at its end: the file may be cut short"
+    return file
 
 
 def _save_document(
@@ -584,22 +613,21 @@ def _save_document(
             saved.known += 1
             core.link_document(conn, trial_id=trial_id, document_id=known, basis="listed-by-source", source=source)
             return
-    file = adapter.download(key, document)
-    _check_file(document, file)
-    sha256 = hashlib.sha256(file.content).digest()
-    stored = core.save_document_version(
-        conn,
-        source=source,
-        source_key=document.key,
-        kind=document.kind,
-        title=document.title,
-        language=document.language,
-        version=document.version,
-        content=file.content,
-        media_type=file.media_type,
-        sha256=sha256,
-        published_at=document.published_at,
-    )
+    with _download(adapter, key, document, saved) as file:
+        stored = core.save_document_version(
+            conn,
+            source=source,
+            source_key=document.key,
+            kind=document.kind,
+            title=document.title,
+            language=document.language,
+            version=document.version,
+            # read (from its spool) only if the file is not stored yet
+            content=lambda: file.content,
+            media_type=file.media_type,
+            sha256=file.sha256(),
+            published_at=document.published_at,
+        )
     if stored.new_version:
         saved.new_versions += 1
     else:

@@ -10,7 +10,7 @@ merged automatically: the record goes to the oldest of them and the pair is reco
 core.possible_duplicate for a person to decide.
 """
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -415,7 +415,8 @@ class SavedVersion:
 
 def save_document_version(
     conn: psycopg.Connection, *, source: str, source_key: str, kind: str, title: str | None, language: str | None,
-    version: str, content: bytes, media_type: str | None, sha256: bytes, published_at: datetime | None = None,
+    version: str, content: bytes | Callable[[], bytes], media_type: str | None, sha256: bytes,
+    published_at: datetime | None = None,
 ) -> SavedVersion:
     """Store what a source gives as a document's current version, in one transaction: the file once by
     its hash, the document by its source key, and a new version (with when the source says it was
@@ -429,6 +430,9 @@ def save_document_version(
         stored_row = conn.execute("SELECT 1 FROM core.file WHERE sha256 = %s", (sha256,)).fetchone()
         new_file = False
         if stored_row is None:
+            if callable(content):
+                # a downloaded file's bytes, read from its spool only now that they are needed
+                content = content()
             file_cursor = conn.execute(
                 "INSERT INTO core.file (sha256, size_bytes, media_type, content, created_by) "
                 "VALUES (%s, %s, %s, %s, current_setting('trialwatch.actor')::bigint) ON CONFLICT (sha256) DO NOTHING",

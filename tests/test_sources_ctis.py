@@ -84,6 +84,8 @@ class FakeCtis:
 
     def __init__(self, record, listing=None):
         self.record = record
+        # uuid -> how many more downloads of it come without the PDF's %%EOF (cut short)
+        self.cut_short: dict[str, int] = {}
         self.listing = []
         if listing is not None:
             self.listing = listing
@@ -110,7 +112,13 @@ class FakeCtis:
         extra = ""
         if uuid in self.replaced:
             extra = self.replaced[uuid]
-        return DownloadedFile(f"%PDF-1.7 {uuid} v{version}{extra}".encode(), "application/pdf", None)
+        end = "\n%%EOF"
+        if uuid in self.cut_short:
+            end = ""
+            self.cut_short[uuid] -= 1
+            if self.cut_short[uuid] == 0:
+                del self.cut_short[uuid]
+        return DownloadedFile(f"%PDF-1.7 {uuid} v{version}{extra}{end}".encode(), "application/pdf", None)
 
     def search(self, criteria, page, size, direction="ASC"):
         """Like CTIS: sorted by EU CT number, and nothing past ctis.SEARCH_LIMIT rows of one query."""
@@ -601,3 +609,22 @@ def test_a_recheck_is_recorded_on_the_run(conn):
     result = transfer(conn, FakeCtis(RECORD), recheck=True)
     args = conn.execute("SELECT args->>'recheck' FROM core.ingest_run WHERE id = %s", (result.run_id,)).fetchone()
     assert args == ("true",)
+
+
+def test_a_pdf_cut_short_is_downloaded_once_more(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.cut_short[SUMMARY["uuid"]] = 1
+    result = transfer(conn, fake)
+    assert sorted(fake.downloads) == sorted([SUMMARY["uuid"], SUMMARY["uuid"], REPORT["uuid"]])
+    assert result.statuses == {CT: "complete"}
+    assert result.failed == {}
+
+
+def test_a_pdf_still_cut_short_is_kept_with_a_warning(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.cut_short[SUMMARY["uuid"]] = 2
+    result = transfer(conn, fake)
+    assert result.failed == {f"{CT}/document {SUMMARY['uuid']}": "no %%EOF at its end: the file may be cut short"}
+    assert result.statuses == {CT: "complete"}  # a warning: the file is stored, its pages read

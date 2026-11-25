@@ -206,9 +206,8 @@ def _run_step(conn: psycopg.Connection, kind: str, params: dict) -> Outcome:
     except PermanentError as exc:
         raise typer.BadParameter(str(exc)) from exc
     _echo_failures(outcome.failed)
-    # a check leaves to a person what another attempt can't fix; nothing is tried again here, so it fails too
-    left_to_people = outcome.result.get("left_to_people", {})
-    if outcome.failed or left_to_people:
+    # a step leaves to a person what another attempt can't fix; nothing is tried again here, so it fails too
+    if outcome.failed or outcome.left:
         raise typer.Exit(1)
     return outcome
 

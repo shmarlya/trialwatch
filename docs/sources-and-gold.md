@@ -67,6 +67,13 @@ A trial whose transfer failed on three days in a row (`core.evidence_transfer.fa
 once) is **stuck**: the refresh leaves it out of `failed` until the source changes it, a transfer completes, or a
 person transfers it again (`--which stuck`, or its page). The source's and the trial's pages show it.
 
+Some failures can't be mended by trying again, and the job does not fail or retry for them: a file whose bytes
+pypdf can't read, and a PDF still cut short on its second download (the source publishes it so: CTIS holds
+2022-501485-22-00's 32.7 MB safety narratives as their first 17.8 MB). The trial's transfer is still failed, its
+evidence incomplete; the job lists them as left to a person (its lines, its result's `left_to_people`, and its
+page's "What failed"), and the message says when a file is cut short and by how much. A cut-short version is
+downloaded again by later transfers, in case the source mends it, until the trial is stuck.
+
 A check reads a trial only when every source that holds it is complete and current, and its transfer brought
 every document kind the check reads that the source can give (`not_ready` in `trials/readiness.py`). A trial entered
 by hand is complete once its uploaded documents are read.

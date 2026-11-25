@@ -230,8 +230,16 @@ class TransferResult:
     statuses: dict[str, str] = field(default_factory=dict)
     # the core.trial ids transferred, in order
     trial_ids: list[int] = field(default_factory=list)
-    # "key" or "key/what" -> what went wrong
+    # "key" or "key/what" -> what went wrong, that another try may mend (a download, a reading cut off)
     failed: dict[str, str] = field(default_factory=dict)
+    # "key/what" -> what went wrong that trying again would not mend: a file whose bytes can't be read,
+    # or that the source publishes cut short (the same bytes on two downloads). The trial's transfer
+    # records it as failed (a person sees it; it becomes stuck); the job does not fail and try again.
+    left: dict[str, str] = field(default_factory=dict)
+
+    def problems(self) -> dict[str, str]:
+        """Everything that went wrong: what may be mended by trying again, and what is left to people."""
+        return {**self.failed, **self.left}
 
     def counts(self) -> dict:
         return {
@@ -248,6 +256,7 @@ class TransferResult:
             "possible_duplicates": self.possible_duplicates,
             "stopped": self.stopped,
             "failed": len(self.failed),
+            "left": len(self.left),
         }
 
     def summary(self) -> str:
@@ -341,7 +350,7 @@ def transfer(
                 reading.pages.cancel()
             raise
         finally:
-            core.finish_ingest(conn, result.run_id, counts=result.counts(), errors=result.failed)
+            core.finish_ingest(conn, result.run_id, counts=result.counts(), errors=result.problems())
     finally:
         core.unlock(conn, core.LOCK_SOURCE, source.id)
     return result
@@ -382,7 +391,7 @@ def _tell(
     progress: Progress,
 ) -> None:
     result.statuses[key] = status
-    _log_trial(source.code, key, status, time.monotonic() - started, result.failed)
+    _log_trial(source.code, key, status, time.monotonic() - started, result.problems())
     report(progress, f"{number}/{total} {key}: {status}")
     count_done(len(result.statuses), total)
 
@@ -460,7 +469,11 @@ def _fetch_one(
         # else: neither listed nor fetched before, so there is no trial to record the failed transfer on
         return None
     for where, message in fetched.warnings.items():
-        result.failed[f"{key}/{where}"] = message
+        if message == CUT_SHORT:
+            # downloaded twice, cut short both times: the source publishes it so (see _download)
+            result.left[f"{key}/{where}"] = message
+        else:
+            result.failed[f"{key}/{where}"] = message
     if fetched.trial_id not in result.trial_ids:
         result.trial_ids.append(fetched.trial_id)
     if fetched.new_trial:
@@ -512,8 +525,14 @@ def _finish_one(
         errors=errors,
         document_kinds=kinds,
     )
+    unreadable = set()
+    for sha in read.unreadable:
+        unreadable.add(f"file {sha}")
     for where, message in errors.items():
-        result.failed[f"{key}/{where}"] = message
+        if where in unreadable:
+            result.left[f"{key}/{where}"] = message
+        else:
+            result.failed[f"{key}/{where}"] = message
     if status == "complete":
         result.complete += 1
     return status
@@ -676,7 +695,7 @@ def _cut_short(document: DocumentRef, file: DownloadedFile) -> bool:
     return document.listed_as_pdf and b"%%EOF" not in file.tail(PDF_END_BYTES)
 
 
-CUT_SHORT = "no %%EOF at its end: the file may be cut short"
+CUT_SHORT = "no %%EOF at its end on two downloads: the source publishes it cut short"
 
 
 def _download(adapter: Adapter, key: str, document: DocumentRef, saved: Saved) -> tuple[DownloadedFile, str | None]:

@@ -216,7 +216,8 @@ def _record(
     failures = {}
     if outcome is not None:
         result = outcome.result
-        failures = dict(outcome.failed)
+        # what another attempt can't fix is shown with the rest, but fails nothing (Outcome)
+        failures = {**outcome.failed, **outcome.left}
     jobs_db.record_attempt(queue, job.id, failures, progress.counted())
     if ctx.cancelled:
         jobs_db.finish(queue, job.id, "cancelled", result, "cancelled by a person")

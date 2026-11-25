@@ -102,11 +102,14 @@ class JobContext(Context):
 
 @dataclass
 class Outcome:
-    """How a step ended: what it did (jobs.job.result), and what failed that is worth another attempt
-    (item -> error). What a retry can't fix is in the result (a check's left_to_people)."""
+    """How a step ended: what it did (jobs.job.result), what failed that is worth another attempt
+    (item -> error), and what failed that another attempt can't fix, left to people (a check refused, a
+    file the source publishes broken): shown with the job's failures, but the job does not fail for it.
+    The result names those too (left_to_people)."""
 
     result: dict = field(default_factory=dict)
     failed: dict[str, str] = field(default_factory=dict)
+    left: dict[str, str] = field(default_factory=dict)
 
 
 def _source(conn: psycopg.Connection, code: str) -> core.RegisteredSource:
@@ -184,11 +187,14 @@ def run_transfer(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcom
         except ValueError as exc:
             raise PermanentError(str(exc)) from exc
     ctx.add(result.summary())
+    for name, error in result.left.items():
+        ctx.add(f"  left to a person, {name}: {error}")
     outcome = {"ingest_run": result.run_id, "summary": result.summary(), "trials": result.trials,
-               "complete": result.complete, "new_versions": result.new_versions}
+               "complete": result.complete, "new_versions": result.new_versions,
+               "left_to_people": dict(result.left)}
     if params.get("which"):
         outcome["chosen"] = _chosen_keys(ctx, keys)
-    return Outcome(outcome, dict(result.failed))
+    return Outcome(outcome, dict(result.failed), dict(result.left))
 
 
 def _chosen_keys(ctx: Context, keys: list[str]) -> list[str]:
@@ -282,7 +288,7 @@ def run_check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
     result = {"check_run": summary.run_id, "summary": summary.summary(), "trials": len(trial_ids),
               "labels": summary.labels, "left_to_people": left_to_people, "published": len(summary.published),
               "cost_usd": str(summary.cost_usd), "cost": llm.dollars(summary.cost_usd)}
-    return Outcome(result, passing)
+    return Outcome(result, passing, left_to_people)
 
 
 # --- annotate (patient search, ADR-008) ----------------------------------------------------------

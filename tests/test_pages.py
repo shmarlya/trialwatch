@@ -73,8 +73,9 @@ def test_a_child_that_takes_too_long_is_stopped():
 
 
 def test_the_child_fetches_the_file_from_the_database(database_url):
-    # No such file: the child connected and asked, and says so as a broken file
-    with pytest.raises(ValueError):
+    # No such file: the child connected and asked, and says so; not as a broken file (UnreadableFile,
+    # left to people), as the bytes were never read: another try may find them
+    with pytest.raises(pages.FileNotRead, match="TypeError"):
         pages.read_in_child(SHA)
 
 
@@ -84,6 +85,22 @@ def test_pages_over_pypdfs_default_parsing_budget_are_read():
     operations = b"BT /F1 1 Tf " + b"(x) Tj " * 1_100_000 + b"ET"
     texts = pages.extract_pages(pdf_with_page(operations))
     assert len(texts) == 1
+
+
+def test_a_pdf_cut_short_says_so_and_by_how_much_when_its_header_gives_its_length():
+    error = ValueError("Stream has ended unexpectedly")
+    linearized = b"%PDF-1.7\n10691 0 obj\n<< /Linearized 1 /L 32666300 /H [ 2419 8093 ] /N 631 >>\nendobj\n"
+    cut = linearized + b"x" * 17_000_000
+    assert pages.why_unreadable(cut, error) == (
+        "the file is cut short: 17.0 MB of the 32.7 MB its header gives (ValueError: Stream has ended unexpectedly)"
+    )
+    whole = pdf_with_page(b"BT /F1 12 Tf (x) Tj ET")
+    assert pages.why_unreadable(whole[: len(whole) // 2], error) == (
+        "the file is cut short: no %%EOF at its end (ValueError: Stream has ended unexpectedly)"
+    )
+    # a whole file, or one that is not a PDF: pypdf's error alone
+    assert pages.why_unreadable(whole, error) == "ValueError: Stream has ended unexpectedly"
+    assert pages.why_unreadable(b"<html>", error) == "ValueError: Stream has ended unexpectedly"
 
 
 def pdf_with_page(operations: bytes) -> bytes:

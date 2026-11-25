@@ -81,10 +81,11 @@ def _check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
 
 
 def _run(ctx: Context, conn: psycopg.Connection, name: str, step: Step, params: dict, result: dict,
-         failed: dict[str, str]) -> bool:
+         failed: dict[str, str], left: dict[str, str] | None = None) -> bool:
     """Run one step, as the refresh (its runs name the refresh's job, its retries are the refresh's).
-    What failed in it is one of the refresh's failures, not the end of the refresh. Its result goes in
-    the refresh's under `name`; True when nothing in it failed."""
+    What failed in it is one of the refresh's failures, not the end of the refresh; what it left to
+    people is the refresh's too (`left`). Its result goes in the refresh's under `name`; True when
+    nothing in it failed."""
     ctx.add(f"— {name}")
     try:
         outcome = step(ctx, conn, params)
@@ -97,6 +98,9 @@ def _run(ctx: Context, conn: psycopg.Connection, name: str, step: Step, params: 
         result[name] = outcome.result
         for item, item_error in outcome.failed.items():
             failed[f"{name}, {item}"] = item_error
+        if left is not None:
+            for item, item_error in outcome.left.items():
+                left[f"{name}, {item}"] = item_error
         return not outcome.failed
     ctx.add(f"{name} failed: {error}")
     failed[name] = error
@@ -106,6 +110,7 @@ def _run(ctx: Context, conn: psycopg.Connection, name: str, step: Step, params: 
 def run_refresh(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
     result = {}
     failed: dict[str, str] = {}
+    left: dict[str, str] = {}
     # the sources an earlier attempt of this refresh synced without a failure
     earlier = {}
     if ctx.job is not None:
@@ -114,7 +119,7 @@ def run_refresh(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome
     result["synced"] = synced
     for source in _sources(conn, "lists"):
         if ctx.should_stop():
-            return Outcome(result, failed)
+            return Outcome(result, failed, left)
         name = f"sync {source.code}"
         if source.code in synced:
             ctx.add(f"— {name}: synced in an earlier attempt")
@@ -123,15 +128,15 @@ def run_refresh(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome
             synced.append(source.code)
     for source in _sources(conn, "transfers"):
         if ctx.should_stop():
-            return Outcome(result, failed)
-        _run(ctx, conn, f"transfer {source.code}", _transfer, {"source": source.code}, result, failed)
+            return Outcome(result, failed, left)
+        _run(ctx, conn, f"transfer {source.code}", _transfer, {"source": source.code}, result, failed, left)
     # the steps that call a paid model: an automatic refresh is held by the spending cap from here on
     ctx.watch_cap = ctx.automatic
     if ctx.should_stop():
-        return Outcome(result, failed)
-    _run(ctx, conn, "annotate", steps.run_annotate, {"every": True}, result, failed)
+        return Outcome(result, failed, left)
+    _run(ctx, conn, "annotate", steps.run_annotate, {"every": True}, result, failed, left)
     if ctx.should_stop():
-        return Outcome(result, failed)
+        return Outcome(result, failed, left)
     config = params.get("config", check_settings.DEFAULT)
-    _run(ctx, conn, "check", _check, {"config": config}, result, failed)
-    return Outcome(result, failed)
+    _run(ctx, conn, "check", _check, {"config": config}, result, failed, left)
+    return Outcome(result, failed, left)

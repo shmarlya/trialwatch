@@ -390,6 +390,25 @@ def test_the_refresh_does_not_pay_again_for_a_check_that_failed_for_a_lasting_re
     assert checked_trials(model) == asked
 
 
+def test_a_file_that_cannot_be_read_is_shown_but_does_not_fail_the_refresh(app_conn, fake_world, monkeypatch):
+    # 2022-501485-22-00 (2026-11-25): one PDF CTIS publishes cut short failed every refresh, and each
+    # failed refresh was tried again, though reading the same bytes can only fail the same way
+    def cut_short(content):
+        raise ValueError("Stream has ended unexpectedly")
+
+    monkeypatch.setattr("trialwatch.trials.pages.extract_pages", cut_short)
+    job_id = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert (job.status, job.attempts) == ("succeeded", 1), line_texts(app_conn, job_id)
+    # its page still lists them, for a person to look at
+    assert len(job.failures) == 2
+    for name, why in job.failures.items():
+        assert name.startswith("transfer ctis, ") and "/file " in name and "Stream has ended" in why
+    assert len(job.result["transfer ctis"]["left_to_people"]) == 2
+    assert any("left to a person" in line for line in line_texts(app_conn, job_id))
+
+
 def test_a_failed_transfer_fails_the_attempt_and_the_next_carries_on(app_conn, fake_world, monkeypatch):
     fake, model = fake_world
     original = fake.retrieve

@@ -20,6 +20,7 @@ import hashlib
 import io
 import logging
 import multiprocessing
+import re
 import resource
 import sys
 import time
@@ -77,7 +78,33 @@ class FileNotRead(Exception):
 
 
 class UnreadableFile(ValueError):
-    """The child read the file and found it can't be read; the message names pypdf's error."""
+    """The file was read and found to be unreadable; the message names pypdf's error, and says so when
+    the file is cut short. Reading the same bytes again fails the same way, so it is a lasting failure:
+    only other bytes (a new version, or the source mending its file) can be read."""
+
+
+# A PDF ends with %%EOF; a linearized one gives its full length near its start ("/Linearized 1 /L 32666300")
+PDF_END_BYTES = 2048
+LINEARIZED_LENGTH = re.compile(rb"/Linearized\s+[\d.]+\s*/L\s+(\d+)")
+
+
+def why_unreadable(content: bytes, exc: Exception) -> str:
+    """pypdf's error, and before it whether the file is cut short: a file the source publishes cut short
+    (2022-501485-22-00's 32.7 MB safety narratives, stored by CTIS as their first 17.8 MB, 2026-11-25)
+    fails as "Stream has ended unexpectedly", which alone doesn't say whose fault it is."""
+    error = f"{type(exc).__name__}: {exc}"
+    if not content.startswith(b"%PDF") or b"%%EOF" in content[-PDF_END_BYTES:]:
+        return error
+    found = LINEARIZED_LENGTH.search(content[:2048])
+    if found is not None and int(found.group(1)) > len(content):
+        return (
+            f"the file is cut short: {_mb(len(content))} of the {_mb(int(found.group(1)))} its header gives ({error})"
+        )
+    return f"the file is cut short: no %%EOF at its end ({error})"
+
+
+def _mb(size: int) -> str:
+    return f"{size / 10**6:.1f} MB"
 
 
 def extract_pages(content: bytes) -> list[str]:
@@ -170,6 +197,9 @@ def read_in_child(
     if outcome == "error":
         log.warning("file %s can't be read (%s): %s", short_sha, _measured(measures), value)
         raise UnreadableFile(value)
+    if outcome == "failed":
+        log.warning("file %s not read: %s", short_sha, value)
+        raise FileNotRead(value)
     log.info("file %s read: %d pages (%s)", short_sha, len(value), _measured(measures))
     return value
 
@@ -203,9 +233,13 @@ def _child_reads(sha256: bytes, answer: Connection) -> None:
         with psycopg.connect(config.database_url(), **db.LIVENESS) as conn:
             content = core.file_content(conn, sha256)
         size = len(content)
+    except Exception as exc:  # the database, not the file: the parent records the message
+        answer.send(("failed", f"{type(exc).__name__}: {exc}", _measures(size, started)))
+        return
+    try:
         texts = extract_pages(content)
     except Exception as exc:  # a broken file: the parent records the message
-        answer.send(("error", f"{type(exc).__name__}: {exc}", _measures(size, started)))
+        answer.send(("error", why_unreadable(content, exc), _measures(size, started)))
         return
     answer.send(("pages", texts, _measures(size, started)))
 
@@ -317,6 +351,8 @@ class PagesResult:
     # file sha256 (hex, short) -> files with the same text
     same_text: dict[str, list[str]] = field(default_factory=dict)
     failed: dict[str, str] = field(default_factory=dict)
+    # of the failed, those whose bytes can't be read (UnreadableFile): reading them again fails the same way
+    unreadable: set[str] = field(default_factory=set)
 
 
 def extract_missing(
@@ -362,6 +398,8 @@ def _record(conn: psycopg.Connection, result: PagesResult, outcome: Read, progre
         same = core.save_pages(conn, outcome.sha256, texts, EXTRACTOR, text_fingerprint(texts))
     except (UnreadableFile, FileNotRead) as exc:  # the message already says what went wrong
         result.failed[short_sha] = str(exc)
+        if isinstance(exc, UnreadableFile):
+            result.unreadable.add(short_sha)
         report(progress, f"{short_sha}: failed: {result.failed[short_sha]}")
         return
     except Exception as exc:  # a broken file is recorded, the others go on
@@ -382,7 +420,11 @@ def _record(conn: psycopg.Connection, result: PagesResult, outcome: Read, progre
 def _read_here(conn: psycopg.Connection, sha256: bytes, extract: Callable[[bytes], list[str]] | None) -> list[str]:
     if extract is None:
         extract = extract_pages
-    return extract(core.file_content(conn, sha256))
+    content = core.file_content(conn, sha256)
+    try:
+        return extract(content)
+    except Exception as exc:  # the file's bytes, as in a child (_child_reads)
+        raise UnreadableFile(why_unreadable(content, exc)) from exc
 
 
 # The most page text read but not saved yet that a Reading holds: past it, no other file starts until

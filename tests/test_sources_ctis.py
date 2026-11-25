@@ -624,13 +624,29 @@ def test_a_pdf_cut_short_is_downloaded_once_more(conn):
     assert result.failed == {}
 
 
-def test_a_pdf_still_cut_short_is_kept_with_a_warning(conn):
+def test_a_pdf_still_cut_short_is_kept_with_a_warning_left_to_people(conn):
     core.act_as(conn, "ctis-adapter", "process")
     fake = FakeCtis(RECORD)
     fake.cut_short[SUMMARY["uuid"]] = 2
     result = transfer(conn, fake)
-    assert result.failed == {f"{CT}/document {SUMMARY['uuid']}": "no %%EOF at its end: the file may be cut short"}
+    # cut short on both downloads: the source publishes it so, and another try would get the same bytes
+    assert result.left == {f"{CT}/document {SUMMARY['uuid']}": ingest.CUT_SHORT}
+    assert result.failed == {}
     assert result.statuses == {CT: "complete"}  # a warning: the file is stored, its pages read
+
+
+def test_a_file_that_cannot_be_read_is_left_to_people_not_tried_again(conn):
+    # 2022-501485-22-00 (2026-11-25): CTIS stores a 32.7 MB PDF as its first 17.8 MB; pypdf fails on it
+    # the same way every time, so the job must not fail and try again for it
+    core.act_as(conn, "ctis-adapter", "process")
+    result = transfer(conn, FakeCtis(RECORD), extract=unreadable)
+    assert result.statuses == {CT: "failed"}  # the trial's evidence is not complete: a person sees why
+    assert result.failed == {}
+    assert len(result.left) == 2
+    for where, message in result.left.items():
+        assert where.startswith(f"{CT}/file ") and message == "ValueError: not read in this test"
+    errors = conn.execute("SELECT errors FROM core.ingest_run WHERE id = %s", (result.run_id,)).fetchone()[0]
+    assert set(errors) == set(result.left)  # the run records everything that went wrong
 
 
 def failing_days(conn):

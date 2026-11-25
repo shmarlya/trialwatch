@@ -28,7 +28,7 @@
     <td class="num">{{ job.attempts }}/{{ job.max_attempts }}</td>
     <td class="small">{% if job.status == "queued" %}{{ when(job.run_after) }}{% endif %}</td>
     <td class="num">{{ dollars(costs.get(job.id)) }}</td>
-    <td class="small muted">{% if job.last_error %}{{ job.last_error[:200] }}{% endif %}</td>
+    <td class="small muted">{% if job.status == "succeeded" and job.failures %}<a href="/jobs/{{ job.id }}#failed">{{ job.failures | length }} left to a person</a>{% elif job.last_error %}{{ job.last_error[:200] }}{% endif %}</td>
     <td>{% if job.status in ("failed", "cancelled", "held") and can("job.retry") %}<form method="post" action="/jobs/{{ job.id }}/retry"><button class="small">{% if job.status == "held" %}Release{% else %}Try again{% endif %}</button></form>{% endif %}</td>
   </tr>
   {% endfor %}

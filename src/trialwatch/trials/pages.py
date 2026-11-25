@@ -100,7 +100,8 @@ def why_unreadable(content: bytes, exc: Exception) -> str:
         return (
             f"the file is cut short: {_mb(len(content))} of the {_mb(int(found.group(1)))} its header gives ({error})"
         )
-    return f"the file is cut short: no %%EOF at its end ({error})"
+    # without its full length, only a likelihood: a whole PDF may have bytes after its %%EOF
+    return f"the file may be cut short: no %%EOF in its last {PDF_END_BYTES // 1024} KB ({error})"
 
 
 def _mb(size: int) -> str:
@@ -238,6 +239,9 @@ def _child_reads(sha256: bytes, answer: Connection) -> None:
         return
     try:
         texts = extract_pages(content)
+    except MemoryError as exc:  # not the file's fault: another try, with fewer files read beside it, may do
+        answer.send(("failed", f"{type(exc).__name__}: {exc}", _measures(size, started)))
+        return
     except Exception as exc:  # a broken file: the parent records the message
         answer.send(("error", why_unreadable(content, exc), _measures(size, started)))
         return
@@ -423,6 +427,8 @@ def _read_here(conn: psycopg.Connection, sha256: bytes, extract: Callable[[bytes
     content = core.file_content(conn, sha256)
     try:
         return extract(content)
+    except MemoryError as exc:  # as in a child (_child_reads): not the file's fault
+        raise FileNotRead(f"{type(exc).__name__}: {exc}") from exc
     except Exception as exc:  # the file's bytes, as in a child (_child_reads)
         raise UnreadableFile(why_unreadable(content, exc)) from exc
 
@@ -448,6 +454,8 @@ class Reading:
         self._error: BaseException | None = None
         self._stop = threading.Event()
         self._thread = None
+        self._started = time.monotonic()
+        self._ended: float | None = None
         self.result = PagesResult()
         if self._files:
             sizes = core.file_sizes(conn, self._files)
@@ -479,6 +487,18 @@ class Reading:
                 report(None, f"{outcome.sha256.hex()[:12]}: read")
         except BaseException as exc:  # given to the caller by finish()
             self._error = exc
+        finally:
+            self._ended = time.monotonic()
+
+    @property
+    def seconds(self) -> float:
+        """How long its files took to read, so far: from its start until its last file was read."""
+        if self._thread is None:
+            return 0.0
+        ended = self._ended
+        if ended is None:
+            ended = time.monotonic()
+        return ended - self._started
 
     def drain(self, conn: psycopg.Connection, progress: Progress = None) -> None:
         """Save the files read so far (their pages, or why they have none)."""
@@ -528,6 +548,7 @@ class ReadingHere:
         self._trial_ids = list(trial_ids)
         self._kinds = kinds
         self._extract = extract
+        self.seconds = 0.0
 
     @property
     def files(self) -> None:
@@ -538,7 +559,11 @@ class ReadingHere:
         pass
 
     def finish(self, conn: psycopg.Connection, progress: Progress = None) -> PagesResult:
-        return extract_missing(conn, self._trial_ids, progress, self._kinds, self._extract)
+        started = time.monotonic()
+        try:
+            return extract_missing(conn, self._trial_ids, progress, self._kinds, self._extract)
+        finally:
+            self.seconds = time.monotonic() - started
 
     def cancel(self) -> None:
         pass

@@ -166,8 +166,10 @@ class CtisClient:
             try:
                 # An absolute URL bypasses base_url; the link is presigned, so no CTIS headers are needed
                 with self._http.stream("GET", link, headers={"Accept": "*/*"}) as response:
-                    if response.status_code in (403, 404):
-                        raise LinkUnusable(f"the download link answered {response.status_code} (expired?)")
+                    # S3 answers 403 to a link whose signature expired: a fresh link will do. A 404 is
+                    # a file the storage no longer holds, which a fresh link to it would not change
+                    if response.status_code == 403:
+                        raise LinkUnusable("the download link answered 403 (expired?)")
                     if response.status_code in RETRY_STATUSES and not is_last_attempt:
                         busy = response
                     else:

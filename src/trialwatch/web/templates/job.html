@@ -42,7 +42,7 @@
 </div>
 
 {% if failed %}
-<h2 id="failed">What failed <span class="muted small">({{ failed | length }})</span></h2>
+<h2 id="failed">{% if job.status == "succeeded" %}Left to a person{% else %}What failed{% endif %} <span class="muted small">({{ failed | length }})</span></h2>
 <p class="small muted">From the last attempt. Look at a trial on its page, or do it again: a transfer downloads every document again; a check runs with the same setup. What trying again can't mend (a file the source publishes broken, a check refused) is listed here too, but the job does not fail for it.</p>
 {% if redo_all and can("trial.transfer") %}
 <form method="post" action="/jobs" class="inline">

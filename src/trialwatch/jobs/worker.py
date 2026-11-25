@@ -293,10 +293,11 @@ def start_due_schedules(queue: psycopg.Connection) -> list[int]:
         started.append(job_id)
 
 
-def run(once: bool = False, should_stop: Callable[[], bool] | None = None) -> int:
+def run(once: bool = False, should_stop: Callable[[], bool] | None = None,
+        sleep: Callable[[float], None] = time.sleep) -> int:
     """Work until stopped (Ctrl-C), or with `once` until the queue is empty. Returns the jobs run.
     A lost database is connected to again, after a growing pause (a job it was recording is queued
-    again once its heartbeat lapses)."""
+    again once its heartbeat lapses); `sleep` waits it out (tests give their own)."""
     worker = worker_name()
     ran = [0]
     failures = 0
@@ -312,7 +313,7 @@ def run(once: bool = False, should_stop: Callable[[], bool] | None = None) -> in
             failures += 1
             wait = min(LONGEST_RECONNECT_WAIT, 2.0**failures)
             log.warning("the worker lost the database (%s): connecting again in %.0f s", exc, wait)
-            time.sleep(wait)
+            sleep(wait)
 
 
 def _work(queue: psycopg.Connection, worker: str, once: bool, should_stop: Callable[[], bool] | None,

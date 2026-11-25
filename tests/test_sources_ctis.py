@@ -1,6 +1,7 @@
 """The CTIS adapter into the central model (ADR-003, ADR-005), against a fake CTIS."""
 
 import copy
+import re
 import threading
 import time
 import pytest
@@ -430,6 +431,42 @@ def test_the_worker_reads_a_trials_files_in_children_several_at_once(conn, monke
 
 def unreadable(content):
     raise ValueError("not read in this test")
+
+
+def test_what_goes_wrong_saving_another_trials_pages_is_not_a_documents_failure(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    calls = []
+
+    def between():
+        calls.append(1)
+        raise RuntimeError("the database went away")
+
+    # raised, not recorded as a failure of the document just saved (which is stored)
+    with pytest.raises(RuntimeError, match="went away"):
+        ingest.save(conn, "ctis", CT, ctis.CtisAdapter(FakeCtis(RECORD)), None, between=between)
+    assert calls == [1]
+
+
+def test_a_trials_log_line_gives_its_fetch_and_its_reading_apart(conn, caplog):
+    # its files are read while the next trial is fetched: one time for both would count that fetch too
+    core.act_as(conn, "ctis-adapter", "process")
+    with caplog.at_level("INFO", logger="trialwatch.ingest"):
+        transfer(conn, FakeCtis(RECORD))
+    [line] = [r.getMessage() for r in caplog.records if r.getMessage().startswith(f"transfer ctis {CT}")]
+    assert re.fullmatch(rf"transfer ctis {CT} complete in \d+ s, its files read in \d+ s", line), line
+
+
+def test_a_file_whose_reading_runs_out_of_memory_is_tried_again_not_left_to_people(conn):
+    # memory depends on what else is read at once, not on the file: another attempt may read it
+    core.act_as(conn, "ctis-adapter", "process")
+
+    def out_of_memory(content):
+        raise MemoryError("no room")
+
+    result = transfer(conn, FakeCtis(RECORD), extract=out_of_memory)
+    assert result.statuses == {CT: "failed"}
+    assert result.left == {}
+    assert len(result.failed) == 2 and set(result.failed.values()) == {"MemoryError: no room"}
 
 
 def two_pages(content):

@@ -96,7 +96,7 @@ def test_a_pdf_cut_short_says_so_and_by_how_much_when_its_header_gives_its_lengt
     )
     whole = pdf_with_page(b"BT /F1 12 Tf (x) Tj ET")
     assert pages.why_unreadable(whole[: len(whole) // 2], error) == (
-        "the file is cut short: no %%EOF at its end (ValueError: Stream has ended unexpectedly)"
+        "the file may be cut short: no %%EOF in its last 2 KB (ValueError: Stream has ended unexpectedly)"
     )
     # a whole file, or one that is not a PDF: pypdf's error alone
     assert pages.why_unreadable(whole, error) == "ValueError: Stream has ended unexpectedly"

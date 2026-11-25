@@ -327,14 +327,20 @@ def transfer(
                     span.set_attribute("trialwatch.source", source.code)
                     span.set_attribute("trialwatch.source.key", key)
                     fetched = _fetch_one(conn, source, adapter, key, kinds, result, recheck, between)
+                fetch_seconds = time.monotonic() - started
                 if reading is not None:
                     _finish_and_tell(conn, source, kinds, result, reading, len(wanted), progress)
                     reading = None
                 if fetched is None:
-                    _tell(source, key, number, len(wanted), "failed", started, result, progress)
+                    took = f"in {fetch_seconds:.0f} s"
+                    _tell(source, key, number, len(wanted), "failed", took, result, progress)
                 else:
                     reading = _Reading(
-                        key, number, started, fetched, pages.start_reading(conn, [fetched.trial_id], kinds, extract)
+                        key,
+                        number,
+                        fetch_seconds,
+                        fetched,
+                        pages.start_reading(conn, [fetched.trial_id], kinds, extract),
                     )
                 _rate(number, len(wanted), run_started, progress)
             if reading is not None:
@@ -356,17 +362,19 @@ def transfer(
     return result
 
 
-def _log_trial(source: str, key: str, status: str, seconds: float, failed: dict[str, str]) -> None:
+def _log_trial(source: str, key: str, status: str, took: str, failed: dict[str, str]) -> None:
+    """One line for the trial; `took` says how long its parts took ("in 5 s", or its fetch and its reading
+    apart, since the reading runs while the next trial is fetched)."""
     problems = []
     for where, message in failed.items():
         if where.startswith(f"{key}/"):
             problems.append(f"{where.removeprefix(key + '/')}: {message}")
     if status == "failed":
-        log.warning("transfer %s %s failed in %.0f s: %s", source, key, seconds, "; ".join(problems))
+        log.warning("transfer %s %s failed %s: %s", source, key, took, "; ".join(problems))
     elif problems:
-        log.info("transfer %s %s %s in %.0f s, with warnings: %s", source, key, status, seconds, "; ".join(problems))
+        log.info("transfer %s %s %s %s, with warnings: %s", source, key, status, took, "; ".join(problems))
     else:
-        log.info("transfer %s %s %s in %.0f s", source, key, status, seconds)
+        log.info("transfer %s %s %s %s", source, key, status, took)
 
 
 @dataclass
@@ -375,7 +383,8 @@ class _Reading:
 
     key: str
     number: int
-    started: float
+    # seconds its record and documents took
+    fetch_seconds: float
     fetched: "Saved"
     pages: "pages.Reading | pages.ReadingHere"
 
@@ -386,12 +395,12 @@ def _tell(
     number: int,
     total: int,
     status: str,
-    started: float,
+    took: str,
     result: TransferResult,
     progress: Progress,
 ) -> None:
     result.statuses[key] = status
-    _log_trial(source.code, key, status, time.monotonic() - started, result.problems())
+    _log_trial(source.code, key, status, took, result.problems())
     report(progress, f"{number}/{total} {key}: {status}")
     count_done(len(result.statuses), total)
 
@@ -410,7 +419,8 @@ def _finish_and_tell(
         span.set_attribute("trialwatch.source.key", reading.key)
         status = _finish_one(conn, source, kinds, result, reading)
         span.set_attribute("trialwatch.ingest.status", status)
-    _tell(source, reading.key, reading.number, total, status, reading.started, result, progress)
+    took = f"in {reading.fetch_seconds:.0f} s, its files read in {reading.pages.seconds:.0f} s"
+    _tell(source, reading.key, reading.number, total, status, took, result, progress)
 
 
 # A long transfer says how it goes every this many trials
@@ -669,10 +679,12 @@ def save(
         try:
             _save_document(conn, adapter, source, key, record.trial_id, document, saved, recheck)
             beat(f"{key}: document {document.key}")
-            if between is not None:
-                between()
         except Exception as exc:  # recorded per document, the others go on
             saved.errors[f"document {document.key}"] = f"{type(exc).__name__}: {exc}"
+        if between is not None:
+            # another trial's work (its page text, each file's failure recorded there): what goes wrong
+            # here beyond a file is not this document's, and goes on up like any database error
+            between()
     saved.unlinked = core.unlink_documents_not_listed(
         conn,
         trial_id=record.trial_id,

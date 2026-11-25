@@ -249,6 +249,18 @@ def test_links_that_keep_expiring_fail_after_max_links():
     assert storage.links_given == ctis_client.MAX_LINKS
 
 
+def gone(request):
+    return httpx.Response(404, content=b"<Error><Code>NoSuchKey</Code></Error>")
+
+
+def test_a_file_the_storage_no_longer_holds_fails_at_once():
+    # a fresh link to a file that isn't there would get the same 404
+    storage = Storage(gone, whole_file)
+    with client(storage) as c, pytest.raises(httpx.HTTPStatusError, match="404"):
+        c.download_document(CT, UUID)
+    assert (storage.links_given, storage.used) == (1, ["1"])
+
+
 def test_timeouts_on_every_attempt_fail_the_download_with_the_error():
     with client(Storage(*[times_out] * 5)) as c, pytest.raises(httpx.ReadTimeout):
         c.download_document(CT, UUID)

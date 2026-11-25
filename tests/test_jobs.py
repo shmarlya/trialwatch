@@ -692,8 +692,7 @@ def test_the_worker_connects_again_when_its_database_goes_away(monkeypatch, data
 
     slept = []
     monkeypatch.setattr(job_worker, "_work", work)
-    monkeypatch.setattr(job_worker.time, "sleep", slept.append)
-    assert job_worker.run() == 2
+    assert job_worker.run(sleep=slept.append) == 2
     assert len(calls) == 2 and slept == [2.0]
 
 
@@ -801,3 +800,11 @@ def test_a_finished_jobs_page_offers_to_redo_what_failed(app_conn, admin_client)
     assert "What failed" in page.text and "too large to download: 400 MB" in page.text
     assert page.text.count(">Transfer again<") == 2 and "Transfer all 2 again" in page.text
     assert "<b>2</b> of 2 done · 100%" in page.text
+
+
+def test_a_job_that_succeeded_with_items_left_to_a_person_says_so_in_the_list(app_conn, admin_client):
+    job_id = queue(app_conn, "transfer", {"source": "ctis", "keys": ["2025-000001-01-00"]}, actor="admin@test.example")
+    jobs_db.record_attempt(app_conn, job_id, {"2025-000001-01-00/file 9626e32b175a": "the file is cut short"}, (1, 1))
+    jobs_db.finish(app_conn, job_id, "succeeded", {})
+    assert f'<a href="/jobs/{job_id}#failed">1 left to a person</a>' in admin_client.get("/admin/jobs?tab=ended").text
+    assert "Left to a person" in admin_client.get(f"/jobs/{job_id}").text

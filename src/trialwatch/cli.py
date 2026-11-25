@@ -335,9 +335,13 @@ def source_transfer(
     ] = None,
     which: Annotated[str | None, typer.Option(help="Instead of keys: pending | failed | stale | recruiting | listed")] = None,
     limit: Annotated[int | None, typer.Option(min=1, help="Transfer at most this many trials")] = None,
+    recheck: Annotated[
+        bool, typer.Option("--recheck", help="Download every document again, even those held at the listed version")
+    ] = False,
 ) -> None:
     """Transfer trials' evidence from a source: the full record and the documents its config names,
-    with their page text read. Only trials whose evidence is complete and current can be checked."""
+    with their page text read. Only trials whose evidence is complete and current can be checked.
+    A document held at the version the source lists is not downloaded again, unless --recheck."""
     given = []
     if keys:
         for key in keys:
@@ -352,6 +356,8 @@ def source_transfer(
         params["which"] = which
     if limit is not None:
         params["limit"] = limit
+    if recheck:
+        params["recheck"] = True
     with db.connect_system() as conn:
         _run_step(conn, "transfer", params)
 

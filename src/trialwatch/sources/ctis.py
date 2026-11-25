@@ -944,6 +944,6 @@ class CtisAdapter(Adapter):
         return trial
 
     def download(self, key: str, document: DocumentRef) -> DownloadedFile:
-        # Downloaded every time, even when we hold this version: CTIS could replace the file without
-        # raising its systemVersion, and only the bytes would show it
+        # Asked for only when we don't hold this version, or on a transfer with recheck: CTIS could
+        # replace a file without raising its systemVersion, and only the bytes would show it
         return self.client.download_document(key, document.key)

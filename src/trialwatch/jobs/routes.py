@@ -51,6 +51,8 @@ class JobRequest:
     # evidence: the setup the check runs with (a file in checks/configs/)
     config: str = check_settings.DEFAULT
     dry_run: bool = False
+    # transfer: download every document again, even those held at the version the source lists
+    recheck: bool = False
 
 
 def job_params(request: JobRequest) -> tuple[str, dict]:
@@ -66,6 +68,8 @@ def job_params(request: JobRequest) -> tuple[str, dict]:
             params["keys"] = list(request.keys)
         if request.which:
             params["which"] = request.which
+        if request.recheck:
+            params["recheck"] = True
     if kind == "check":
         if request.trial_ids:
             params["trial_ids"] = list(request.trial_ids)
@@ -131,6 +135,7 @@ def start_job(
     # the check's setup: a file in checks/configs/
     config: Annotated[str, Form()] = check_settings.DEFAULT,
     dry_run: Annotated[bool, Form()] = False,
+    recheck: Annotated[bool, Form()] = False,
     back: Annotated[str, Form()] = "",
     user: auth_db.User = Depends(Requires("source.sync", "trial.transfer", "check.dry_run", "check.run")),
 ) -> Response:
@@ -185,6 +190,7 @@ def start_job(
         limit=chosen_limit,
         config=config.strip(),
         dry_run=dry_run,
+        recheck=recheck,
     )
     try:
         with db.connect(actor=user.email) as conn:

@@ -578,3 +578,12 @@ def test_a_refresh_shows_its_steps_on_its_page(app_conn, fake_world, monkeypatch
     assert "— sync ctis" in page.text and "— transfer ctis" in page.text and "— check" in page.text
     running = admin_client.get("/admin/jobs?tab=active")
     assert running.status_code == 200 and "Running" in running.text
+
+
+def test_a_transfer_asked_to_recheck_keeps_it_in_its_params():
+    from trialwatch.jobs.routes import JobRequest, job_params
+
+    kind, params = job_params(JobRequest(step="transfer", source="ctis", which="stale", recheck=True))
+    assert (kind, params) == ("transfer", {"source": "ctis", "which": "stale", "recheck": True})
+    _, plain = job_params(JobRequest(step="transfer", source="ctis", which="stale"))
+    assert "recheck" not in plain

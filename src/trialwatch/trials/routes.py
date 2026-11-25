@@ -162,14 +162,15 @@ def upload_document(
 def transfer_trial(
     trial_id: int, source: Annotated[str, Form()], user: auth_db.User = Depends(Requires("trial.transfer"))
 ) -> Response:
-    """Transfer this trial's evidence again from a source (its record, new document versions, page text)."""
+    """Transfer this trial's evidence again from a source (its record, new document versions, page text).
+    Every document is downloaded again (recheck): a person asking for one trial again may suspect a file."""
     with db.connect_system() as conn:
         keys = overview.trial_source_keys(conn, trial_id, source)
     if not keys:
         return with_error(f"/trials/{trial_id}", f"this trial has no key at {source} to transfer")
     try:
         with db.connect(actor=user.email) as conn:
-            job_id = enqueue_request(conn, JobRequest(step="transfer", source=source, keys=keys))
+            job_id = enqueue_request(conn, JobRequest(step="transfer", source=source, keys=keys, recheck=True))
     except ValueError as exc:
         return with_error(f"/trials/{trial_id}", str(exc))
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)

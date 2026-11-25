@@ -153,12 +153,13 @@ def ctis_source(conn, **config):
     return dataclasses.replace(source, config=changed)
 
 
-def transfer(conn, fake, keys=(CT,), source=None, extract=read_text, why="chosen", should_stop=None):
+def transfer(conn, fake, keys=(CT,), source=None, extract=read_text, why="chosen", should_stop=None,
+             recheck=False):
     """A transfer from the fake CTIS, as the registered source (or `source`) is configured."""
     if source is None:
         source = ctis_source(conn)
     return ingest.transfer(conn, source, ctis.CtisAdapter(fake), keys, why=why, should_stop=should_stop,
-                           extract=extract)
+                           extract=extract, recheck=recheck)
 
 
 def listing_rows(keys):
@@ -260,10 +261,11 @@ def test_ingests_the_trial_and_its_result_documents_once(conn):
     second = transfer(conn, fake)
     assert (first.trials, first.new_trials, first.new_versions, first.failed) == (1, 1, 2, {})
     assert first.statuses == {CT: "complete"} and first.pages == 2
-    # the summary and the study report, not the lay summary or the protocol: downloaded by every
-    # transfer, to compare their bytes, and stored once
-    assert sorted(fake.downloads) == [SUMMARY["uuid"], SUMMARY["uuid"], REPORT["uuid"], REPORT["uuid"]]
-    assert (second.new_trials, second.new_versions, second.unchanged) == (0, 0, 2)
+    # the summary and the study report, not the lay summary or the protocol: downloaded once, the
+    # second transfer finds them held at the version CTIS lists
+    assert sorted(fake.downloads) == [SUMMARY["uuid"], REPORT["uuid"]]
+    assert (second.new_trials, second.new_versions, second.unchanged, second.known) == (0, 0, 2, 2)
+    assert "2 held at their version, not downloaded" in second.summary()
     records = conn.execute("SELECT count(*) FROM core.trial_record WHERE source_key = %s", (CT,)).fetchone()
     assert records == (1,)  # the same record again is not a new version
     links = conn.execute("SELECT count(*) FROM core.trial_document l JOIN core.trial_source s USING (trial_id) "
@@ -553,7 +555,10 @@ def test_a_file_replaced_without_a_new_system_version_is_a_new_version(conn):
     fake = FakeCtis(RECORD)
     trial_id = transfer(conn, fake).trial_ids[0]
     fake.replaced[SUMMARY["uuid"]] = " corrected"
-    again = transfer(conn, fake)
+    # the label is the same: only a transfer that downloads every document again finds the new bytes
+    unchecked = transfer(conn, fake)
+    assert (unchecked.new_versions, unchecked.known) == (0, 2)
+    again = transfer(conn, fake, recheck=True)
     # the label is the same, the bytes are not: kept apart, the newer one current
     assert (again.new_versions, again.unchanged) == (1, 1)
     assert versions_of(conn, SUMMARY["uuid"]) == [(SUMMARY["systemVersion"], False), (SUMMARY["systemVersion"], True)]
@@ -563,6 +568,36 @@ def test_a_file_replaced_without_a_new_system_version_is_a_new_version(conn):
     ).fetchall()
     assert "corrected" in pages[0][0]
     # nothing new the next time
-    third = transfer(conn, fake)
+    third = transfer(conn, fake, recheck=True)
     assert (third.new_versions, third.unchanged) == (0, 2)
     assert trial_id == third.trial_ids[0]
+
+
+def test_a_document_at_a_new_version_is_downloaded_and_a_retry_downloads_only_what_failed(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.download_errors[REPORT["uuid"]] = OSError("connection reset")
+    first = transfer(conn, fake)
+    assert first.statuses == {CT: "failed"}
+    fake.download_errors.clear()
+    fake.downloads.clear()
+    retry = transfer(conn, fake)
+    assert retry.statuses == {CT: "complete"}
+    assert fake.downloads == [REPORT["uuid"]]  # the summary was held already
+    bumped = copy.deepcopy(RECORD)
+    for document in bumped["documents"]:
+        if document["uuid"] == SUMMARY["uuid"]:
+            document["systemVersion"] = "9.0"
+    fake.record = bumped
+    fake.downloads.clear()
+    third = transfer(conn, fake)
+    assert fake.downloads == [SUMMARY["uuid"]]
+    assert versions_of(conn, SUMMARY["uuid"])[-1] == ("9.0", True)
+    assert third.known == 1
+
+
+def test_a_recheck_is_recorded_on_the_run(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    result = transfer(conn, FakeCtis(RECORD), recheck=True)
+    args = conn.execute("SELECT args->>'recheck' FROM core.ingest_run WHERE id = %s", (result.run_id,)).fetchone()
+    assert args == ("true",)

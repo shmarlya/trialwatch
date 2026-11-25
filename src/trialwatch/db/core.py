@@ -466,6 +466,33 @@ def save_document_version(
     return SavedVersion(the_document, new_file, True)
 
 
+def known_document(
+    conn: psycopg.Connection, *, source: str, source_key: str, kind: str, title: str | None, language: str | None,
+    version: str,
+) -> int | None:
+    """The document's id when its current version has this label, after taking the kind, title and
+    language the source gives now (as save_document_version would); None when it is new or its label
+    changed, so it must be downloaded. Trusts the label: a file replaced under the same label is only
+    found by downloading it (a transfer with recheck)."""
+    with conn.transaction():
+        row = conn.execute(
+            """
+            SELECT d.id FROM core.document d
+            JOIN core.document_version v ON v.document_id = d.id AND v.replaced_at IS NULL
+            WHERE d.source_id = %s AND d.source_key = %s AND v.version = %s
+            """,
+            (source_id(conn, source), source_key, version),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE core.document SET kind = %s, title = %s, language = %s WHERE id = %s "
+            "AND (kind, title, language) IS DISTINCT FROM (%s, %s, %s)",
+            (kind, title, language, row[0], kind, title, language),
+        )
+    return row[0]
+
+
 def link_document(conn: psycopg.Connection, *, trial_id: int, document_id: int, basis: str, source: str,
                   confidence: float = 1.0) -> bool:
     """Link a document to a trial; True if the link is new or back. A link the source had dropped

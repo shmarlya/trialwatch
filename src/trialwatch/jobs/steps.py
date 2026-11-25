@@ -165,7 +165,7 @@ def run_transfer(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcom
     with registry.open_adapter(source.adapter) as adapter:
         try:
             result = ingest.transfer(conn, source, adapter, keys, why=why, progress=ctx.add,
-                                     should_stop=ctx.should_stop)
+                                     should_stop=ctx.should_stop, recheck=bool(params.get("recheck")))
         except ingest.SourceBusy:
             raise
         except ValueError as exc:

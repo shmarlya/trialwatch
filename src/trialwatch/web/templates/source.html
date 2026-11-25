@@ -39,6 +39,8 @@
       <select name="which">{% for name, text in choices.items() %}<option value="{{ name }}">{{ name }}: {{ text }}</option>{% endfor %}</select>
     </label>
     <label>Limit<input type="number" name="limit" min="1" placeholder="all"></label>
+    <label class="small"><input type="checkbox" name="recheck" value="true"> Download every document again
+      (else those held at the listed version are not)</label>
     <button {% if not row.enabled %}disabled{% endif %}>Transfer</button>
   </form>
   <form class="panel step" method="post" action="/jobs">

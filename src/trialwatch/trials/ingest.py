@@ -7,7 +7,8 @@ reads its source and says what it read (trialwatch.sources.registry); everything
 2. transfer: for chosen trials, the adapter fetches the full record and reads it (a SourceTrial);
    `save` stores the record as a new version if it changed (the trial matched by all its identifiers
    or created), its sponsors, sites and profile, and every listed document of the configured kinds
-   (downloaded each time, a new version when its bytes changed), and unlinks the ones the source no
+   (downloaded when new or at a new version label; with recheck, every time, a new version when its
+   bytes changed), and unlinks the ones the source no
    longer lists; then their page text is read. The trial's
    core.evidence_transfer row says 'complete' only when the record, every configured document and
    every page came in, else 'failed' and why. While a trial is being transferred its row says
@@ -214,9 +215,13 @@ class TransferResult:
     documents: int = 0
     new_versions: int = 0
     unchanged: int = 0
+    # of the unchanged: held at the version the source lists, so not downloaded (without recheck)
+    known: int = 0
     unlinked: int = 0
     pages: int = 0
     possible_duplicates: int = 0
+    # every document was downloaded and its bytes compared, whatever its version label
+    recheck: bool = False
     stopped: bool = False
     # key -> 'complete' or 'failed'
     statuses: dict[str, str] = field(default_factory=dict)
@@ -233,6 +238,8 @@ class TransferResult:
             "documents": self.documents,
             "new_versions": self.new_versions,
             "unchanged": self.unchanged,
+            "known": self.known,
+            "recheck": self.recheck,
             "unlinked": self.unlinked,
             "pages": self.pages,
             "possible_duplicates": self.possible_duplicates,
@@ -243,9 +250,16 @@ class TransferResult:
     def summary(self) -> str:
         return (
             f"transfer run {self.run_id}: {self.complete} of {self.trials} complete, {self.new_trials} new trials, "
-            f"documents {self.documents} ({self.new_versions} new versions, {self.unchanged} unchanged, "
+            f"documents {self.documents} ({self.new_versions} new versions, {self.unchanged} unchanged{self._known()}, "
             f"{self.unlinked} no longer listed), {self.pages} pages read"
         )
+
+    def _known(self) -> str:
+        if self.recheck:
+            return " (every document downloaded and compared)"
+        if self.known:
+            return f" ({self.known} held at their version, not downloaded)"
+        return ""
 
 
 def transfer(
@@ -258,9 +272,11 @@ def transfer(
     progress: Progress = None,
     should_stop: ShouldStop = None,
     extract: Callable[[bytes], list[str]] | None = None,
+    recheck: bool = False,
 ) -> TransferResult:
     """Transfer the evidence of these trials (the source's keys), each once (see the module's
-    docstring). `why` says how they were chosen, for the run's record."""
+    docstring). `why` says how they were chosen, for the run's record. A document held at the version
+    the source lists is not downloaded again, unless `recheck`: then every one is, and its bytes decide."""
     if not adapter.transfers:
         raise ValueError(f"source {source.code} has no evidence to transfer")
     _usable(source, adapter)
@@ -272,10 +288,10 @@ def transfer(
         if key not in wanted:
             wanted.append(key)
     kinds = adapter.evidence_kinds(source.config)
-    run_args = {"keys": wanted, "why": why, "config": source.config}
+    run_args = {"keys": wanted, "why": why, "config": source.config, "recheck": recheck}
     _hold_source(conn, source)
     try:
-        result = TransferResult(run_id=core.start_ingest(conn, source.code, run_args, kind="transfer"))
+        result = TransferResult(run_id=core.start_ingest(conn, source.code, run_args, kind="transfer"), recheck=recheck)
         try:
             for number, key in enumerate(wanted, start=1):
                 if _stopping(should_stop):
@@ -286,7 +302,7 @@ def transfer(
                 with telemetry.tracer.start_as_current_span("ingest.trial") as span:
                     span.set_attribute("trialwatch.source", source.code)
                     span.set_attribute("trialwatch.source.key", key)
-                    status = _transfer_one(conn, source, adapter, key, kinds, extract, result)
+                    status = _transfer_one(conn, source, adapter, key, kinds, extract, result, recheck)
                     span.set_attribute("trialwatch.ingest.status", status)
                 result.statuses[key] = status
                 _log_trial(source.code, key, status, time.monotonic() - started, result.failed)
@@ -326,13 +342,14 @@ def _transfer_one(
     kinds: Sequence[str] | None,
     extract: Callable[[bytes], list[str]] | None,
     result: TransferResult,
+    recheck: bool = False,
 ) -> str:
     result.trials += 1
     known = core.source_key_known(conn, source.code, key)
     if known:
         core.mark_transfer_started(conn, source=source.code, source_key=key, run_id=result.run_id)
     try:
-        fetched = save(conn, source.code, key, adapter, kinds)
+        fetched = save(conn, source.code, key, adapter, kinds, recheck)
     except Exception as exc:  # save reports errors itself; this keeps the run going if not
         fetched = Saved(trial_id=None, errors={"record": f"{type(exc).__name__}: {exc}"})
     errors = {}
@@ -364,6 +381,7 @@ def _transfer_one(
     result.documents += fetched.documents
     result.new_versions += fetched.new_versions
     result.unchanged += fetched.unchanged
+    result.known += fetched.known
     result.unlinked += fetched.unlinked
     pages = extract_missing(conn, [fetched.trial_id], kinds=kinds, extract=extract)
     result.pages += pages.pages
@@ -430,8 +448,9 @@ class Saved:
     # documents of the wanted kinds the record lists
     documents: int = 0
     new_versions: int = 0
-    # documents whose current file we already held, byte for byte
+    # documents whose current file we already held, byte for byte or (known) by its version label
     unchanged: int = 0
+    known: int = 0
     # links to documents the source no longer lists, now removed
     unlinked: int = 0
     # "record", or a document's key -> what went wrong: the evidence is not complete
@@ -454,10 +473,18 @@ def _fetch(source: str, adapter: Adapter, key: str) -> dict:
     return payload
 
 
-def save(conn: psycopg.Connection, source: str, key: str, adapter: Adapter, kinds: Sequence[str] | None) -> Saved:
+def save(
+    conn: psycopg.Connection,
+    source: str,
+    key: str,
+    adapter: Adapter,
+    kinds: Sequence[str] | None,
+    recheck: bool = False,
+) -> Saved:
     """Fetch one trial from its source and save what its record says: the record (a new version if it
     changed), its sponsors, sites and profile, and every listed document of these kinds (None: every
-    kind); documents of these kinds the source no longer lists are unlinked."""
+    kind); documents of these kinds the source no longer lists are unlinked. A document held at the
+    listed version is linked without downloading it, unless `recheck`."""
     try:
         # text fields can hold characters Postgres can't store (a NUL): cleaned before anything else
         payload = storable(_fetch(source, adapter, key))
@@ -512,7 +539,7 @@ def save(conn: psycopg.Connection, source: str, key: str, adapter: Adapter, kind
             saved.errors[f"document {document.key}"] = document.problem
             continue
         try:
-            _save_document(conn, adapter, source, key, record.trial_id, document, saved)
+            _save_document(conn, adapter, source, key, record.trial_id, document, saved, recheck)
         except Exception as exc:  # recorded per document, the others go on
             saved.errors[f"document {document.key}"] = f"{type(exc).__name__}: {exc}"
     saved.unlinked = core.unlink_documents_not_listed(
@@ -540,7 +567,23 @@ def _save_document(
     trial_id: int,
     document: DocumentRef,
     saved: Saved,
+    recheck: bool = False,
 ) -> None:
+    if not recheck:
+        known = core.known_document(
+            conn,
+            source=source,
+            source_key=document.key,
+            kind=document.kind,
+            title=document.title,
+            language=document.language,
+            version=document.version,
+        )
+        if known is not None:
+            saved.unchanged += 1
+            saved.known += 1
+            core.link_document(conn, trial_id=trial_id, document_id=known, basis="listed-by-source", source=source)
+            return
     file = adapter.download(key, document)
     _check_file(document, file)
     sha256 = hashlib.sha256(file.content).digest()

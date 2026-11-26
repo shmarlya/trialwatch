@@ -700,6 +700,25 @@ def test_pages_too_long_to_send_whole_are_widened_within_a_budget(conn):
     assert len(none_fit.requests) == 1
 
 
+def test_trials_needing_a_check_come_by_why_undecided_under_other_rules_before_decided(conn):
+    judged = seed(conn)
+    ev.run(conn, FakeClient(NOTHING), [judged], default_settings(), PROMPT)
+    never = seed(conn, ct_number=CT_2)
+    same = checks_db.trials_needing_check(conn, [judged, never], SET.name, SET.text, PROMPT.sha256, ["undecided"])
+    assert (same.never_judged, same.ordered()) == ([never], [never])
+    changed = json.loads(SET.text)
+    changed["title"] = "Other rules"
+    other = checks_db.trials_needing_check(conn, [judged, never], SET.name, json.dumps(changed), PROMPT.sha256,
+                                           ["undecided"])
+    assert other.other_rules_decided == [judged] and other.ordered() == [never, judged]
+    # counted as open by the set's labels, it comes before decided ones
+    as_open = checks_db.trials_needing_check(conn, [judged], SET.name, json.dumps(changed), PROMPT.sha256,
+                                             ["not full"])
+    assert as_open.other_rules_undecided == [judged]
+    # without the current rules and prompt, only never judged or changed evidence count
+    assert checks_db.trials_needing_check(conn, [judged], SET.name).ordered() == []
+
+
 def test_negative_in_retrieved_pages_is_asked_again_and_a_failed_widening_is_an_error(conn):
     trial = seed(conn, pages_with(APPENDIX))
     client = FakeClient(GOOD, api_error(anthropic.InternalServerError, "overloaded"))

@@ -73,7 +73,11 @@ flowchart TB
   in a PDF that looks like one of those tags (`<page`, `</document`) has its `<` replaced, so a document can't end
   its page early and speak to the model as if it were our instructions.
 - **No versions before production.** One current text of each prompt, setup and requirement set; every run
-  stores the exact texts it used with their sha256, so an earlier run always shows its own.
+  stores the exact texts it used with their sha256, so an earlier run always shows its own. The refresh checks
+  again every trial judged under other rules (the requirement set, compared as JSON: reformatting it changes
+  nothing) or another prompt than the current ones, undecided judgements first, within the monthly spending
+  cap; a changed model or setup is not checked again by itself (`check evidence --config` is a person's
+  experiment).
 - **Method.** `text`: the documents' extracted page text, searched per question with the words of the
   requirement's hints and of the registered item (Postgres full-text search, `checks/retrieval.py`). `files`:
   each document's file sent whole, so the model also reads scanned pages and charts. Both use the same

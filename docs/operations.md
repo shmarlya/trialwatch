@@ -93,6 +93,11 @@ looks at them (about a second per picture page, `TRIALWATCH_PDF_READERS` files a
 worker's terminal: `trialwatch source ocr --all`). A trial whose page text it changed has an outdated judgement,
 which the next refresh checks again.
 
+**A release that changes the rules or the prompt** (`checks/requirement_sets/`, `checks/prompts/`) makes the
+refreshes after it check every judged trial again (about $0.015 a trial with Haiku): undecided ones first, held
+by the monthly spending cap, so a low cap spreads it over several refreshes. Its job page says how many are
+"judged under other rules or prompt".
+
 ## Coolify
 
 [compose.coolify.yaml](https://github.com/shmarlya/trialwatch/blob/main/compose.coolify.yaml) is a smaller stack

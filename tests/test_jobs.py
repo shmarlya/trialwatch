@@ -372,6 +372,45 @@ def test_the_refresh_syncs_transfers_and_checks_what_is_new(app_conn, fake_world
     assert checked_trials(model) == 3
 
 
+def test_the_refresh_checks_again_what_other_rules_or_another_prompt_judged(app_conn, fake_world, monkeypatch):
+    """A change to the requirement set or the prompt is checked again everywhere; reformatting the set's
+    file is not a change. A changed model or setup is not either (a person's experiment)."""
+    import json
+
+    from trialwatch.checks import prompts, requirements
+    from trialwatch.jobs import refresh
+
+    fake, model = fake_world
+    refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    assert checked_trials(model) == 2
+    current = requirements.load("eu-ctr-results")
+
+    def with_rules(text):
+        monkeypatch.setattr(refresh.requirement_sets, "load", lambda name: dataclasses.replace(current, text=text))
+        job_id = refresh_job(app_conn)
+        work(app_conn, monkeypatch)
+        return jobs_db.job(app_conn, job_id)
+
+    # the same rules, written differently: nothing to check
+    reformatted = json.dumps(json.loads(current.text), indent=4, sort_keys=True)
+    assert with_rules(reformatted).result["check"]["trials"] == 0
+    # other rules: both trials again
+    changed = json.loads(current.text)
+    changed["description"] = changed["description"] + " Changed."
+    job = with_rules(json.dumps(changed))
+    assert job.result["check"]["trials"] == 2 and checked_trials(model) == 4
+    assert "2 judged under other rules or prompt" in " ".join(line_texts(app_conn, job.id))
+    # judged under those rules now: nothing more to check
+    assert with_rules(json.dumps(changed)).result["check"]["trials"] == 0
+    # another prompt: both again
+    prompt = prompts.load_prompt("evidence")
+    monkeypatch.setattr(refresh, "load_prompt", lambda name: dataclasses.replace(prompt, sha256=b"\x00" * 32))
+    job_id = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    assert jobs_db.job(app_conn, job_id).result["check"]["trials"] == 2
+
+
 def test_the_refresh_does_not_pay_again_for_a_check_that_failed_for_a_lasting_reason(app_conn, fake_world,
                                                                                     monkeypatch):
     fake, model = fake_world

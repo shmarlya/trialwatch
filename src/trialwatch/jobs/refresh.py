@@ -7,8 +7,11 @@ step, each the same step a job of its own kind runs (jobs/steps.py):
    last transfer failed, the ones the list calls recruiting first (patient search, ADR-008)
 3. annotate the recruiting trials whose profile has no AI tags yet (new, or changed since). A changed
    prompt does not tag every trial again: `trialwatch search annotate --all --outdated-prompt`.
-4. check the trials ready for a check that were never judged or whose judgement is outdated (a record
-   or document it read changed). Nothing changed: no check, no money spent.
+4. check the trials ready for a check that were never judged, whose judgement is outdated (a record or
+   document it read changed, or OCR read more of it), or that were judged under other rules or another
+   prompt than the current ones (checks/requirement_sets, checks/prompts: a change to either is checked
+   again everywhere, undecided judgements first). A changed model or setup is not: that is an experiment
+   a person runs (`check evidence --config`). Nothing changed: no check, no money spent.
 
 Steps 3 and 4 call a paid model: the monthly spending cap holds the refresh before them, and it carries
 on when the cap allows. A step that fails does not stop the others: its failure fails the attempt, and
@@ -24,6 +27,7 @@ import psycopg
 
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
+from trialwatch.checks.prompts import load_prompt
 from trialwatch.db import checks as checks_db
 from trialwatch.db import core
 from trialwatch.jobs import steps
@@ -63,7 +67,13 @@ def _check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
     settings = check_settings.load(config)
     requirement_set = requirement_sets.load(settings.requirements)
     ready = readiness.ready_trials(conn, requirement_set.document_kinds)
-    needing = checks_db.trials_needing_check(conn, ready, requirement_set.name)
+    open_labels = [label.name for label in requirement_set.labels if label.means == "open"]
+    needed = checks_db.trials_needing_check(conn, ready, requirement_set.name, requirement_set.text,
+                                            load_prompt(settings.prompt).sha256, open_labels)
+    ctx.add(f"of {len(ready)} trials ready for a check: {needed.summary()}")
+    # what was never judged or changed first, then what earlier rules left undecided: the spending cap
+    # may stop the refresh partway, and the next one carries on
+    needing = needed.ordered()
     # a check that failed for a lasting reason (a refusal, an answer cut short) on evidence that has not
     # changed since would fail the same way and be paid for again: it stays for a person
     failed_before = checks_db.failed_on_unchanged_evidence(conn, needing, requirement_set.name)
@@ -73,7 +83,7 @@ def _check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
             continue
         changed.append(trial_id)
     left = len(needing) - len(changed)
-    ctx.add(f"{len(changed)} of {len(ready)} trials ready for a check are new or changed"
+    ctx.add(f"{len(changed)} of {len(ready)} trials ready for a check need one"
             f" ({left} left to a person: their last check failed on the same evidence)")
     outcome = steps.run_check(ctx, conn, {"trial_ids": changed, "config": config})
     outcome.result["ready"] = len(ready)

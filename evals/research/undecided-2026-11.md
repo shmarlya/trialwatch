@@ -199,3 +199,44 @@ What still leaves trials undecided after the fixes (open questions in undecided 
 - no count: 42
 
 These are fixes 4 and 5 (large documents, text extraction), which need re-runs to measure.
+
+## Fixes 4 and 5: OCR and budgeted widening
+
+**What the unreadable pages are.** A second text extractor gains nothing: pypdfium2 reads the same text as
+pypdf on every page checked. In 297 files of undecided trials, the 2,690 pages under 200 letters are:
+- 1,531 images (scans, results tables saved as pictures)
+- 686 sparse text pages (covers, contents)
+- 472 with no text at all
+
+Many of the "sparse" and "empty" pages are drawn with hundreds of vector shapes: charts, or text drawn as
+outlines in re-rendered or redacted reports. Some are whole report pages with no text layer and no image.
+
+**OCR** (`trials/ocr.py`):
+- A page under 200 letters counts as a picture when an image covers over 30% of it or it has 50 or more
+  drawn shapes. It is rendered with pypdfium2 at 200 dpi and read with tesseract 5.5 (English), at about
+  0.9 s a page.
+- 94% of image pages give 200 letters or more.
+- A page that is no picture (blank, cover) counts as read.
+- `core.page` keeps the text layer unchanged. OCR goes to `core.page_ocr`, and checks read `core.page_text`.
+
+**Budgeted widening:** when every page is too long to send, the questions still open are asked again with
+the 20 best pages per question and their neighbours, up to 400k characters, instead of being skipped.
+
+Measured on the snapshot (scratch database). Each pair of runs is on the same trials, current code before
+vs after:
+
+| | Before | After |
+|---|---|---|
+| 118 undecided trials with no document over 1,000 pages: full / not full / undecided | 4 / 0 / 114 | 35 / 35 / **48** |
+| 30 undecided trials with a document over 1,000 pages | 2 / 0 / 28 | 9 / 0 / 21 |
+| cost per trial | $0.016 | $0.026 (OCR text), $0.068 (budgeted widening) |
+
+The OCR backfill (`trialwatch source ocr`) took 5.5 min for 184 files: 3,414 picture pages, 10 readers.
+It changed page text in 95 of the 118 trials.
+
+The 35 new "not full" judgements rest on verified "narrative only" or "not analysed" quotes, or on "not
+found" in a document now read whole. Only 3 have gold labels: 2 agree and 1 is a borderline call on
+open-label endpoints. That is too few to call agreement; the gold short eval should be run on this branch
+before it is relied on. Before the drawn-shapes rule, one trial's "read whole" rested on 8 pages counted as
+read. Those turned out to be blank, but other pages like them in the sample were text drawn as outlines,
+which is why such pages are now pictures.

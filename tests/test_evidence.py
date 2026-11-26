@@ -626,6 +626,80 @@ def test_one_blank_page_within_the_allowance_still_counts_as_reading_the_whole_d
     assert strict.labels == {"undecided": 1}
 
 
+def trial_file(conn, trial):
+    return bytes(conn.execute(
+        "SELECT d.file_sha256 FROM core.document_current d JOIN core.trial_document l ON l.document_id = d.id"
+        " WHERE l.trial_id = %s", (trial,)).fetchone()[0])
+
+
+def test_pages_ocr_finds_no_picture_on_count_as_read_and_a_picture_without_text_does_not(conn):
+    """Two pages under the letters left the document unread (test above). OCR looks at them: a page that
+    is no picture has no other text than its own, so the document is read whole; a picture OCR could not
+    read may hold a result."""
+    trial = seed(conn, pages_with(["", ""]))
+    sha = trial_file(conn, trial)
+    assert core.files_for_ocr(conn, [trial], None, 1000, 200) == [sha]
+    assert core.files_for_ocr(conn, [trial], None, 3, 200) == []
+    cover, last = len(PAGES) + 1, len(PAGES) + 2
+    assert sorted(core.pages_under_letters(conn, sha, 200)) == [cover, last]
+    assert core.save_page_looks(conn, sha, {cover: core.PageLook(False), last: core.PageLook(False)}) == []
+    assert core.files_for_ocr(conn, [trial], None, 1000, 200) == []
+    summary = ev.run(conn, FakeClient(NOTHING), [trial], default_settings(), PROMPT)
+    assert summary.labels == {"not full": 1}
+
+
+def test_a_picture_ocr_could_not_read_still_leaves_the_document_unread(conn):
+    trial = seed(conn, pages_with(["", ""]))
+    cover, last = len(PAGES) + 1, len(PAGES) + 2
+    core.save_page_looks(conn, trial_file(conn, trial), {cover: core.PageLook(True), last: core.PageLook(True)})
+    summary = ev.run(conn, FakeClient(NOTHING), [trial], default_settings(), PROMPT)
+    assert summary.labels == {"undecided": 1}
+
+
+def test_text_read_from_a_picture_is_what_a_check_reads_and_names_the_trial_to_check_again(conn):
+    """The text layer stays as it was extracted (core.page, never changed); checks read the text OCR read
+    from a picture instead (core.page_text)."""
+    trial = seed(conn, pages_with([""]))
+    summary = ev.run(conn, FakeClient(GOOD), [trial], default_settings(), PROMPT)
+    assert current_judgement(conn, trial) == (summary.run_id, False)
+    sha = trial_file(conn, trial)
+    page = len(PAGES) + 1
+    table = "Colorectal transit time: mean 31.0 hours in the treated group. " * 6
+    assert core.save_page_looks(conn, sha, {page: core.PageLook(True, table, "tesseract 5")}) == [trial]
+    layer = conn.execute("SELECT text FROM core.page WHERE file_sha256 = %s AND page_no = %s", (sha, page)).fetchone()
+    assert layer == ("",)
+    read = conn.execute("SELECT text, extractor, is_picture, letters >= 200 FROM core.page_text"
+                        " WHERE file_sha256 = %s AND page_no = %s", (sha, page)).fetchone()
+    assert read == (table, "tesseract 5", True, True)
+    pages = core.trial_pages(conn, trial, ["results-summary"])
+    assert pages[-1].text == table and pages[-1].is_picture is True
+    # the judgement read less than there is now: outdated, so the refresh checks it again
+    assert current_judgement(conn, trial) == (summary.run_id, True)
+    assert core.rank_pages(conn, [sha], ["colorectal"], 10)[0][1] == page
+
+
+def test_pages_too_long_to_send_whole_are_widened_within_a_budget(conn):
+    """Every page is too long to send (max_text_chars): the questions not settled are asked again with
+    more of the best pages, up to widen_max_chars. A result found there counts; "not found" there is no
+    more than in the retrieved pages."""
+    trial = seed(conn, pages_with(APPENDIX))
+    narrow = {"whole_pages": 0, "top_k": 1, "max_text_chars": 10, "widen_top_k": 3, "widen_max_chars": 100_000}
+    client = FakeClient(NOTHING, GOOD)
+    summary = ev.run(conn, client, [trial], default_settings(narrow), PROMPT)
+    assert len(client.requests) == 2
+    widening = conn.execute("SELECT data FROM checks.step WHERE run_id = %s AND name = 'widening'",
+                            (summary.run_id,)).fetchone()[0]
+    assert widening["budgeted"] and widening["pages"]
+    # participants and endpoint 11 found; endpoint 12 not_analysed, cancelled not found: not the whole document
+    assert summary.labels == {"undecided": 1}
+    nothing_more = FakeClient(NOTHING, NOTHING)
+    assert ev.run(conn, nothing_more, [trial], default_settings(narrow), PROMPT).labels == {"undecided": 1}
+    # no room in the budget for a single page: nothing is asked again
+    none_fit = FakeClient(NOTHING)
+    ev.run(conn, none_fit, [trial], default_settings({**narrow, "widen_max_chars": 1}), PROMPT)
+    assert len(none_fit.requests) == 1
+
+
 def test_negative_in_retrieved_pages_is_asked_again_and_a_failed_widening_is_an_error(conn):
     trial = seed(conn, pages_with(APPENDIX))
     client = FakeClient(GOOD, api_error(anthropic.InternalServerError, "overloaded"))

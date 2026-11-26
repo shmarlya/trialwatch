@@ -39,7 +39,7 @@ from trialwatch.jobs.retry import PermanentError
 from trialwatch.jobs.steps import Outcome
 from trialwatch.sources import profile, registry, snapshot
 from trialwatch.sources.ctis_client import CT_NUMBER
-from trialwatch.trials import ingest
+from trialwatch.trials import ingest, pages
 
 app = typer.Typer(no_args_is_help=True, help="TrialWatch: EU clinical-trial results watchdog.")
 source_app = typer.Typer(no_args_is_help=True, help="Data sources (ADR-005): the registry, syncing lists, transferring evidence.")
@@ -360,6 +360,44 @@ def source_transfer(
         params["recheck"] = True
     with db.connect_system() as conn:
         _run_step(conn, "transfer", params)
+
+
+@source_app.command("ocr")
+def source_ocr(
+    ct_numbers: Annotated[list[str] | None, typer.Argument(help="EU CT numbers, e.g. 2025-522750-39-00")] = None,
+    from_file: Annotated[
+        Path | None, typer.Option("--file", exists=True, dir_okay=False, help="A file with one EU CT number per line")
+    ] = None,
+    all_trials: Annotated[bool, typer.Option("--all", help="Every trial's files not looked at yet")] = False,
+    changed_to: Annotated[
+        Path | None,
+        typer.Option("--changed-to", dir_okay=False, help="Write the EU CT numbers whose page text changed here, "
+                     "one per line (for `check evidence --file`)"),
+    ] = None,
+) -> None:
+    """OCR for files read before OCR ran: their pages with too few letters that are pictures (scans,
+    tables saved as images) get their text read from the picture, and pages that are no pictures are
+    marked so a check counts them as read. Files of the document kinds the default check reads, of at
+    most TRIALWATCH_OCR_MAX_PAGES pages. Transfers do this for each file they read; checks of the trials
+    whose text changed must be run again to see it."""
+    kinds = requirement_sets.load(check_settings.load(check_settings.DEFAULT).requirements).document_kinds
+    with db.connect_system() as conn:
+        trial_ids = None
+        if not all_trials:
+            trial_ids = _trials_to_judge(conn, ct_numbers, from_file)
+        try:
+            result = pages.ocr_missing(conn, trial_ids, kinds, progress=typer.echo)
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        names = core_db.trial_names(conn, sorted(result.trial_ids))
+    typer.echo(f"{_count(result.files, 'file')} looked at: {_count(result.image_pages, 'image page')}, "
+               f"{result.read_pages} read by OCR; page text changed in {_count(len(result.trial_ids), 'trial')}")
+    if changed_to is not None:
+        changed_to.write_text("".join(f"{names[trial_id]}\n" for trial_id in sorted(result.trial_ids)))
+        typer.echo(f"their EU CT numbers: {changed_to}")
+    _echo_failures(result.failed)
+    if result.failed:
+        raise typer.Exit(1)
 
 
 @source_app.command("locations")

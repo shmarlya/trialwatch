@@ -10,7 +10,7 @@ merged automatically: the record goes to the oldest of them and the pair is reco
 core.possible_duplicate for a person to decide.
 """
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -1239,19 +1239,33 @@ def file_content(conn: psycopg.Connection, sha256: bytes) -> bytes:
     return bytes(row[0])
 
 
+@dataclass(frozen=True)
+class PageLook:
+    """What OCR made of a page under the readable letters (trials/ocr.py): whether it is an image page,
+    and its text read from the picture with the engine that read it, when that replaces the text layer."""
+
+    is_picture: bool
+    text: str | None = None
+    extractor: str | None = None
+
+
 def save_pages(conn: psycopg.Connection, sha256: bytes, texts: Sequence[str], extractor: str,
-               fingerprint: bytes | None) -> list[bytes]:
-    """Store a file's page text and text fingerprint (None for a file without text, e.g. scanned);
-    returns other files with the same text."""
+               fingerprint: bytes | None, looks: Mapping[int, PageLook] | None = None) -> list[bytes]:
+    """Store a file's page text and text fingerprint (None for a file without text, e.g. scanned), with
+    what OCR made of its pages with too few letters when it ran (`looks`, by page number; the file is then
+    marked as looked at, core.file.ocr_at); returns other files with the same text."""
     with conn.transaction():
         with conn.cursor() as cur, cur.copy(
             "COPY core.page (file_sha256, page_no, text, extractor) FROM STDIN"
         ) as copy:
             for page_no, text in enumerate(texts, start=1):
                 copy.write_row((sha256, page_no, text, extractor))
+        if looks:
+            _save_looks(conn, sha256, looks)
         conn.execute(
-            "UPDATE core.file SET text_fingerprint = %s, pages_extracted_at = clock_timestamp() WHERE sha256 = %s",
-            (fingerprint, sha256),
+            "UPDATE core.file SET text_fingerprint = %s, pages_extracted_at = clock_timestamp(),"
+            " ocr_at = CASE WHEN %s THEN clock_timestamp() END WHERE sha256 = %s",
+            (fingerprint, looks is not None, sha256),
         )
         if fingerprint is None:
             return []
@@ -1262,6 +1276,73 @@ def save_pages(conn: psycopg.Connection, sha256: bytes, texts: Sequence[str], ex
     for row in rows:
         same.append(bytes(row[0]))
     return same
+
+
+def files_for_ocr(conn: psycopg.Connection, trial_ids: Sequence[int] | None, kinds: Sequence[str] | None,
+                  max_pages: int, min_letters: int) -> list[bytes]:
+    """Files of the current document versions (of these trials, or all; of these kinds, or all) whose text
+    is read but not looked at by OCR yet, with at most `max_pages` pages, some under `min_letters` letters."""
+    wanted_trials = None if trial_ids is None else list(trial_ids)
+    wanted_kinds = None if kinds is None else list(kinds)
+    rows = conn.execute(
+        """
+        SELECT f.sha256
+        FROM core.file f
+        WHERE f.pages_extracted_at IS NOT NULL AND f.ocr_at IS NULL
+          AND EXISTS (SELECT 1 FROM core.document_current d
+                      JOIN core.trial_document l ON l.document_id = d.id AND l.removed_at IS NULL
+                      WHERE d.file_sha256 = f.sha256
+                        AND (%(kinds)s::text[] IS NULL OR d.kind = ANY(%(kinds)s))
+                        AND (%(trials)s::bigint[] IS NULL OR l.trial_id = ANY(%(trials)s)))
+          AND (SELECT count(*) FROM core.page p WHERE p.file_sha256 = f.sha256) <= %(max_pages)s
+          AND EXISTS (SELECT 1 FROM core.page p WHERE p.file_sha256 = f.sha256 AND p.letters < %(min_letters)s)
+        ORDER BY f.sha256
+        """,
+        {"trials": wanted_trials, "kinds": wanted_kinds, "max_pages": max_pages, "min_letters": min_letters},
+    ).fetchall()
+    return [bytes(row[0]) for row in rows]
+
+
+def pages_under_letters(conn: psycopg.Connection, sha256: bytes, min_letters: int) -> dict[int, str]:
+    """The text layer of a file's pages with fewer than `min_letters` letters, by page number."""
+    rows = conn.execute(
+        "SELECT page_no, text FROM core.page WHERE file_sha256 = %s AND letters < %s ORDER BY page_no",
+        (sha256, min_letters),
+    ).fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
+def _save_looks(conn: psycopg.Connection, sha256: bytes, looks: Mapping[int, PageLook]) -> None:
+    with conn.cursor() as cur, cur.copy(
+        "COPY core.page_ocr (file_sha256, page_no, is_picture, text, extractor) FROM STDIN"
+    ) as copy:
+        for page_no in sorted(looks):
+            look = looks[page_no]
+            extractor = None
+            if look.text is not None:
+                extractor = look.extractor
+            copy.write_row((sha256, page_no, look.is_picture, look.text, extractor))
+
+
+def save_page_looks(conn: psycopg.Connection, sha256: bytes, looks: Mapping[int, PageLook]) -> list[int]:
+    """Store what OCR made of a file's pages read before it ran (core.page_ocr), and mark the file as looked
+    at; returns the trials linked to the file whose page text changed (a picture's text was read), to
+    check again."""
+    with conn.transaction():
+        if looks:
+            _save_looks(conn, sha256, looks)
+        conn.execute("UPDATE core.file SET ocr_at = clock_timestamp() WHERE sha256 = %s", (sha256,))
+        if not any(look.text is not None for look in looks.values()):
+            return []
+        rows = conn.execute(
+            """
+            SELECT DISTINCT l.trial_id FROM core.document_current d
+            JOIN core.trial_document l ON l.document_id = d.id AND l.removed_at IS NULL
+            WHERE d.file_sha256 = %s ORDER BY 1
+            """,
+            (sha256,),
+        ).fetchall()
+    return [row[0] for row in rows]
 
 
 # --- what checks read --------------------------------------------------------------------------
@@ -1316,6 +1397,9 @@ class Page:
     text: str
     document_version_id: int
     kind: str
+    # a page under the readable letters that is a picture (True), one that is not (False: its text layer
+    # is all it has), or not looked at by OCR (None); see core.page_ocr
+    is_picture: bool | None = None
 
 
 # The current version of each document of some kinds linked to a trial, numbered 1, 2, ... in a fixed
@@ -1337,8 +1421,8 @@ def trial_pages(conn: psycopg.Connection, trial_id: int, kinds: Sequence[str]) -
             f"""
             WITH docs AS ({_TRIAL_DOCUMENTS})
             SELECT p.file_sha256 AS file, docs.doc, docs.title, p.page_no, p.text,
-                   docs.version_id AS document_version_id, docs.kind
-            FROM docs JOIN core.page p ON p.file_sha256 = docs.file_sha256
+                   docs.version_id AS document_version_id, docs.kind, p.is_picture
+            FROM docs JOIN core.page_text p ON p.file_sha256 = docs.file_sha256
             ORDER BY docs.doc, p.page_no
             """,
             {"trial": trial_id, "kinds": list(kinds)},
@@ -1402,7 +1486,7 @@ def rank_pages(conn: psycopg.Connection, files: Sequence[bytes], terms: Sequence
     rows = conn.execute(
         """
         SELECT file_sha256, page_no, ts_rank(tsv, q)
-        FROM core.page, to_tsquery('simple', %s) q
+        FROM core.page_text, to_tsquery('simple', %s) q
         WHERE file_sha256 = ANY(%s) AND tsv @@ q
         ORDER BY ts_rank(tsv, q) DESC, file_sha256, page_no
         LIMIT %s

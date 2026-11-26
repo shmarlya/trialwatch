@@ -32,7 +32,7 @@ def test_a_name_is_never_a_path():
 def good_setup() -> dict:
     return {"description": "x", "model": "claude-test", "effort": "high", "method": "text", "prompt": "evidence",
             "requirements": "eu-ctr-results", "max_tokens": 100, "fallbacks": True, "whole_pages": 15, "top_k": 4,
-            "max_text_chars": 1000, "unreadable_pages_allowed": 1}
+            "max_text_chars": 1000, "unreadable_pages_allowed": 1, "widen_top_k": 20, "widen_max_chars": 1000}
 
 
 def test_a_good_setup_has_no_problems():

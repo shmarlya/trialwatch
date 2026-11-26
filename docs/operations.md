@@ -87,6 +87,12 @@ instead.
 
 One-off commands run in the same image: `docker compose run --rm web source list`.
 
+**OCR for files read before it** (once, after the release that brought OCR): transfers OCR each file they
+read, but files already stored keep only their text layer until `docker compose run --rm worker source ocr --all`
+looks at them (about a second per picture page, `TRIALWATCH_PDF_READERS` files at once; on Coolify, in the
+worker's terminal: `trialwatch source ocr --all`). A trial whose page text it changed has an outdated judgement,
+which the next refresh checks again.
+
 ## Coolify
 
 [compose.coolify.yaml](https://github.com/shmarlya/trialwatch/blob/main/compose.coolify.yaml) is a smaller stack

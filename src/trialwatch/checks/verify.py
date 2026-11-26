@@ -8,8 +8,10 @@ model read every page of the documents. Both tests lean towards "undecided" (a p
   token such as "NA" or "0" never verifies by turning up inside another word or number. Spacing may
   also differ inside words and numbers: a narrow table cell's text comes out of the PDF broken across
   lines ("469.\n49 (300\n.51"), and the model quotes it whole ("469.49 (300.51");
-- a page counts as read only when its text layer holds at least MIN_LETTERS letters: a scanned page
-  whose only text is a header or "Page 4 of 10" has a table the model never saw.
+- a page counts as read only when its text holds at least MIN_LETTERS letters: a scanned page whose
+  only text is a header or "Page 4 of 10" has a table the model never saw. Pages under that are looked
+  at by OCR (trials/ocr.py): a picture's text is read from it, and a page that is no picture (a cover, a
+  contents page) has no more text than its own, so it counts as read (was_read).
 """
 
 import re
@@ -163,26 +165,33 @@ def letters(text: str) -> int:
 
 
 def has_readable_text(page: Page) -> bool:
-    """The page's text layer holds enough letters for the model to have read its content."""
+    """The page's text holds enough letters for the model to have read its content."""
     return letters(page.text) >= MIN_LETTERS
+
+
+def was_read(page: Page) -> bool:
+    """The model read all the page has: its text has enough letters, or OCR found the page is no picture
+    (is_picture False: a cover, contents or signature page whose few words are all there is). A page under
+    the letters that is a picture, or that OCR has not looked at, may hold what its text lacks."""
+    return has_readable_text(page) or page.is_picture is False
 
 
 def every_page_readable(pages: list[Page]) -> bool:
     for page in pages:
-        if not has_readable_text(page):
+        if not was_read(page):
             return False
     return True
 
 
 def read_enough(pages: list[Page], unreadable_allowed: int) -> bool:
-    """Answers from these pages count as reading the whole document: some page is readable, and at
-    most `unreadable_allowed` are not (a cover, signature or contents page has too few letters, though
-    nothing on it can hold a result)."""
+    """Answers from these pages count as reading the whole document: some page has readable text, and
+    at most `unreadable_allowed` may not have been read (was_read: a page OCR has not looked at with too
+    few letters, often a cover or signature page, though nothing on it can hold a result)."""
     unreadable = 0
     for page in pages:
-        if not has_readable_text(page):
+        if not was_read(page):
             unreadable += 1
-    return unreadable <= unreadable_allowed and unreadable < len(pages)
+    return unreadable <= unreadable_allowed and some_page_readable(pages)
 
 
 def some_page_readable(pages: list[Page]) -> bool:

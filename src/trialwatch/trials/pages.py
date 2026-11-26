@@ -41,6 +41,7 @@ from pypdf import PdfReader
 from trialwatch import config, db
 from trialwatch.db import core
 from trialwatch.progress import Progress, report
+from trialwatch.trials import ocr
 
 
 EXTRACTOR = f"pypdf {version('pypdf')}"
@@ -71,6 +72,17 @@ CHILD_MB_PER_FILE_MB = 10
 CHILD_MIN_MB = 600
 # How often a thread waiting for its child looks whether the reading was interrupted
 STOP_CHECK_SECONDS = 1.0
+
+
+@dataclass
+class FileText:
+    """A file's page text as a child read it: the text layer of each page, and what OCR made of the pages
+    with too few letters (trials/ocr.py; None when OCR did not run: not installed, or a file of too many
+    pages), with the name and version of the OCR engine."""
+
+    texts: list[str] | None
+    looks: dict[int, ocr.Look] | None = None
+    ocr_extractor: str | None = None
 
 
 class FileNotRead(Exception):
@@ -201,7 +213,8 @@ def read_in_child(
     if outcome == "failed":
         log.warning("file %s not read: %s", short_sha, value)
         raise FileNotRead(value)
-    log.info("file %s read: %d pages (%s)", short_sha, len(value), _measured(measures))
+    read_pages = len(value.texts) if isinstance(value, FileText) else len(value)
+    log.info("file %s read: %d pages (%s)", short_sha, read_pages, _measured(measures))
     return value
 
 
@@ -245,7 +258,43 @@ def _child_reads(sha256: bytes, answer: Connection) -> None:
     except Exception as exc:  # a broken file: the parent records the message
         answer.send(("error", why_unreadable(content, exc), _measures(size, started)))
         return
-    answer.send(("pages", texts, _measures(size, started)))
+    answer.send(("pages", read_pictures(content, texts), _measures(size, started)))
+
+
+def read_pictures(content: bytes, texts: list[str]) -> FileText:
+    """The text layer, with what OCR makes of its pages under ocr.MIN_LETTERS letters, when OCR can run
+    on this file (tesseract installed, at most config.ocr_max_pages() pages). OCR failing leaves the file
+    as its text layer has it, for a later pass (`trialwatch source ocr`), never fails its reading."""
+    if not ocr.ocr_available() or len(texts) > config.ocr_max_pages():
+        return FileText(texts)
+    try:
+        looks = ocr.look_at_pages(content, ocr.pages_to_look_at(texts), config.ocr_languages())
+        return FileText(texts, looks, ocr.extractor())
+    except Exception as exc:  # the text layer is still the file's text
+        log.warning("OCR failed (%s: %s); the file keeps its text layer only", type(exc).__name__, exc)
+        return FileText(texts)
+
+
+def _child_looks(sha256: bytes, answer: Connection) -> None:
+    """In the child, for a file read before OCR ran (`trialwatch source ocr`): fetch the file and its pages
+    under ocr.MIN_LETTERS letters, and send ("pages", FileText(None, looks, extractor), measures)."""
+    _first_to_go()
+    started = time.monotonic()
+    size = 0
+    try:
+        with psycopg.connect(config.database_url(), **db.LIVENESS) as conn:
+            content = core.file_content(conn, sha256)
+            layer = core.pages_under_letters(conn, sha256, ocr.MIN_LETTERS)
+        size = len(content)
+        looks = ocr.look_at_pages(content, sorted(layer), config.ocr_languages())
+        stored = page_looks(layer, looks, ocr.extractor())
+    except MemoryError as exc:
+        answer.send(("failed", f"{type(exc).__name__}: {exc}", _measures(size, started)))
+        return
+    except Exception as exc:  # the parent records the message
+        answer.send(("failed", f"{type(exc).__name__}: {exc}", _measures(size, started)))
+        return
+    answer.send(("pages", stored, _measures(size, started)))
 
 
 def _measures(size: int, started: float) -> dict:
@@ -279,6 +328,10 @@ class Read:
     sha256: bytes
     texts: list[str] | None = None
     error: Exception | None = None
+    # what OCR made of the pages under ocr.MIN_LETTERS letters, when it ran: as a file is read (FileText),
+    # or what to store of them in the OCR pass (_child_looks)
+    looks: dict[int, ocr.Look] | dict[int, core.PageLook] | None = None
+    ocr_extractor: str | None = None
 
 
 def read_in_children(
@@ -327,11 +380,17 @@ def read_in_children(
                 sha, cost = running.pop(future)
                 in_use -= cost
                 try:
-                    texts = future.result()
+                    value = future.result()
                 except Exception as exc:  # recorded by the caller, as any file that can't be read
                     yield Read(sha, error=exc)
                     continue
-                yield Read(sha, texts=texts)
+                if isinstance(value, FileText):
+                    yield Read(sha, texts=value.texts, looks=value.looks, ocr_extractor=value.ocr_extractor)
+                elif isinstance(value, dict):
+                    # the OCR pass (_child_looks): what to store of each page looked at
+                    yield Read(sha, looks=value)
+                else:
+                    yield Read(sha, texts=value)
     finally:
         halt.set()
         pool.shutdown(wait=True, cancel_futures=True)
@@ -399,7 +458,15 @@ def _record(conn: psycopg.Connection, result: PagesResult, outcome: Read, progre
         if outcome.error is not None:
             raise outcome.error
         texts = outcome.texts
-        same = core.save_pages(conn, outcome.sha256, texts, EXTRACTOR, text_fingerprint(texts))
+        # the fingerprint is of the text layer only: OCR may read the same picture a little differently
+        same = core.save_pages(
+            conn,
+            outcome.sha256,
+            texts,
+            EXTRACTOR,
+            text_fingerprint(texts),
+            page_looks(texts, outcome.looks, outcome.ocr_extractor),
+        )
     except (UnreadableFile, FileNotRead) as exc:  # the message already says what went wrong
         result.failed[short_sha] = str(exc)
         if isinstance(exc, UnreadableFile):
@@ -419,6 +486,76 @@ def _record(conn: psycopg.Connection, result: PagesResult, outcome: Read, progre
             others.append(other.hex()[:12])
         result.same_text[short_sha] = others
     report(progress, f"{short_sha}: {len(texts)} pages")
+
+
+def page_looks(
+    texts: Sequence[str] | Mapping[int, str], looks: dict[int, ocr.Look] | None, extractor: str | None
+) -> dict[int, core.PageLook] | None:
+    """What to store of OCR's looks (None: OCR did not run): for each page looked at, whether it is an
+    image page, and the text read from its picture when that has more letters than its text layer
+    (`texts`: every page's, in order, or some pages' by number)."""
+    if looks is None:
+        return None
+    stored = {}
+    for page_no, look in looks.items():
+        text = None
+        if look.text is not None:
+            if isinstance(texts, Mapping):
+                layer = texts.get(page_no, "")
+            else:
+                layer = texts[page_no - 1] if 0 < page_no <= len(texts) else ""
+            if ocr.letters(look.text) > ocr.letters(layer):
+                text = look.text
+        stored[page_no] = core.PageLook(look.is_picture, text, extractor)
+    return stored
+
+
+@dataclass
+class OcrResult:
+    files: int = 0
+    # pages found to be pictures, and of them those whose text now comes from OCR
+    image_pages: int = 0
+    read_pages: int = 0
+    trial_ids: set[int] = field(default_factory=set)
+    failed: dict[str, str] = field(default_factory=dict)
+
+
+def ocr_missing(
+    conn: psycopg.Connection,
+    trial_ids: Sequence[int] | None = None,
+    kinds: Sequence[str] | None = None,
+    progress: Progress = None,
+    readers: int | None = None,
+) -> OcrResult:
+    """OCR for the files read before OCR ran (or without it): their pages under ocr.MIN_LETTERS letters,
+    of these trials or all, of these document kinds or all, files of at most config.ocr_max_pages() pages.
+    Child processes do it, `readers` at once; returns the trials whose page text changed (to check again)."""
+    result = OcrResult()
+    if not ocr.ocr_available():
+        raise RuntimeError("tesseract is not installed here: OCR can't run (the Docker image has it)")
+    files = core.files_for_ocr(conn, trial_ids, kinds, config.ocr_max_pages(), ocr.MIN_LETTERS)
+    if not files:
+        return result
+    if readers is None:
+        readers = config.pdf_readers()
+    sizes = core.file_sizes(conn, files)
+    read = functools.partial(read_in_child, child_reads=_child_looks)
+    for outcome in read_in_children(files, sizes, readers, config.pdf_memory_mb(), read=read):
+        short_sha = outcome.sha256.hex()[:12]
+        if outcome.error is not None:
+            result.failed[short_sha] = str(outcome.error)
+            report(progress, f"{short_sha}: failed: {result.failed[short_sha]}")
+            continue
+        stored = outcome.looks or {}
+        changed = core.save_page_looks(conn, outcome.sha256, stored)
+        result.files += 1
+        images = [look for look in stored.values() if look.is_picture]
+        read_here = [look for look in images if look.text is not None]
+        result.image_pages += len(images)
+        result.read_pages += len(read_here)
+        result.trial_ids.update(changed)
+        report(progress, f"{short_sha}: {len(images)} image pages, {len(read_here)} read by OCR")
+    return result
 
 
 def _read_here(conn: psycopg.Connection, sha256: bytes, extract: Callable[[bytes], list[str]] | None) -> list[str]:

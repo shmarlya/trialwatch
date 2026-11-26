@@ -131,7 +131,12 @@ answer means the trial doesn't exist (`TrialNotFound`).
   `core.document_version` says which file it had from when, keeping replaced ones (CTIS serves only the current
   version, so every version we download is kept). `core.trial_document` links documents to trials with basis and
   confidence. Each file's page text is extracted once with pypdf (`core.page`, `trials/pages.py`); only PDFs are
-  read. Each file is read in a child process of its own: pypdf needs about ten times a file's size while it reads
+  read. Pages with under 200 letters are then looked at by OCR in the same child (`trials/ocr.py`, files of at
+  most `TRIALWATCH_OCR_MAX_PAGES`, default 1,000): a page that is a picture (an image over 30% of it, or 50 or more drawn shapes: a chart, text drawn as
+  outlines) is drawn with pypdfium2 at 200
+  dpi and read with tesseract (`TRIALWATCH_OCR_LANGUAGES`, default `eng`; about a second a page, at most 400
+  such pages a file), and `core.page_ocr` keeps what it read, beside the text layer, which never changes; checks
+  read `core.page_text`, the OCR text where there is one. Files read before OCR: `trialwatch source ocr --all`. Each file is read in a child process of its own: pypdf needs about ten times a file's size while it reads
   (a 38 MB, 3,000-page CTIS study report: 420 MB), and the child gives that memory back when it ends. A child that
   runs out of memory or takes over 20 minutes fails only its file, like a broken PDF. A trial's files are read
   two at a time in the worker (pypdf is pure Python: one process uses one CPU), and a file starts only when
@@ -242,7 +247,9 @@ erDiagram
 | `core.evidence_status` (view) | each trial's state at each source: not transferred, failed, stale, complete |
 | `core.trial_location` | where a trial runs: country, city, postcode, site, status there; no people |
 | `core.file` | the bytes, once per sha256 (never changed), with a text fingerprint |
-| `core.page` | text of each page of a file (never changed), with a full-text index |
+| `core.page` | text of each page of a file as its text layer has it (never changed), with a full-text index |
+| `core.page_ocr` | what OCR made of a page under 200 letters: a picture or not (`is_picture`), the text read from it (never changed) |
+| `core.page_text` (view) | each page's text as checks read it: OCR's where it read a picture, else the text layer |
 | `core.document_kind` | our document kinds: results-summary, lay-summary, study-report, publication, protocol, other (`has_results`) |
 | `core.document` | a document as its source identifies it (CTIS uuid, DOI, upload id), with its kind |
 | `core.document_version` | which file a document had from when; `replaced_at` NULL = current |

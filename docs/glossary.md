@@ -109,7 +109,7 @@ See [sources and gold](sources-and-gold.md).
 | **Document version** | CTIS keeps a document's uuid across versions and raises its systemVersion when the file is replaced. CTIS serves only the current one, so every version we download is kept, and each transfer compares the bytes again. |
 | **Result document** | A document of a kind that reports results: a summary of results, a lay summary, a study report, a publication. |
 | **Presigned link** | A temporary download URL with its permission built in. CTIS answers a document download with one (Amazon S3, about 5 minutes), so the file is fetched straight away. |
-| **Page text** | The text of each page of a stored PDF (`core.page`), extracted once with pypdf; what retrieval searches and quotes are checked against. |
+| **Page text** | The text of each page of a stored PDF (`core.page`), extracted once with pypdf, or for a page that is a picture read by OCR (`core.page_ocr`); what retrieval searches and quotes are checked against (`core.page_text`). |
 | **Organisation, trial sponsor** | A sponsor stored once however many trials it sponsors; each trial has one primary sponsor and any co-sponsors. |
 | **Trial location** | Where a trial runs, as a source says: a site (organisation, city, postcode) in a country, or a country with no site. People are never stored. |
 | **Actor** | Who changed data (`core.actor`): a person or a process. Actor 1 is `trialwatch` itself. |

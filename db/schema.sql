@@ -526,6 +526,24 @@ CREATE VIEW core.document_current AS
 
 
 --
+-- Name: page_ocr; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.page_ocr (
+    file_sha256 bytea NOT NULL,
+    page_no integer NOT NULL,
+    is_picture boolean NOT NULL,
+    text text,
+    extractor text,
+    tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, COALESCE(text, ''::text))) STORED,
+    letters integer GENERATED ALWAYS AS (length(regexp_replace(COALESCE(text, ''::text), '[^[:alpha:]]'::text, ''::text, 'g'::text))) STORED,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT page_ocr_check CHECK (((text IS NULL) = (extractor IS NULL))),
+    CONSTRAINT page_ocr_check1 CHECK (((text IS NULL) OR is_picture))
+);
+
+
+--
 -- Name: trial_document; Type: TABLE; Schema: core; Owner: -
 --
 
@@ -632,7 +650,10 @@ CREATE VIEW checks.judgement_current AS
              JOIN core.document_current d ON ((d.id = l.document_id)))
           WHERE ((l.trial_id = j.trial_id) AND (l.removed_at IS NULL) AND (NOT (d.version_id = ANY (j.document_versions))) AND (d.kind IN ( SELECT jsonb_array_elements_text(((r.requirements_text)::jsonb -> 'document_kinds'::text)) AS jsonb_array_elements_text))))) OR (EXISTS ( SELECT
            FROM core.trial_record_current c
-          WHERE ((c.trial_id = j.trial_id) AND (c.id IS DISTINCT FROM j.trial_record_id) AND (c.fetched_at > r.started_at))))) AS outdated,
+          WHERE ((c.trial_id = j.trial_id) AND (c.id IS DISTINCT FROM j.trial_record_id) AND (c.fetched_at > r.started_at)))) OR (EXISTS ( SELECT
+           FROM (core.document_version v
+             JOIN core.page_ocr o ON ((o.file_sha256 = v.file_sha256)))
+          WHERE ((v.id = ANY (j.document_versions)) AND (o.text IS NOT NULL) AND (o.created_at > r.started_at))))) AS outdated,
     r.finished_at AS published_at,
     j.agreement,
     j.withdrawn_at,
@@ -917,6 +938,7 @@ CREATE TABLE core.file (
     pages_extracted_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     created_by bigint NOT NULL,
+    ocr_at timestamp with time zone,
     CONSTRAINT file_check CHECK ((size_bytes = length(content))),
     CONSTRAINT file_sha256_check CHECK ((length(sha256) = 32)),
     CONSTRAINT file_text_fingerprint_check CHECK ((length(text_fingerprint) = 32))
@@ -1089,6 +1111,28 @@ CREATE TABLE core.page (
     letters integer GENERATED ALWAYS AS (length(regexp_replace(text, '[^[:alpha:]]'::text, ''::text, 'g'::text))) STORED,
     CONSTRAINT page_page_no_check CHECK ((page_no >= 1))
 );
+
+
+--
+-- Name: page_text; Type: VIEW; Schema: core; Owner: -
+--
+
+CREATE VIEW core.page_text AS
+ SELECT p.file_sha256,
+    p.page_no,
+    COALESCE(o.text, p.text) AS text,
+    COALESCE(o.extractor, p.extractor) AS extractor,
+        CASE
+            WHEN (o.text IS NOT NULL) THEN o.tsv
+            ELSE p.tsv
+        END AS tsv,
+        CASE
+            WHEN (o.text IS NOT NULL) THEN o.letters
+            ELSE p.letters
+        END AS letters,
+    o.is_picture
+   FROM (core.page p
+     LEFT JOIN core.page_ocr o ON (((o.file_sha256 = p.file_sha256) AND (o.page_no = p.page_no))));
 
 
 --
@@ -2217,6 +2261,14 @@ ALTER TABLE ONLY core.organisation
 
 
 --
+-- Name: page_ocr page_ocr_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.page_ocr
+    ADD CONSTRAINT page_ocr_pkey PRIMARY KEY (file_sha256, page_no);
+
+
+--
 -- Name: page page_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -2903,6 +2955,13 @@ CREATE TRIGGER page_never_changes BEFORE DELETE OR UPDATE ON core.page FOR EACH 
 
 
 --
+-- Name: page_ocr page_ocr_never_changes; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER page_ocr_never_changes BEFORE DELETE OR UPDATE ON core.page_ocr FOR EACH ROW EXECUTE FUNCTION core.refuse_change();
+
+
+--
 -- Name: possible_duplicate possible_duplicate_audit; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -3333,6 +3392,14 @@ ALTER TABLE ONLY core.organisation
 
 ALTER TABLE ONLY core.page
     ADD CONSTRAINT page_file_sha256_fkey FOREIGN KEY (file_sha256) REFERENCES core.file(sha256);
+
+
+--
+-- Name: page_ocr page_ocr_file_sha256_page_no_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.page_ocr
+    ADD CONSTRAINT page_ocr_file_sha256_page_no_fkey FOREIGN KEY (file_sha256, page_no) REFERENCES core.page(file_sha256, page_no);
 
 
 --
@@ -3776,4 +3843,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261124190000'),
     ('20261125100000'),
     ('20261125110000'),
-    ('20261125120000');
+    ('20261125120000'),
+    ('20261126100000');

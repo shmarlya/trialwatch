@@ -15,6 +15,8 @@ The settings (each read by a function below):
   the EU/EEA, where CTIS trials have sites)
 - TRIALWATCH_PDF_READERS / TRIALWATCH_PDF_MEMORY_MB: how many PDFs the worker reads at once, and the
   memory their child processes may take together (trialwatch.trials.pages)
+- TRIALWATCH_OCR_MAX_PAGES / TRIALWATCH_OCR_LANGUAGES: which files get OCR for their image pages, and
+  in which languages (trialwatch.trials.ocr)
 - TRIALWATCH_STUCK_MINUTES: how long a job may go without moving before the worker restarts
   (trialwatch.jobs.worker)
 """
@@ -144,6 +146,22 @@ def pdf_memory_mb() -> int:
     default 1400 of the worker's 2 GB): a file starts only when its estimate fits beside those being
     read. A file larger than the whole budget is still read, alone."""
     return _positive_int("TRIALWATCH_PDF_MEMORY_MB", 1400)
+
+
+def ocr_max_pages() -> int:
+    """Files with more pages than this get no OCR (TRIALWATCH_OCR_MAX_PAGES, default 1000): a study report
+    of thousands of pages with its listings and forms as pictures would take hours, and a check never
+    reads such a file whole anyway (checks/configs: max_text_chars)."""
+    return _positive_int("TRIALWATCH_OCR_MAX_PAGES", 1000)
+
+
+def ocr_languages() -> str:
+    """Tesseract's languages for OCR, joined by + (TRIALWATCH_OCR_LANGUAGES, default "eng"; each must be
+    installed, see the Dockerfile). Each one more makes a page slower to read."""
+    configured = os.environ.get("TRIALWATCH_OCR_LANGUAGES", "").strip()
+    if not configured:
+        return "eng"
+    return configured
 
 
 def stuck_minutes() -> int:

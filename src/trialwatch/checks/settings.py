@@ -38,6 +38,8 @@ FIELDS = {
     "top_k": int,
     "max_text_chars": int,
     "unreadable_pages_allowed": int,
+    "widen_top_k": int,
+    "widen_max_chars": int,
 }
 
 
@@ -68,12 +70,18 @@ class Settings:
     # its pages have too few letters to have been read (a cover or signature page), so "not found"
     # can mean "not reported"
     unreadable_pages_allowed: int
+    # widening when every page is too long to send (max_text_chars): the widen_top_k best pages per
+    # question, each with its neighbours, up to widen_max_chars of text in all. A result found there
+    # counts; "not found" there still isn't the whole document
+    widen_top_k: int
+    widen_max_chars: int
 
     def params(self) -> dict:
         """What checks.run keeps besides its own columns (model, effort, prompt, requirements)."""
         return {"config": self.config, "method": self.method, "max_tokens": self.max_tokens,
                 "fallbacks": self.fallbacks, "whole_pages": self.whole_pages, "top_k": self.top_k,
-                "max_text_chars": self.max_text_chars, "unreadable_pages_allowed": self.unreadable_pages_allowed}
+                "max_text_chars": self.max_text_chars, "unreadable_pages_allowed": self.unreadable_pages_allowed,
+                "widen_top_k": self.widen_top_k, "widen_max_chars": self.widen_max_chars}
 
     def summary(self) -> str:
         """The setup in one line, for forms and progress."""
@@ -116,7 +124,7 @@ def _problems(name: str, data: object) -> list[str]:
         problems.append(f"no prompt {data['prompt']!r} in checks/prompts/")
     if data["requirements"] not in set_names():
         problems.append(f"no requirement set {data['requirements']!r} in checks/requirement_sets/")
-    for field in ("max_tokens", "top_k", "max_text_chars"):
+    for field in ("max_tokens", "top_k", "max_text_chars", "widen_top_k", "widen_max_chars"):
         if data[field] < 1:
             problems.append(f"{field} must be 1 or more")
     for field in ("whole_pages", "unreadable_pages_allowed"):
@@ -142,7 +150,8 @@ def load(name: str) -> Settings:
         method=data["method"], prompt=data["prompt"], requirements=data["requirements"],
         max_tokens=data["max_tokens"], fallbacks=data["fallbacks"], whole_pages=data["whole_pages"],
         top_k=data["top_k"], max_text_chars=data["max_text_chars"],
-        unreadable_pages_allowed=data["unreadable_pages_allowed"],
+        unreadable_pages_allowed=data["unreadable_pages_allowed"], widen_top_k=data["widen_top_k"],
+        widen_max_chars=data["widen_max_chars"],
     )
 
 

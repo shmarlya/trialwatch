@@ -90,10 +90,10 @@ def _trial_rows(published_only: bool) -> str:
               JOIN core.document_kind k ON k.code = d.kind AND k.has_results
              WHERE l.trial_id = t.id AND l.removed_at IS NULL) AS results_documents,
            (SELECT count(*)::int FROM core.trial_document l JOIN core.document_current d ON d.id = l.document_id
-              JOIN core.page p ON p.file_sha256 = d.file_sha256
+              JOIN core.page_text p ON p.file_sha256 = d.file_sha256
              WHERE l.trial_id = t.id AND l.removed_at IS NULL AND d.kind = 'results-summary') AS pages,
            (SELECT count(*)::int FROM core.trial_document l JOIN core.document_current d ON d.id = l.document_id
-              JOIN core.page p ON p.file_sha256 = d.file_sha256
+              JOIN core.page_text p ON p.file_sha256 = d.file_sha256
              WHERE l.trial_id = t.id AND l.removed_at IS NULL AND d.kind = 'results-summary'
                AND {_READABLE}) AS readable_pages,
            jc.label, jc.run_id AS label_run, jc.outdated AS label_outdated,
@@ -247,8 +247,8 @@ def trial_documents(conn: psycopg.Connection, trial_id: int) -> list[DocumentRow
             SELECT d.id, d.kind, k.label AS kind_label, d.title, d.language, d.version,
                    (SELECT count(*)::int FROM core.document_version v WHERE v.document_id = d.id) AS versions,
                    d.fetched_at, d.file_sha256 AS sha256, f.size_bytes::int AS size_bytes,
-                   (SELECT count(*)::int FROM core.page p WHERE p.file_sha256 = d.file_sha256) AS pages,
-                   (SELECT count(*)::int FROM core.page p WHERE p.file_sha256 = d.file_sha256 AND {_READABLE})
+                   (SELECT count(*)::int FROM core.page_text p WHERE p.file_sha256 = d.file_sha256) AS pages,
+                   (SELECT count(*)::int FROM core.page_text p WHERE p.file_sha256 = d.file_sha256 AND {_READABLE})
                        AS readable_pages,
                    l.basis, src.code AS link_source, l.confidence, l.created_at AS linked_at, a.name AS linked_by
             FROM core.trial_document l
@@ -273,7 +273,7 @@ class PageText:
 def file_pages(conn: psycopg.Connection, sha256: bytes) -> list[PageText]:
     with conn.cursor(row_factory=class_row(PageText)) as cur:
         return cur.execute(
-            "SELECT page_no, text FROM core.page WHERE file_sha256 = %s ORDER BY page_no", (sha256,)
+            "SELECT page_no, text FROM core.page_text WHERE file_sha256 = %s ORDER BY page_no", (sha256,)
         ).fetchall()
 
 
@@ -854,7 +854,7 @@ def trial_choices(conn: psycopg.Connection, trial_ids: list[int], kinds: list[st
             SELECT t.id, {_NAME} AS name,
                    coalesce(reg.r->>'public_title', reg.r->>'full_title') AS title,
                    (SELECT count(*)::int FROM core.trial_document l JOIN core.document_current d ON d.id = l.document_id
-                      JOIN core.page p ON p.file_sha256 = d.file_sha256
+                      JOIN core.page_text p ON p.file_sha256 = d.file_sha256
                      WHERE l.trial_id = t.id AND l.removed_at IS NULL AND d.kind = ANY(%(kinds)s)
                        AND {_READABLE}) AS readable_pages,
                    jc.label

@@ -153,6 +153,38 @@ def questions_to_widen(questions: list[Question], first_answers: dict[str, dict]
     return retry
 
 
+def budgeted_pages(conn: psycopg.Connection, pages: list[Page], questions: list[Question],
+                   settings: Settings) -> list[Page]:
+    """The pages to ask these questions with when every page is too long to send: each question's
+    settings.widen_top_k best pages with their neighbours, taken question by question, rank by rank, while
+    their text stays within settings.widen_max_chars; in the documents' order."""
+    chosen_by_question = []
+    for question in questions:
+        found = search(conn, pages, search_query_for(question), settings.widen_top_k)
+        chosen_by_question.append(found.chosen)
+    taken: set[tuple[bytes, int]] = set()
+    total = 0
+    depth = 0
+    while any(depth < len(chosen) for chosen in chosen_by_question):
+        for chosen in chosen_by_question:
+            if depth >= len(chosen):
+                continue
+            page = chosen[depth]
+            ref = (page.file, page.page_no)
+            if ref in taken:
+                continue
+            if total + len(page.text) > settings.widen_max_chars:
+                continue
+            taken.add(ref)
+            total += len(page.text)
+        depth += 1
+    kept = []
+    for page in pages:
+        if (page.file, page.page_no) in taken:
+            kept.append(page)
+    return kept
+
+
 def total_text_length(pages: list[Page]) -> int:
     total = 0
     for page in pages:
@@ -291,13 +323,20 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
                                requirement_set.not_reported_kinds | requirement_set.open_kinds)
     widened_keys = set()
     fits = total_text_length(pages) <= settings.max_text_chars
+    widened_pages = pages
+    widened_whole = readable
     if retry and not fits:
-        trace.add("widening", {"skipped": "the text of every page is too long to send", "questions":
-                               question_keys(retry)})
-    if retry and fits:
-        second_request = build_request(settings, prompt, pages, retry, context)
+        # too long to send whole (a study report of thousands of pages): many more of the best pages per
+        # question instead, so a result retrieval missed may still be found; "not found" there is not the
+        # whole document
+        widened_pages = budgeted_pages(conn, pages, retry, settings)
+        widened_whole = False
+        trace.add("widening", {"budgeted": "the text of every page is too long to send", "questions":
+                               question_keys(retry), "pages": tracing.page_refs(widened_pages)})
+    if retry and widened_pages:
+        second_request = build_request(settings, prompt, widened_pages, retry, context)
         again, again_answers = ask(client, second_request)
-        trace.add("call", tracing.call_data(2, settings, pages, retry), again.duration_ms)
+        trace.add("call", tracing.call_data(2, settings, widened_pages, retry), again.duration_ms)
         count_call(result, 2, again, request_for_trace(second_request))
         if again.error:
             # recorded, not dropped: judging on the first answers alone would pass a failed call off as a
@@ -306,7 +345,12 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
             return None
         for question in retry:
             if question.key in again_answers:
-                answers[question.key] = (again_answers[question.key], readable)
+                answer = again_answers[question.key]
+                if not widened_whole and found_value(answer.get("found")) is not True \
+                        and found_value(answers.get(question.key, ({}, False))[0].get("found")) is True:
+                    # a budgeted widening that found nothing never overturns a first answer that did
+                    continue
+                answers[question.key] = (answer, widened_whole)
                 widened_keys.add(question.key)
         result.widened = len(widened_keys)
 

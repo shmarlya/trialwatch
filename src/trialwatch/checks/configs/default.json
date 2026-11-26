@@ -10,5 +10,7 @@
   "whole_pages": 15,
   "top_k": 4,
   "max_text_chars": 1600000,
-  "unreadable_pages_allowed": 1
+  "unreadable_pages_allowed": 1,
+  "widen_top_k": 20,
+  "widen_max_chars": 400000
 }

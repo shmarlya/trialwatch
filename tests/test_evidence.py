@@ -339,7 +339,7 @@ def test_counts_as_results_tables_give_them_and_in_words():
     assert requirements.participant_numbers("Actual enrolment: 166") == [166]
     assert requirements.participant_numbers("Patients treated, n 23") == [23]
     assert requirements.participant_numbers("Subjects enrolled 168 (100%)") == [168]
-    assert requirements.participant_numbers("Randomised 82 Treated 80") == [82]
+    assert requirements.participant_numbers("Randomised 82 Treated 80") == [82, 80]
     # a number found by two patterns counts once
     assert requirements.participant_numbers("Number of subjects enrolled: 168") == [168]
     # numbers in words, right before the people
@@ -349,6 +349,20 @@ def test_counts_as_results_tables_give_them_and_in_words():
     # an age range in a table's row label is not the count after it
     assert requirements.participant_numbers("Adults (18-64 years) 31 33 36 34 134") == [31]
     assert requirements.participant_numbers("Worldwide total number of subjects 99") == [99]
+    # forms prod answers gave that were missed (evals/research/undecided-2026-11.md): the EU results form,
+    # table labels that don't name the people, a table's n (%), compound number words
+    assert requirements.participant_numbers("Total: worldwide 31") == [31]
+    assert requirements.participant_numbers("Actual number included worldwide 517") == [517]
+    assert requirements.participant_numbers("Analyzed: 40 (21 in Arm A, 19 in Arm B)") == [40]
+    assert requirements.participant_numbers("Exposed in phase 1a: 21") == [21]
+    assert requirements.participant_numbers("Full Analysis Set 14 (100) 16 (100)") == [14]
+    assert requirements.participant_numbers("Started 149 148 148") == [149]
+    assert requirements.participant_numbers("Total Trial, n (%) 92 (100%)") == [92]
+    assert requirements.participant_numbers("Seventy-seven subjects were treated in Part A") == [77]
+    assert requirements.participant_numbers("Sixty four participants were screened") == [64]
+    assert requirements.participant_numbers("Seventy patients") == [70]
+    assert requirements.participant_numbers("nombre de personnes analysées : 149") == [149]
+    assert requirements.participant_numbers("20 healthy female and male participants were included") == [20]
     # in the other languages of results documents
     assert requirements.participant_numbers("De un total de 53 pacientes incluidas en el estudio, 49 formaron") == [53, 49]
     assert requirements.participant_numbers("Le nombre exact de participants inclus dans l'essai clinique dans "
@@ -446,28 +460,62 @@ def test_a_requirement_set_the_rules_would_misread_is_refused(tmp_path, monkeypa
     write_set(tmp_path, "both", both)
     with pytest.raises(ValueError, match="not_analysed can't mean both not reported and open"):
         requirements.load("both")
+    reported_and_open = json.loads(SET.text)
+    reported_and_open["name"] = "reported-and-open"
+    reported_and_open["open_kinds"] = ["partial_result"]
+    write_set(tmp_path, "reported-and-open", reported_and_open)
+    with pytest.raises(ValueError, match="partial_result can't mean both reported and open"):
+        requirements.load("reported-and-open")
 
 
-def test_a_result_that_could_not_exist_or_is_only_partly_there_is_left_to_a_person():
-    """A stage of the trial that never enrolled anyone has no result to report; an endpoint with data for
-    only some of its components is not fully there either: neither is an accusation nor clears the trial."""
-    assert SET.open_kinds == {"not_conducted", "partial_result"}
+def test_a_quote_on_a_page_next_to_the_cited_one_verifies_and_names_that_page():
+    pages = [core.Page(b"f", 1, "CSR", n, text, 1, "study-report") for n, text in
+             ((4, "Methods only"), (5, "Overall response rate was 81.5% (95% CI 73.5 to 87.9)"), (6, "Safety"),
+              (9, "Overall response rate was 81.5% (95% CI 73.5 to 87.9)"))]
+    by_ref = {(page.doc, page.page_no): page for page in pages}
+    quote = "Overall response rate was 81.5%"
+    cited_right = ev.evidence_from_answer("endpoint:1", answer("endpoint:1", quote=quote, page=5), True, by_ref)
+    assert cited_right.verified and cited_right.page.page_no == 5 and cited_right.cited_page_no is None
+    off_by_one = ev.evidence_from_answer("endpoint:1", answer("endpoint:1", quote=quote, page=4), True, by_ref)
+    assert off_by_one.verified and off_by_one.page.page_no == 5 and off_by_one.cited_page_no == 4
+    # too far from the cited page: not verified, the cited page kept
+    too_far = ev.evidence_from_answer("endpoint:1", answer("endpoint:1", quote=quote, page=1), True,
+                                      {key: page for key, page in by_ref.items() if key[1] != 5})
+    assert not too_far.verified and too_far.page is None
+
+
+def test_a_result_that_could_not_exist_is_left_to_a_person():
+    """A stage of the trial that never enrolled anyone has no result to report: neither an accusation nor
+    clearing the trial."""
+    assert SET.open_kinds == {"not_conducted"}
     questions = requirements.questions_for(SET, REGISTERED)
-    for kind in ("not_conducted", "partial_result"):
-        evidence = {"participants": _evidence("participants", quote="24 participants"),
-                    "cancelled": _evidence("cancelled", found=False, verified=False),
-                    "endpoint:11": _evidence("endpoint:11", quote="52.1 hours"),
-                    "endpoint:12": _evidence("endpoint:12", kind=kind, quote="No subjects entered Part B")}
-        judged, trace = requirements.judge(SET, questions, evidence)
-        assert judged["parts"]["outcomes"] is None and judged["label"] == "undecided"
-        assert trace["endpoint:12"] == {"value": None, "rule": f"verified {kind}: left for a person"}
-    # first seen on retrieved pages, it is asked again with every page: the rest may be on a page not shown
+    evidence = {"participants": _evidence("participants", quote="24 participants"),
+                "cancelled": _evidence("cancelled", found=False, verified=False),
+                "endpoint:11": _evidence("endpoint:11", quote="52.1 hours"),
+                "endpoint:12": _evidence("endpoint:12", kind="not_conducted", quote="No subjects entered Part B")}
+    judged, trace = requirements.judge(SET, questions, evidence)
+    assert judged["parts"]["outcomes"] is None and judged["label"] == "undecided"
+    assert trace["endpoint:12"] == {"value": None, "rule": "verified not_conducted: left for a person"}
+
+
+def test_a_partial_result_counts_as_reported():
+    """An endpoint with data for some of its components (adverse events counted, vital signs only in
+    words) is reported, as the gold reviewers judged it; it is neither asked again nor left to a person."""
+    assert SET.reported_kinds == {"partial_result"}
+    questions = requirements.questions_for(SET, REGISTERED)
+    evidence = {"participants": _evidence("participants", quote="24 participants"),
+                "cancelled": _evidence("cancelled", found=False, verified=False),
+                "endpoint:11": _evidence("endpoint:11", quote="52.1 hours"),
+                "endpoint:12": _evidence("endpoint:12", kind="partial_result", quote="TEAEs in 12 of 24 participants")}
+    judged, trace = requirements.judge(SET, questions, evidence)
+    assert judged["parts"]["outcomes"] is True and judged["label"] == "full"
+    assert trace["endpoint:12"] == {"value": True, "rule": "verified partial_result: counted as reported"}
     first = {"participants": {"found": "yes", "kind": "numeric_result"},
              "cancelled": {"found": "no", "kind": "other"},
-             "endpoint:11": {"found": "yes", "kind": "numeric_result"},
+             "endpoint:11": {"found": "yes", "kind": "not_conducted"},
              "endpoint:12": {"found": "yes", "kind": "partial_result"}}
     retry = ev.questions_to_widen(questions, first, False, SET.not_reported_kinds | SET.open_kinds)
-    assert [question.key for question in retry] == ["cancelled", "endpoint:12"]
+    assert [question.key for question in retry] == ["cancelled", "endpoint:11"]
 
 
 def test_two_different_answers_to_one_question_are_left_to_a_person(conn):

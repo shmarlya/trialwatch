@@ -74,6 +74,8 @@ class Evidence:
     # the model saw every page of the documents when it gave this answer, and every page had
     # readable text (a scanned page without a text layer counts as not seen)
     whole: bool
+    # the page the model cited, when the quote was found on a page near it instead (`page`)
+    cited_page_no: int | None = None
 
 
 @dataclass
@@ -164,18 +166,32 @@ def text_or_empty(value: str | None) -> str:
     return value
 
 
+# How far from the cited page a quote may be found: the model is shown a page with its neighbours and
+# sometimes cites the page next to the one the passage is on (or a passage runs over a page break)
+NEARBY_PAGES = 2
+
+
 def evidence_from_answer(key: str, answer: dict, whole: bool, pages_by_ref: dict[tuple, Page]) -> Evidence:
-    """One model answer as Evidence, with its quote checked against the page it cites."""
+    """One model answer as Evidence, with its quote checked against the page it cites, or else the
+    nearest page of the same document within NEARBY_PAGES that has it (the evidence then names that page)."""
     found = found_value(answer.get("found"))
     quote = text_or_empty(answer.get("quote"))
     note = text_or_empty(answer.get("note"))
-    page = None
-    if found is True:
-        page = pages_by_ref.get((answer.get("document"), answer.get("page")))
-    verified = False
-    if found is True:
-        verified = verify(quote, page)
-    return Evidence(key, found, answer.get("kind"), quote, page, note, verified, whole)
+    kind = answer.get("kind")
+    if found is not True:
+        return Evidence(key, found, kind, quote, None, note, False, whole)
+    document = answer.get("document")
+    cited = answer.get("page")
+    page = pages_by_ref.get((document, cited))
+    if verify(quote, page):
+        return Evidence(key, found, kind, quote, page, note, True, whole)
+    if isinstance(cited, int):
+        for distance in range(1, NEARBY_PAGES + 1):
+            for page_no in (cited - distance, cited + distance):
+                nearby = pages_by_ref.get((document, page_no))
+                if verify(quote, nearby):
+                    return Evidence(key, found, kind, quote, nearby, note, True, whole, cited_page_no=cited)
+    return Evidence(key, found, kind, quote, page, note, False, whole)
 
 
 @dataclass(frozen=True)

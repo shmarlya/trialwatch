@@ -130,6 +130,9 @@ def verification_data(evidence: "dict[str, Evidence]") -> dict:
                 "whole_document": item.whole,
             }
         )
+        if item.cited_page_no is not None:
+            # the quote was found on a page near the one the model cited
+            checked[-1]["cited_page"] = item.cited_page_no
     return {"evidence": checked}
 
 

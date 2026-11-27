@@ -180,3 +180,47 @@ def call_totals(
         (check_run_id, annotation_run_id),
     ).fetchone()
     return CallTotals(*row)
+
+
+@dataclass(frozen=True)
+class RecordedAnswer:
+    """A batch answer as core.llm_call keeps it."""
+
+    llm_batch_id: int
+    provider_batch_id: str
+    custom_id: str
+    llm_call_id: int
+    served_by: str | None
+    stop_reason: str | None
+    response: str | None
+    error: str | None
+    attempts: list
+    # set once a direct call answered after a refusal (llm.BatchReplay)
+    request_id: str | None
+
+
+def recorded_answers(conn: psycopg.Connection, batch_ids: list[int]) -> list[RecordedAnswer]:
+    """The recorded answers of these batches, batch by batch in the order given (by id)."""
+    rows = conn.execute(
+        """
+        SELECT i.llm_batch_id, b.provider_batch_id, i.custom_id, c.id, c.served_by, c.stop_reason, c.response,
+               c.error, c.attempts, c.request_id
+          FROM core.llm_batch_item i
+          JOIN core.llm_batch b ON b.id = i.llm_batch_id
+          JOIN core.llm_call c ON c.id = i.llm_call_id
+         WHERE i.llm_batch_id = ANY(%s)
+         ORDER BY i.llm_batch_id, i.custom_id
+        """,
+        (batch_ids,),
+    ).fetchall()
+    return [RecordedAnswer(*row) for row in rows]
+
+
+def in_flight_usd(conn: psycopg.Connection) -> Decimal:
+    """What the batches sent this month and not collected yet were estimated to cost: billed once
+    answered, though not in core.llm_call yet."""
+    row = conn.execute(
+        "SELECT coalesce(sum(estimated_usd), 0) FROM core.llm_batch "
+        "WHERE status = 'submitted' AND created_at >= date_trunc('month', now())"
+    ).fetchone()
+    return row[0]

@@ -660,7 +660,7 @@ CREATE VIEW checks.judgement_current AS
     j.withdrawn_reason
    FROM (checks.judgement j
      JOIN checks.run r ON ((r.id = j.run_id)))
-  WHERE ((j.error IS NULL) AND (r.status <> 'running'::text))
+  WHERE ((j.error IS NULL) AND (r.finished_at IS NOT NULL))
   ORDER BY j.trial_id, r.requirements, j.run_id DESC;
 
 

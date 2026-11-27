@@ -3,6 +3,7 @@ evidence), the evidence check (ADR-004), the gold datasets (ADR-003) and the web
 (ADR-006). Every command reads .env
 first, so outside compose it uses the same database and API key as the web interface."""
 
+import dataclasses
 import json
 import signal
 import subprocess
@@ -956,6 +957,8 @@ def gold_eval(
     try:
         chosen = datasets.load(dataset)
         settings = check_settings.load(config)
+        # the run records how its calls went: directly, or in batches with --batch
+        settings = dataclasses.replace(settings, mode=_mode(not batch))
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     if sample is not None:

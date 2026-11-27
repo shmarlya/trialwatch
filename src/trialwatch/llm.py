@@ -240,6 +240,9 @@ class CallResult:
     custom_id: str | None = None
     # its batch's row (core.llm_batch), once the batch is recorded
     llm_batch_id: int | None = None
+    # its row in core.llm_call when it is recorded already: a batch answer is recorded when it is
+    # collected, and recording it again brings that row up to date
+    llm_call_id: int | None = None
 
     @property
     def tier(self) -> str:
@@ -381,24 +384,27 @@ def record(
     """Add the call to core.llm_call, made for the session's actor: `request` as sent (without the system
     prompt, which its run keeps once; attached files by their sha256), the answer as received, how it
     ended, and each billed attempt priced. A call that failed is recorded too; a call answered in a batch
-    names its batch (core.llm_batch) and its id in it, and that request is marked recorded. Returns its id."""
-    attempts = []
-    for cost in result.costs:
-        cost_text = None
-        if cost.cost_usd is not None:
-            # JSON has no exact decimals
-            cost_text = str(cost.cost_usd)
-        attempts.append(
-            {
-                "model": cost.model,
-                "input_tokens": cost.input_tokens,
-                "output_tokens": cost.output_tokens,
-                "cache_write_tokens": cost.cache_write_tokens,
-                "cache_read_tokens": cost.cache_read_tokens,
-                "cost_usd": cost_text,
-                "prices": cost.prices,
-            }
+    names its batch (core.llm_batch) and its id in it, and that request is marked recorded. A call
+    recorded already (a batch answer, recorded when collected) is brought up to date, never added twice.
+    Returns its id."""
+    attempts = attempt_rows(result.costs)
+    if result.llm_call_id is not None:
+        costs_db.update_call(
+            conn,
+            result.llm_call_id,
+            request=request,
+            served_by=result.served_by,
+            response=result.raw_text,
+            stop_reason=result.stop_reason,
+            error=result.error,
+            request_id=result.request_id,
+            attempts=attempts,
+            check_run_id=check_run_id,
+            trial_id=trial_id,
+            call_number=call_number,
+            annotation_run_id=annotation_run_id,
         )
+        return result.llm_call_id
     call_id = costs_db.record_call(
         conn,
         operation=operation,
@@ -421,7 +427,67 @@ def record(
     )
     if result.llm_batch_id is not None and result.custom_id is not None:
         batches_db.link_call(conn, result.llm_batch_id, result.custom_id, call_id)
+    result.llm_call_id = call_id
     return call_id
+
+
+def attempt_rows(costs: list[CallCost]) -> list[dict]:
+    """Billed attempts as core.llm_call.attempts keeps them."""
+    attempts = []
+    for cost in costs:
+        cost_text = None
+        if cost.cost_usd is not None:
+            # JSON has no exact decimals
+            cost_text = str(cost.cost_usd)
+        attempts.append(
+            {
+                "model": cost.model,
+                "input_tokens": cost.input_tokens,
+                "output_tokens": cost.output_tokens,
+                "cache_write_tokens": cost.cache_write_tokens,
+                "cache_read_tokens": cost.cache_read_tokens,
+                "cost_usd": cost_text,
+                "prices": cost.prices,
+            }
+        )
+    return attempts
+
+
+def costs_from_rows(attempts: list[dict]) -> list[CallCost]:
+    """core.llm_call.attempts as priced attempts again."""
+    costs = []
+    for attempt in attempts:
+        cost_usd = None
+        if attempt.get("cost_usd") is not None:
+            cost_usd = Decimal(attempt["cost_usd"])
+        costs.append(
+            CallCost(
+                model=attempt["model"],
+                input_tokens=attempt.get("input_tokens", 0),
+                output_tokens=attempt.get("output_tokens", 0),
+                cache_write_tokens=attempt.get("cache_write_tokens", 0),
+                cache_read_tokens=attempt.get("cache_read_tokens", 0),
+                cost_usd=cost_usd,
+                prices=attempt.get("prices"),
+            )
+        )
+    return costs
+
+
+def result_from_recorded(answer: batches_db.RecordedAnswer) -> CallResult:
+    """A batch answer as it was recorded when collected, as the CallResult it was then."""
+    return CallResult(
+        error=answer.error,
+        costs=costs_from_rows(answer.attempts),
+        served_by=answer.served_by,
+        stop_reason=answer.stop_reason,
+        raw_text=answer.response,
+        request_id=answer.request_id,
+        batch_id=answer.provider_batch_id,
+        custom_id=answer.custom_id,
+        llm_batch_id=answer.llm_batch_id,
+        llm_call_id=answer.llm_call_id,
+    )
 
 
 # --- batches (ADR-009) -------------------------------------------------------------------------
@@ -612,17 +678,23 @@ class BatchReplay:
     """Stands in for the client while a run's trials are checked (or tagged) from batch answers: the run
     goes through each trial as it would with direct calls, and llm.call asks this instead of Anthropic.
     A request answered in one of the run's batches gets its answer; a refusal there is asked again
-    directly with the server-side fallback, when the request has one, its two attempts billed as one call;
-    any other request raises Pending and is kept for the next batch, so the trial is judged once all its
-    calls are answered. `answers` are by custom id, `sends` count how often each was sent already."""
+    directly with the server-side fallback, when the request has one, once: the direct answer is kept in
+    the refusal's call (`conn`), its two attempts billed as one call, and a later round uses it. Any other
+    request raises Pending and is kept for the next batch, so the trial is judged once all its calls are
+    answered. `answers` are by custom id (recorded when collected), `sends` count how often each was sent."""
 
-    def __init__(self, answers: dict[str, CallResult], sends: dict[str, int], direct: MessagesClient) -> None:
+    def __init__(
+        self,
+        answers: dict[str, CallResult],
+        sends: dict[str, int],
+        direct: MessagesClient,
+        conn: psycopg.Connection | None = None,
+    ) -> None:
         self.answers = answers
         self.sends = sends
         self.direct = direct
+        self.conn = conn
         self.pending: dict[str, PendingRequest] = {}
-        # the answers a trial used: recorded with that trial's calls
-        self.used: set[str] = set()
         self.trial_id: int | None = None
         self.calls = 0
 
@@ -643,9 +715,10 @@ class BatchReplay:
             if custom_id not in self.pending:
                 self.pending[custom_id] = PendingRequest(custom_id, request, self.trial_id, self.calls)
             raise Pending(custom_id)
-        self.used.add(custom_id)
-        if is_refusal(found) and "fallbacks" in request:
-            return self._ask_directly(found, request, operation)
+        # a refusal is asked again directly once: a batch answer is one billed attempt (a batch has no
+        # fallback), one asked again directly has the direct call's attempts too
+        if is_refusal(found) and "fallbacks" in request and len(found.costs) <= 1:
+            return self._ask_directly(custom_id, found, request, operation)
         return found
 
     def _send_again(self, custom_id: str, found: CallResult) -> bool:
@@ -655,9 +728,10 @@ class BatchReplay:
             return False
         return self.sends.get(custom_id, 0) < BATCH_MOST_SENDS
 
-    def _ask_directly(self, refused: CallResult, request: dict, operation: str) -> CallResult:
+    def _ask_directly(self, custom_id: str, refused: CallResult, request: dict, operation: str) -> CallResult:
         """The refused request sent directly, where the fallback model may answer it: one call whose
-        billed attempts are the batch's refusal (at batch prices) and the direct call's."""
+        billed attempts are the batch's refusal (at batch prices) and the direct call's. When the direct
+        call reached the model, it is kept in the refusal's recorded call at once, so it is paid once."""
         again = call(self.direct, request, operation)
         costs = []
         for cost in refused.costs:
@@ -668,4 +742,19 @@ class BatchReplay:
         again.batch_id = refused.batch_id
         again.custom_id = refused.custom_id
         again.llm_batch_id = refused.llm_batch_id
+        again.llm_call_id = refused.llm_call_id
+        # kept only when the direct call reached the model (an API error is not an answer: asked again later)
+        if again.stop_reason is not None and self.conn is not None and refused.llm_call_id is not None:
+            costs_db.update_call(
+                self.conn,
+                refused.llm_call_id,
+                request=None,
+                served_by=again.served_by,
+                response=again.raw_text,
+                stop_reason=again.stop_reason,
+                error=again.error,
+                request_id=again.request_id,
+                attempts=attempt_rows(costs),
+            )
+            self.answers[custom_id] = again
         return again

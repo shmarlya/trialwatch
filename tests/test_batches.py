@@ -39,7 +39,7 @@ def run_until_done(conn, client, trials, settings, state):
 
 def calls_of(conn, run_id):
     return conn.execute(
-        "SELECT trial_id, call_number, tier, llm_batch_id IS NOT NULL, custom_id IS NOT NULL, cost_usd, request ? 'unused' "
+        "SELECT trial_id, call_number, tier, llm_batch_id IS NOT NULL, custom_id IS NOT NULL, cost_usd, NOT (request ? 'messages') "
         "FROM core.llm_call WHERE check_run_id = %s ORDER BY id",
         (run_id,),
     ).fetchall()
@@ -205,3 +205,189 @@ def test_the_command_line_waits_for_its_batches(conn, monkeypatch):
     )
     assert summary.labels == {"not full": 1}
     assert any("answered" in line for line in lines)
+
+
+# --- review of PR 4 (ADR-009) ----------------------------------------------------------------------
+
+
+def widening_trials(conn):
+    """Two trials reading the same long results summary (one CTIS file): retrieval sends part of it."""
+    extra = appendix_pages()
+    for page in readable(["Far appendix marker."]):
+        extra.append(page)
+    first = seed(conn, pages_with(extra))
+    second = seed(conn, ct_number=CT_2)
+    return first, second
+
+
+# Every question found: nothing to ask again with every page
+SETTLED = good_but(
+    [
+        answer("cancelled", quote="Safety: no serious adverse events.", page=5, kind="other"),
+        answer("endpoint:12", quote="Colorectal transit time was not analysed", page=4),
+    ]
+)
+
+
+def widening_replies():
+    """The first trial's answers (all settled); the second's (a question left open), then its widening."""
+    open_first = good_but([answer("endpoint:12", found=False, kind="other")])
+    return [SETTLED, open_first, [answer("cancelled", found=False, kind="other"), GOOD[3]]]
+
+
+def test_a_run_waiting_on_a_batch_publishes_nothing_yet(conn):
+    first, second = widening_trials(conn)
+    client = FakeClient(*widening_replies())
+    settings = default_settings({"whole_pages": 0, "top_k": 1})
+    state = {}
+    ev.run_batched(conn, client, [first, second], settings, state, PROMPT)
+    # round 2: the first trial is judged, the second waits on its widening
+    outcome = ev.run_batched(conn, client, [first, second], settings, state, PROMPT)
+    assert isinstance(outcome, batching.Waiting)
+    assert checks_db.judged_trials(conn, state["run_id"]) == {first}
+    public = conn.execute(
+        "SELECT count(*) FROM checks.judgement_current WHERE run_id = %s", (state["run_id"],)
+    ).fetchone()
+    assert public == (0,)
+    assert state["run_id"] not in checks_db.runs_without_agreement(conn)
+    # every answer of the ended batch is recorded already, also the one the waiting trial used
+    calls = conn.execute(
+        "SELECT trial_id, call_number FROM core.llm_call WHERE check_run_id = %s ORDER BY trial_id", (state["run_id"],)
+    ).fetchall()
+    assert calls == [(first, 1), (second, 1)]
+    summary = ev.run_batched(conn, client, [first, second], settings, state, PROMPT)
+    assert len(checks_db.judged_trials(conn, summary.run_id)) == 2 and not summary.failed
+    public = conn.execute(
+        "SELECT count(*) FROM checks.judgement_current WHERE run_id = %s", (summary.run_id,)
+    ).fetchone()
+    assert public == (2,)
+
+
+def test_each_batch_answer_is_one_call_whatever_becomes_of_its_trial(conn, monkeypatch):
+    trial = seed(conn)
+    client = FakeClient(GOOD)
+    state = {}
+    ev.run_batched(conn, client, [trial], default_settings(), state, PROMPT)
+    original = ev._save
+    calls = []
+
+    def fails_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("the database went away")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "_save", fails_once)
+    try:
+        ev.run_batched(conn, client, [trial], default_settings(), state, PROMPT)
+    except RuntimeError:
+        pass
+    summary = ev.run_batched(conn, client, [trial], default_settings(), state, PROMPT)
+    assert summary.labels == {"not full": 1}
+    rows = conn.execute(
+        "SELECT count(*), bool_and(request ? 'messages') FROM core.llm_call WHERE check_run_id = %s", (summary.run_id,)
+    ).fetchone()
+    # one row, brought up to date with the request the trial sent
+    assert rows == (1, True)
+    # its batch was downloaded once
+    assert len(client.batches.results_of) == 1
+
+
+def test_a_refusal_is_asked_again_directly_once(conn):
+    first, second = widening_trials(conn)
+    open_first = good_but([answer("endpoint:12", found=False, kind="other")])
+    client = FakeClient(SETTLED, REFUSED, open_first, [answer("cancelled", found=False, kind="other"), GOOD[3]])
+    settings = default_settings({"model": "claude-sonnet-5-5", "whole_pages": 0, "top_k": 1})
+    summary, outcomes = run_until_done(conn, client, [first, second], settings, {})
+    assert len(checks_db.judged_trials(conn, summary.run_id)) == 2 and not summary.failed
+    direct = [request for request in client.requests if "fallbacks" in request]
+    # round 2 asked it directly; round 3 used that answer instead of asking again
+    assert len(direct) == 1
+    attempts = conn.execute(
+        "SELECT jsonb_array_length(attempts) FROM core.llm_call WHERE trial_id = %s "
+        "AND call_number = 1 AND check_run_id = %s",
+        (second, summary.run_id),
+    ).fetchone()
+    assert attempts == (2,)
+
+
+def test_a_run_whose_prompt_changed_while_it_waited_ends_and_a_new_one_starts(conn):
+    import dataclasses
+
+    trial = seed(conn)
+    client = FakeClient(GOOD, GOOD)
+    state = {}
+    ev.run_batched(conn, client, [trial], default_settings(), state, PROMPT)
+    first_run = state["run_id"]
+    changed = dataclasses.replace(PROMPT, text=PROMPT.text + "\nOne more rule.", sha256=b"\x01" * 32)
+    lines = []
+    outcome = ev.run_batched(conn, client, [trial], default_settings(), state, changed, progress=lines.append)
+    assert isinstance(outcome, batching.Waiting) and state["run_id"] != first_run
+    assert any("another prompt or requirement set" in line for line in lines)
+    closed = conn.execute("SELECT status, error FROM checks.run WHERE id = %s", (first_run,)).fetchone()
+    assert closed[0] == "stopped" and "while it waited" in closed[1]
+    # the first batch's answer is recorded all the same (it was billed)
+    assert conn.execute("SELECT count(*) FROM core.llm_call WHERE check_run_id = %s", (first_run,)).fetchone() == (1,)
+
+
+def test_an_interrupted_command_line_run_cancels_its_batch_and_closes_the_run(conn, monkeypatch):
+    first = seed(conn)
+    second = seed(conn, ct_number=CT_2)
+    client = FakeClient(GOOD, GOOD)
+    client.batches.polls_before_end = 100
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(batching, "wait_here", interrupted)
+    state = {}
+    try:
+        ev.run_batched(conn, client, [first, second], default_settings(), state, PROMPT, foreground=True)
+    except KeyboardInterrupt:
+        pass
+    assert client.batches.cancelled == ["msgbatch_1"]
+    run = conn.execute("SELECT status, error FROM checks.run WHERE id = %s", (state["run_id"],)).fetchone()
+    assert run == ("stopped", "KeyboardInterrupt: ")
+
+
+def test_batch_errors_are_tried_again_later():
+    from trialwatch.jobs.retry import is_transient
+
+    assert is_transient("BatchErrored: overloaded_error: Overloaded")
+    assert is_transient("widening: BatchExpired: the batch ended before this request was answered")
+    assert is_transient("BatchCanceled: the batch was cancelled before this request was answered")
+    assert not is_transient("BatchInvalidRequest: max_tokens: too large")
+
+
+def test_the_estimate_reads_text_as_written_and_pdfs_by_size():
+    bulgarian = "Резултати от клиничното изпитване" * 100
+    request = {"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": bulgarian}]}
+    assert batching.request_tokens(request) == int(len(bulgarian) / batching.CHARS_PER_TOKEN)
+    pdf = "A" * 4_000_000  # base64 of 3 MB
+    files = {
+        "model": "claude-haiku-5-5",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf}},
+                    {"type": "text", "text": "Questions"},
+                ],
+            }
+        ],
+    }
+    assert batching.request_tokens(files) == int(len("Questions") / batching.CHARS_PER_TOKEN) + 3_000_000 // 30
+
+
+def test_the_cap_counts_batches_sent_and_not_answered_yet(conn):
+    from trialwatch.db import costs as costs_db
+
+    trial = seed(conn)
+    client = FakeClient(GOOD)
+    client.batches.polls_before_end = 100
+    ev.run_batched(conn, client, [trial], default_settings(), {}, PROMPT)
+    in_flight = batches_db.in_flight_usd(conn)
+    assert in_flight > 0
+    costs_db.set_monthly_cap(conn, in_flight + Decimal("0.0001"))
+    assert batching.over_cap(conn, Decimal("0.001"))
+    assert not batching.over_cap(conn, Decimal("0.00001"))

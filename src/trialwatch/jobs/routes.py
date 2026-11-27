@@ -398,7 +398,8 @@ def job_progress(job_id: int, after: int = 0, user: auth_db.User = Depends(Requi
 
 JOB_TABS = {
     "attention": ("Need attention", ("failed", "held")),
-    "active": ("Running", ("running",)),
+    # a job waiting on a Message Batch is still at work (ADR-009)
+    "active": ("Running", ("running", "waiting")),
     "queued": ("Queued", ("queued",)),
     "ended": ("Ended", ("succeeded", "partial", "cancelled", "failed")),
 }

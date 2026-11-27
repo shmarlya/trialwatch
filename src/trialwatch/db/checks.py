@@ -73,6 +73,26 @@ def resume_run(conn: psycopg.Connection, run_id: int) -> str | None:
     return row[0]
 
 
+@dataclass(frozen=True)
+class RunIdentity:
+    """What a run judges with, as it recorded it, and its status."""
+
+    status: str
+    model: str
+    effort: str
+    prompt_sha256: bytes
+    requirements_sha256: bytes
+
+
+def run_identity(conn: psycopg.Connection, run_id: int) -> RunIdentity | None:
+    row = conn.execute(
+        "SELECT status, model, effort, prompt_sha256, requirements_sha256 FROM checks.run WHERE id = %s", (run_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return RunIdentity(*row)
+
+
 def judged_trials(conn: psycopg.Connection, run_id: int) -> set[int]:
     """The trials the run has a judgement for (judged, or failed)."""
     rows = conn.execute("SELECT trial_id FROM checks.judgement WHERE run_id = %s", (run_id,)).fetchall()
@@ -130,7 +150,7 @@ def runs_without_agreement(conn: psycopg.Connection) -> list[int]:
     rows = conn.execute(
         """
         SELECT DISTINCT r.id FROM checks.run r JOIN checks.judgement j ON j.run_id = r.id
-         WHERE r.status <> 'running' AND j.error IS NULL AND j.agreement IS NULL
+         WHERE r.finished_at IS NOT NULL AND j.error IS NULL AND j.agreement IS NULL
          ORDER BY r.id
         """
     ).fetchall()
@@ -263,7 +283,7 @@ def withdraw_judgement(conn: psycopg.Connection, run_id: int, trial_id: int, rea
                    withdrawn_reason = %s
               FROM checks.run r
              WHERE r.id = j.run_id AND j.run_id = %s AND j.trial_id = %s
-               AND j.error IS NULL AND r.status <> 'running' AND j.withdrawn_at IS NULL
+               AND j.error IS NULL AND r.finished_at IS NOT NULL AND j.withdrawn_at IS NULL
             """,
             (reason, run_id, trial_id),
         )
@@ -301,7 +321,7 @@ _KINDS = """
     FROM checks.judgement j
     JOIN checks.run r ON r.id = j.run_id
     LEFT JOIN checks.answer a ON a.run_id = j.run_id AND a.trial_id = j.trial_id
-    WHERE j.error IS NULL AND r.status <> 'running'
+    WHERE j.error IS NULL AND r.finished_at IS NOT NULL
 """
 
 
@@ -482,7 +502,7 @@ def failed_on_unchanged_evidence(conn: psycopg.Connection, trial_ids: list[int],
                                WHERE c.trial_id = j.trial_id AND c.id IS DISTINCT FROM j.trial_record_id
                                  AND c.fetched_at > r.started_at)) AS outdated
               FROM checks.judgement j JOIN checks.run r ON r.id = j.run_id
-             WHERE j.trial_id = ANY(%(ids)s) AND r.requirements = %(requirements)s AND r.status <> 'running'
+             WHERE j.trial_id = ANY(%(ids)s) AND r.requirements = %(requirements)s AND r.finished_at IS NOT NULL
              ORDER BY j.trial_id, j.run_id DESC
         ) newest
         WHERE error IS NOT NULL AND NOT outdated

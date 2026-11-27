@@ -78,8 +78,53 @@ ALTER TABLE search.annotation_run DROP CONSTRAINT annotation_run_status_check;
 ALTER TABLE search.annotation_run ADD CONSTRAINT annotation_run_status_check
     CHECK (status IN ('running', 'waiting', 'succeeded', 'failed', 'stopped'));
 
+-- a judgement is published when its run has ended (finished_at), not while it waits on a batch
+CREATE OR REPLACE VIEW checks.judgement_current AS
+SELECT DISTINCT ON (j.trial_id, r.requirements)
+       j.run_id, j.trial_id, j.label, j.parts, j.trial_record_id, j.document_versions, j.served_by, j.duration_ms,
+       r.model, r.prompt, r.requirements, r.started_at,
+       (EXISTS (SELECT FROM core.document_version v
+                JOIN core.trial_document l ON l.document_id = v.document_id AND l.trial_id = j.trial_id
+                WHERE v.id = ANY (j.document_versions) AND (v.replaced_at IS NOT NULL OR l.removed_at IS NOT NULL))
+        OR EXISTS (SELECT FROM core.trial_document l JOIN core.document_current d ON d.id = l.document_id
+                   WHERE l.trial_id = j.trial_id AND l.removed_at IS NULL
+                     AND NOT (d.version_id = ANY (j.document_versions))
+                     AND d.kind IN (SELECT jsonb_array_elements_text(r.requirements_text::jsonb -> 'document_kinds')))
+        OR EXISTS (SELECT FROM core.trial_record_current c
+                   WHERE c.trial_id = j.trial_id AND c.id IS DISTINCT FROM j.trial_record_id
+                     AND c.fetched_at > r.started_at)
+        -- OCR read a picture's text in one of its files after the check began: it read less than there is
+        OR EXISTS (SELECT FROM core.document_version v JOIN core.page_ocr o ON o.file_sha256 = v.file_sha256
+                   WHERE v.id = ANY (j.document_versions) AND o.text IS NOT NULL AND o.created_at > r.started_at)) AS outdated,
+       r.finished_at AS published_at, j.agreement, j.withdrawn_at, j.withdrawn_reason
+FROM checks.judgement j JOIN checks.run r ON r.id = j.run_id
+WHERE j.error IS NULL AND r.finished_at IS NOT NULL
+ORDER BY j.trial_id, r.requirements, j.run_id DESC;
+
 -- migrate:down
 SET LOCAL trialwatch.actor = '1';
+
+CREATE OR REPLACE VIEW checks.judgement_current AS
+SELECT DISTINCT ON (j.trial_id, r.requirements)
+       j.run_id, j.trial_id, j.label, j.parts, j.trial_record_id, j.document_versions, j.served_by, j.duration_ms,
+       r.model, r.prompt, r.requirements, r.started_at,
+       (EXISTS (SELECT FROM core.document_version v
+                JOIN core.trial_document l ON l.document_id = v.document_id AND l.trial_id = j.trial_id
+                WHERE v.id = ANY (j.document_versions) AND (v.replaced_at IS NOT NULL OR l.removed_at IS NOT NULL))
+        OR EXISTS (SELECT FROM core.trial_document l JOIN core.document_current d ON d.id = l.document_id
+                   WHERE l.trial_id = j.trial_id AND l.removed_at IS NULL
+                     AND NOT (d.version_id = ANY (j.document_versions))
+                     AND d.kind IN (SELECT jsonb_array_elements_text(r.requirements_text::jsonb -> 'document_kinds')))
+        OR EXISTS (SELECT FROM core.trial_record_current c
+                   WHERE c.trial_id = j.trial_id AND c.id IS DISTINCT FROM j.trial_record_id
+                     AND c.fetched_at > r.started_at)
+        -- OCR read a picture's text in one of its files after the check began: it read less than there is
+        OR EXISTS (SELECT FROM core.document_version v JOIN core.page_ocr o ON o.file_sha256 = v.file_sha256
+                   WHERE v.id = ANY (j.document_versions) AND o.text IS NOT NULL AND o.created_at > r.started_at)) AS outdated,
+       r.finished_at AS published_at, j.agreement, j.withdrawn_at, j.withdrawn_reason
+FROM checks.judgement j JOIN checks.run r ON r.id = j.run_id
+WHERE j.error IS NULL AND r.status <> 'running'
+ORDER BY j.trial_id, r.requirements, j.run_id DESC;
 
 UPDATE search.annotation_run SET status = 'failed', error = 'its batch was dropped', finished_at = clock_timestamp()
 WHERE status = 'waiting';
@@ -92,7 +137,7 @@ ALTER TABLE checks.run DROP CONSTRAINT run_check;
 ALTER TABLE checks.run ADD CONSTRAINT run_check CHECK ((status = 'running') = (finished_at IS NULL));
 ALTER TABLE checks.run DROP CONSTRAINT run_status_check;
 ALTER TABLE checks.run ADD CONSTRAINT run_status_check CHECK (status IN ('running', 'succeeded', 'failed', 'stopped'));
-UPDATE jobs.job SET status = 'queued' WHERE status = 'waiting';
+UPDATE jobs.job SET status = 'queued', waiting_on = NULL, wait_until = NULL WHERE status = 'waiting';
 ALTER TABLE jobs.job DROP CONSTRAINT job_waiting_check;
 ALTER TABLE jobs.job DROP COLUMN wait_until;
 ALTER TABLE jobs.job DROP COLUMN waiting_on;

@@ -214,9 +214,12 @@ setup, a bad API key) fails the job at once.
 batch it is **waiting** (not an attempt; its page says which batch, how many requests are answered so far, and when
 it is asked about next). Every minute the worker's housekeeping asks Anthropic about the batches that are due (every 2
 minutes for the first half hour, then every 10) and queues each job whose batch has ended; it goes on from the
-answers and may send a second batch (widening), or finish. A batch not ended 25 hours after it was sent is read as it
-is (its unanswered requests expired, sent again). Cancelling a waiting job cancels its batch at Anthropic; the answers
-it already got are recorded (they are billed) and the job ends cancelled. The refresh does not run batched checks or
+answers and may send a second batch (widening), or finish. A batch not ended 25 hours after it was sent is cancelled
+at Anthropic (its unanswered requests come back canceled, and are sent again). A job whose batch can't be found with
+the API key fails at once; one that can't be reached for two days fails. Cancelling a waiting job cancels its batch
+at Anthropic; cancelling one queued or held between rounds lets it run once more: either way the answers it got are
+recorded (they are billed) and the job ends cancelled. A batched job held by the cap stays held until the cap leaves
+room for its next batch's estimate (what was spent and what batches in flight may cost are taken off). The refresh does not run batched checks or
 tags itself: it queues a check job and a tagging job (automatic, held by the cap), and queues no other while one is
 open.
 

@@ -197,3 +197,63 @@ def costliest_runs(conn: psycopg.Connection, limit: int = 10) -> list[CostlyRun]
             (limit,),
         )
         return cursor.fetchall()
+
+
+def update_call(
+    conn: psycopg.Connection,
+    call_id: int,
+    *,
+    request: dict | None,
+    served_by: str | None,
+    response: str | None,
+    stop_reason: str | None,
+    error: str | None,
+    request_id: str | None,
+    attempts: list[dict],
+    check_run_id: int | None = None,
+    trial_id: int | None = None,
+    call_number: int | None = None,
+    annotation_run_id: int | None = None,
+) -> None:
+    """Bring a recorded call up to date (ADR-009): a batch answer recorded when it was collected gets the
+    request its trial sent (as recorded) once a trial uses it, or the direct call that answered after a
+    refusal (its billed attempts then are both). A value given as None keeps what is there; the totals
+    are summed again from the attempts."""
+    conn.execute(
+        """
+        UPDATE core.llm_call c SET
+               request = coalesce(%(request)s, c.request), served_by = %(served_by)s, response = %(response)s,
+               stop_reason = %(stop_reason)s, error = %(error)s, request_id = coalesce(%(request_id)s, c.request_id),
+               attempts = b.attempts, input_tokens = coalesce(t.input_tokens, 0),
+               output_tokens = coalesce(t.output_tokens, 0), cache_write_tokens = coalesce(t.cache_write_tokens, 0),
+               cache_read_tokens = coalesce(t.cache_read_tokens, 0), cost_usd = t.cost_usd,
+               unpriced_attempts = t.unpriced,
+               check_run_id = coalesce(%(run)s, c.check_run_id), trial_id = coalesce(%(trial)s, c.trial_id),
+               call_number = coalesce(%(number)s, c.call_number),
+               annotation_run_id = coalesce(%(annotation_run)s, c.annotation_run_id)
+        FROM (SELECT %(attempts)s::jsonb AS attempts) b
+        CROSS JOIN LATERAL (
+            SELECT sum((a->>'input_tokens')::bigint) AS input_tokens, sum((a->>'output_tokens')::bigint) AS output_tokens,
+                   sum((a->>'cache_write_tokens')::bigint) AS cache_write_tokens,
+                   sum((a->>'cache_read_tokens')::bigint) AS cache_read_tokens,
+                   sum((a->>'cost_usd')::numeric(14, 6)) AS cost_usd,
+                   count(*) FILTER (WHERE a->>'cost_usd' IS NULL) AS unpriced
+            FROM jsonb_array_elements(b.attempts) a
+        ) t
+        WHERE c.id = %(id)s
+        """,
+        {
+            "id": call_id,
+            "request": Jsonb(request) if request is not None else None,
+            "served_by": served_by,
+            "response": response,
+            "stop_reason": stop_reason,
+            "error": error,
+            "request_id": request_id,
+            "attempts": Jsonb(attempts),
+            "run": check_run_id,
+            "trial": trial_id,
+            "number": call_number,
+            "annotation_run": annotation_run_id,
+        },
+    )

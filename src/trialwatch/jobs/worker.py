@@ -32,7 +32,9 @@ import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
+import anthropic
 import psycopg
 from opentelemetry.trace import StatusCode
 
@@ -224,6 +226,9 @@ def _record(
     queue: psycopg.Connection, ctx: JobContext, job: Job, outcome: Outcome | None, error: str | None, permanent: bool
 ) -> str:
     result = job.result
+    if ctx.kept_result is not None:
+        # a batched run's state kept during the attempt: a failed attempt is tried again from it
+        result = ctx.kept_result
     failures = {}
     if outcome is not None:
         result = outcome.result
@@ -291,23 +296,38 @@ def purge(queue: psycopg.Connection) -> None:
 
 
 def housekeeping(queue: psycopg.Connection) -> None:
-    """Queue again the jobs of dead workers, start the jobs of due schedules, and resume held jobs once
-    the spending cap allows (a new month, or a raised or removed cap)."""
+    """Queue again the jobs of dead workers, start the jobs of due schedules, wake the jobs whose batch was
+    answered, and resume held jobs once the spending cap leaves room for them (a new month, or a raised or
+    removed cap; a batched job held for its next batch's estimate needs room for that estimate)."""
     stalled = jobs_db.requeue_stalled(queue, STALLED)
     if stalled:
         log.warning("jobs whose worker stopped, queued again or failed: %s", stalled)
     start_due_schedules(queue)
     wake_answered(queue)
-    if not costs_db.cap_reached(queue):
-        resumed = jobs_db.resume_held(queue)
-        if resumed:
-            log.info("held jobs resumed: %s", resumed)
+    resumed = jobs_db.resume_held(queue, cap_room(queue))
+    if resumed:
+        log.info("held jobs resumed: %s", resumed)
+
+
+def cap_room(queue: psycopg.Connection) -> Decimal | None:
+    """What the monthly cap leaves this month (what was recorded, and batches sent and not answered yet,
+    taken off), or None without a cap."""
+    cap = costs_db.monthly_cap(queue)
+    if cap is None:
+        return None
+    return cap - costs_db.spent_this_month(queue) - batches_db.in_flight_usd(queue)
+
+
+# Errors that say a batch will never be found with this key: the job waiting on it fails at once
+BATCH_GONE = (anthropic.NotFoundError, anthropic.AuthenticationError, anthropic.PermissionDeniedError)
 
 
 def wake_answered(queue: psycopg.Connection, client: llm.MessagesClient | None = None) -> list[int]:
-    """Ask Anthropic about the batches of waiting jobs that are due: queue each job whose batch has ended
-    (or ran past the longest a batch takes), ask again later about the others. A cancelled job's batch is
-    cancelled at Anthropic first. Returns the jobs queued."""
+    """Ask Anthropic about the batches of waiting jobs that are due: queue each job whose batch has ended,
+    ask again later about the others. A cancelled job's batch, and one past the longest a batch takes, is
+    cancelled at Anthropic, which then ends it. A job whose batch can't be found with this key (or can't
+    be reached for a day past the longest) fails, and a cancelled one whose batch can't be reached ends
+    cancelled: a job never waits for ever. Returns the jobs queued."""
     due = jobs_db.waiting_due(queue)
     if not due:
         return []
@@ -317,13 +337,16 @@ def wake_answered(queue: psycopg.Connection, client: llm.MessagesClient | None =
     for waiting in due:
         try:
             ended = _batch_ended(queue, client, waiting)
-        except Exception as exc:  # Anthropic, the network or its key: ask again later, the job keeps waiting
-            log.warning("job %s: could not ask about batch %s (%s)", waiting.job_id, waiting.provider_batch_id, exc)
-            jobs_db.check_later(queue, waiting.job_id, BATCH_CHECK_LATER)
+        except Exception as exc:  # Anthropic, the network or its key
+            _cannot_ask(queue, waiting, exc)
             continue
         if ended:
-            if jobs_db.wake(queue, waiting.job_id):
+            if jobs_db.wake(queue, waiting.job_id, waiting.llm_batch_id):
                 woken.append(waiting.job_id)
+            continue
+        if _age(waiting) > timedelta(seconds=2 * llm.BATCH_LONGEST):
+            jobs_db.end_waiting(queue, waiting.job_id, "failed",
+                                f"batch {waiting.provider_batch_id} has not ended {_age(waiting)} after it was sent")
             continue
         jobs_db.check_later(queue, waiting.job_id, _next_check(waiting))
     if woken:
@@ -331,21 +354,38 @@ def wake_answered(queue: psycopg.Connection, client: llm.MessagesClient | None =
     return woken
 
 
+def _cannot_ask(queue: psycopg.Connection, waiting: jobs_db.WaitingJob, exc: Exception) -> None:
+    """Anthropic could not be asked about a waiting job's batch: ask again later, unless it never will be."""
+    error = f"batch {waiting.provider_batch_id} could not be reached: {type(exc).__name__}: {exc}"
+    log.warning("job %s: %s", waiting.job_id, error)
+    if waiting.cancel_requested:
+        jobs_db.end_waiting(queue, waiting.job_id, "cancelled", f"cancelled by a person; {error}")
+        return
+    if isinstance(exc, BATCH_GONE) or _age(waiting) > timedelta(seconds=2 * llm.BATCH_LONGEST):
+        jobs_db.end_waiting(queue, waiting.job_id, "failed", error)
+        return
+    jobs_db.check_later(queue, waiting.job_id, BATCH_CHECK_LATER)
+
+
 def _batch_ended(queue: psycopg.Connection, client: llm.MessagesClient, waiting: jobs_db.WaitingJob) -> bool:
     state = llm.batch_state(client, waiting.provider_batch_id)
     batches_db.set_counts(queue, waiting.llm_batch_id, state.counts(), state.ended)
     if state.ended:
         return True
-    if waiting.cancel_requested and state.status == "in_progress":
+    # cancelled by a person, or past the longest a batch takes: Anthropic stops it and ends it, and its
+    # unanswered requests come back canceled (sent again, if the job goes on)
+    too_old = _age(waiting).total_seconds() > llm.BATCH_LONGEST
+    if state.status == "in_progress" and (waiting.cancel_requested or too_old):
         llm.cancel_batch(client, waiting.provider_batch_id)
-    # past the longest a batch takes: its run reads what it has (unanswered requests expired)
-    age = datetime.now(UTC) - waiting.submitted_at
-    return age.total_seconds() > llm.BATCH_LONGEST
+    return False
+
+
+def _age(waiting: jobs_db.WaitingJob) -> timedelta:
+    return datetime.now(UTC) - waiting.submitted_at
 
 
 def _next_check(waiting: jobs_db.WaitingJob) -> timedelta:
-    age = datetime.now(UTC) - waiting.submitted_at
-    if age < BATCH_YOUNG:
+    if _age(waiting) < BATCH_YOUNG:
         return BATCH_CHECK_SOON
     return BATCH_CHECK_LATER
 

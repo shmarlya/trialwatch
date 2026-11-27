@@ -454,16 +454,25 @@ class Held:
 
 def run_batched(conn: psycopg.Connection, client: MessagesClient, trial_ids: list[int], settings: Settings,
                 state: dict, progress: Progress = None, should_stop: ShouldStop = None, capped: bool = False,
-                foreground: bool = False) -> "RunSummary | batching.Waiting | Held":
+                foreground: bool = False,
+                keep: Callable[[dict], None] | None = None) -> "RunSummary | batching.Waiting | Held":
     """run() with the calls in Message Batches, in rounds (batching.py): the same tags, saved the same
-    way. `state` is what earlier rounds kept (the run, its trials and counts), filled in here and kept by
-    the caller. Returns the run's summary when every trial is done, else the batch it waits on (the run
-    waits too), or Held when the next batch may take this month's spend over the cap (`capped`). In the
-    `foreground` it waits here for each batch."""
+    way. `state` is what earlier rounds kept (the run, its trials and counts), filled in here; `keep` is
+    given it whenever it changes, so the caller keeps it even if a round fails. Returns the run's summary
+    when every trial is done, else the batch it waits on (the run waits too), or Held when the next batch
+    may take this month's spend over the cap (`capped`). In the `foreground` it waits here for each
+    batch. A run taken back whose prompt, model or effort is no longer the setup's ends, and a new one
+    starts."""
     prompt = load_prompt(settings.prompt)
-    if "run_id" in state and not search_db.resume_annotation_run(conn, state["run_id"]):
-        report_line(progress, f"annotation run {state['run_id']} was closed while it waited: a new run starts")
-        state.clear()
+    # runs whose job ended while they waited are closed first, their batches settled
+    for abandoned in search_db.close_abandoned_annotation_runs(conn):
+        batching.settle(conn, client, batches_db.batches_of_run(conn, annotation_run_id=abandoned), OPERATION)
+    if "run_id" in state:
+        problem = _why_not_taken_back(conn, state["run_id"], settings, prompt)
+        if problem is not None:
+            report_line(progress, f"annotation run {state['run_id']} {problem}: a new run starts")
+            _end_run_early(conn, client, state["run_id"], f"{problem} while it waited on a batch")
+            state.clear()
     if "run_id" not in state:
         state["run_id"] = _start_run(conn, settings, prompt, trial_ids)
         state["trials"] = list(trial_ids)
@@ -471,17 +480,19 @@ def run_batched(conn: psycopg.Connection, client: MessagesClient, trial_ids: lis
         state["dropped"] = 0
         state["failed"] = {}
         report_line(progress, f"annotation run {state['run_id']} started: {len(trial_ids)} trials, calls in batches")
+        if keep is not None:
+            keep(state)
     run_id = state["run_id"]
     try:
         while True:
-            outcome = _batched_round(conn, client, settings, prompt, state, progress, should_stop, capped)
+            outcome = _batched_round(conn, client, settings, prompt, state, progress, should_stop, capped, keep)
             if foreground and isinstance(outcome, batching.Waiting):
                 batching.wait_here(conn, client, outcome, progress)
                 continue
             break
     except BaseException as exc:
         if foreground:
-            search_db.finish_annotation_run(conn, run_id, "failed", f"{type(exc).__name__}: {exc}")
+            _end_run_early(conn, client, run_id, f"{type(exc).__name__}: {exc}")
         else:
             search_db.wait_annotation_run(conn, run_id)
         raise
@@ -506,6 +517,29 @@ def run_batched(conn: psycopg.Connection, client: MessagesClient, trial_ids: lis
     return summary
 
 
+def _why_not_taken_back(conn: psycopg.Connection, run_id: int, settings: Settings, prompt: Prompt) -> str | None:
+    """Why a batched tagging run can't go on (closed, or what it tags with changed), or None: then it is
+    running again."""
+    kept = search_db.annotation_run_identity(conn, run_id)
+    if kept is None or kept.status not in ("running", "waiting"):
+        return "was closed"
+    if bytes(kept.prompt_sha256) != prompt.sha256:
+        return "has another prompt than the setup now"
+    if kept.model != settings.model or kept.effort != settings.effort:
+        return "has another model or effort than the setup now"
+    if not search_db.resume_annotation_run(conn, run_id):
+        return "was closed"
+    return None
+
+
+def _end_run_early(conn: psycopg.Connection, client: MessagesClient, run_id: int, why: str) -> None:
+    """A batched tagging run that ends before its rounds do: its ended batches are collected (billed), the
+    others cancelled, and the run closed as stopped if it is still open."""
+    batching.settle(conn, client, batches_db.batches_of_run(conn, annotation_run_id=run_id), OPERATION)
+    if search_db.resume_annotation_run(conn, run_id):
+        search_db.finish_annotation_run(conn, run_id, "stopped", why)
+
+
 def _start_run(conn: psycopg.Connection, settings: Settings, prompt: Prompt, trial_ids: list[int]) -> int:
     return search_db.start_annotation_run(
         conn, model=settings.model, effort=settings.effort, prompt=prompt.name, prompt_sha256=prompt.sha256,
@@ -516,16 +550,17 @@ def _start_run(conn: psycopg.Connection, settings: Settings, prompt: Prompt, tri
 
 
 def _batched_round(conn: psycopg.Connection, client: MessagesClient, settings: Settings, prompt: Prompt,
-                   state: dict, progress: Progress, should_stop: ShouldStop,
-                   capped: bool) -> "bool | batching.Waiting | Held":
+                   state: dict, progress: Progress, should_stop: ShouldStop, capped: bool,
+                   keep: Callable[[dict], None] | None) -> "bool | batching.Waiting | Held":
     """One round: the run's trials not tagged yet, from the answers of its batches; the requests still
     unanswered go into the next batch. Returns whether it stopped, once nothing is left to send."""
     run_id = state["run_id"]
     batches = batches_db.batches_of_run(conn, annotation_run_id=run_id)
-    answers, sends, items, running = batching.answers(conn, client, batches, OPERATION)
+    answers, sends, running = batching.answers(conn, client, batches, OPERATION)
     if running is not None:
         return batching.Waiting(running.id, running.provider_batch_id, running.round, running.request_count)
-    replay = llm.BatchReplay(answers, sends, client)
+    state.pop("held_usd", None)
+    replay = llm.BatchReplay(answers, sends, client, conn)
     done = search_db.annotated_trials(conn, run_id)
     stopped = False
     for number, trial_id in enumerate(state["trials"], start=1):
@@ -535,6 +570,8 @@ def _batched_round(conn: psycopg.Connection, client: MessagesClient, settings: S
             stopped = True
             break
         replay.begin(trial_id)
+        # a beat for each trial gone through, waiting or tagged: a long round is not a stuck job
+        count_done(number, len(state["trials"]))
         try:
             kept, dropped, problem, _cost = annotate_trial(conn, replay, settings, prompt, run_id, trial_id)
         except llm.Pending:
@@ -545,14 +582,20 @@ def _batched_round(conn: psycopg.Connection, client: MessagesClient, settings: S
         if problem is not None:
             state["failed"][str(trial_id)] = problem
             line = f"{line}, {problem}"
+        else:
+            # tried again in a later round (no profile then) and tagged now
+            state["failed"].pop(str(trial_id), None)
         report_line(progress, line)
-    batching.record_unused(conn, replay, items, OPERATION, annotation_run_id=run_id)
     if stopped or not replay.pending:
         return stopped
     pending = list(replay.pending.values())
     estimated = batching.estimate(pending)
     if capped and batching.over_cap(conn, estimated):
+        # kept with the job: it is let go again only once the cap leaves room for this (jobs_db.resume_held)
+        state["held_usd"] = str(estimated)
         return Held(estimated)
+    if keep is not None:
+        keep(state)
     waiting = batching.submit(conn, client, pending, OPERATION, batching.next_round(batches), estimated,
                               annotation_run_id=run_id)
     report_line(progress, f"round {waiting.round}: {len(pending)} requests sent in batch "

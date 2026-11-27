@@ -2,21 +2,22 @@
 
 A batched run goes in rounds. Each round goes through the run's trials not judged (or tagged) yet, as
 the direct run would, with a llm.BatchReplay in place of the client: a trial whose calls all have
-answers in the run's batches is judged and saved as usual (its calls recorded at batch prices); a trial
-whose next call has no answer yet waits, and its request goes into the round's batch. The run then waits
-(its job too, jobs/worker.py) until Anthropic has answered that batch, and the next round starts. A
-text check whose first answers leave questions open asks again with every page in the next round, so a
-run takes one round, or two.
+answers in the run's batches is judged and saved as usual; a trial whose next call has no answer yet
+waits, and its request goes into the round's batch. The run then waits (its job too, jobs/worker.py)
+until Anthropic has answered that batch, and the next round starts. A text check whose first answers
+leave questions open asks again with every page in the next round, so a run takes one round, or two.
 
-- answers(conn, client, batches, operation): the answers of a run's ended batches, or the batch still
-  running
-- record_unused(...): answers nothing used (the trial changed, the run stopped), recorded as calls all the
-  same: they were billed
+Every answer is recorded in core.llm_call when its batch is collected, once (it is billed, whatever
+becomes of its trial), and later rounds read it from there: a trial that uses it brings that row up to
+date with its request, so nothing billed goes unrecorded and nothing is recorded twice.
+
+- answers(conn, client, batches, operation): the answers of a run's batches (collecting those that
+  ended), or the batch still running
+- settle(...): a run that ends early collects its ended batches and cancels the others
 - submit(...): the requests the round left waiting, sent as a batch (or several, when they are many)
-- estimate(...): what a round's requests may cost, checked against the spending cap before sending
+- estimate(...), over_cap(...): what a round's requests may cost, against the spending cap before sending
 """
 
-import json
 import logging
 import time
 from collections.abc import Callable
@@ -37,6 +38,9 @@ log = logging.getLogger("trialwatch.batching")
 # numbers, other languages) measured about 2.6 (2026-11-27, live run); lower is safer for the cap, and it
 # matters most near a long-prompt price tier
 CHARS_PER_TOKEN = 2.5
+# A PDF's bytes per input token in that estimate: a page of text is billed at about 1,500-3,000 tokens and a
+# text-heavy PDF page takes some 30-100 KB; erring high keeps the cap safe without holding a round for nothing
+PDF_BYTES_PER_TOKEN = 30
 # Output tokens counted per request in that estimate (answers with their thinking run to a few thousand)
 OUTPUT_ALLOWANCE = 3000
 # How often a run waiting on its batch in the foreground (the command line) asks Anthropic, in seconds
@@ -55,19 +59,14 @@ class Waiting:
 
 def answers(
     conn: psycopg.Connection, client: MessagesClient, batches: list[Batch], operation: str
-) -> tuple[dict[str, CallResult], dict[str, int], dict[tuple[int, str], BatchItem], Batch | None]:
+) -> tuple[dict[str, CallResult], dict[str, int], Batch | None]:
     """The answers of a run's batches by custom id (a later batch's answer replaces an earlier one), how
-    often each request was sent, each batch's requests by (batch, custom id), and the first batch
-    Anthropic is still answering (None when all have ended: the answers are complete)."""
-    found: dict[str, CallResult] = {}
+    often each request was sent, and the first batch Anthropic is still answering (None when all have
+    ended: the answers are complete). A batch that has ended is collected first: its answers recorded."""
     sends: dict[str, int] = {}
-    items: dict[tuple[int, str], BatchItem] = {}
     for batch in batches:
         batch_items = batches_db.items(conn, batch.id)
-        models = {}
         for item in batch_items:
-            items[(batch.id, item.custom_id)] = item
-            models[item.custom_id] = item.model
             if item.custom_id not in sends:
                 sends[item.custom_id] = 0
             sends[item.custom_id] += 1
@@ -75,70 +74,105 @@ def answers(
             state = llm.batch_state(client, batch.provider_batch_id)
             batches_db.set_counts(conn, batch.id, state.counts(), state.ended)
             if not state.ended:
-                return found, sends, items, batch
-        results = llm.batch_results(client, batch.provider_batch_id, models, operation)
-        for custom_id, result in results.items():
-            result.llm_batch_id = batch.id
-            found[custom_id] = result
-        if batch.status == "submitted":
-            batches_db.collected(conn, batch.id)
-    return found, sends, items, None
+                return {}, sends, batch
+            collect(conn, client, batch, batch_items, operation)
+    found: dict[str, CallResult] = {}
+    batch_ids = [batch.id for batch in batches]
+    for answer in batches_db.recorded_answers(conn, batch_ids):
+        found[answer.custom_id] = llm.result_from_recorded(answer)
+    return found, sends, None
 
 
-def record_unused(
-    conn: psycopg.Connection,
-    replay: llm.BatchReplay,
-    items: dict[tuple[int, str], BatchItem],
-    operation: str,
-    check_run_id: int | None = None,
-    annotation_run_id: int | None = None,
+def collect(
+    conn: psycopg.Connection, client: MessagesClient, batch: Batch, items: list[BatchItem], operation: str
 ) -> int:
-    """Record the answers this round's trials did not use and nobody recorded yet (their trial's request
-    changed, or the run stopped before it): billed, so kept like every call. Returns how many."""
+    """Record an ended batch's answers in core.llm_call (each once: a request recorded already is left
+    as it is) and mark it collected; returns how many were recorded now."""
+    models = {}
+    for item in items:
+        models[item.custom_id] = item.model
+    results = llm.batch_results(client, batch.provider_batch_id, models, operation)
     recorded = 0
-    for custom_id, result in replay.answers.items():
-        if custom_id in replay.used or custom_id in replay.pending:
-            continue
-        item = items.get((result.llm_batch_id, custom_id))
-        if item is None or item.llm_call_id is not None:
-            continue
-        if result.error is not None and not result.costs:
-            # not answered, so not billed: nothing to keep (an expired request)
-            continue
-        request = {"model": item.model, "unused": "its trial asked something else, or the run stopped first"}
-        llm.record(
-            conn,
-            result,
-            request,
-            operation=operation,
-            check_run_id=check_run_id,
-            trial_id=item.trial_id,
-            call_number=item.call_number,
-            annotation_run_id=annotation_run_id,
-        )
-        recorded += 1
+    with conn.transaction():
+        for item in items:
+            result = results.get(item.custom_id)
+            if result is None or item.llm_call_id is not None:
+                continue
+            result.llm_batch_id = batch.id
+            # the request as recorded until a trial uses the answer and records the request it sent
+            request = {"model": item.model, "batch": batch.provider_batch_id}
+            llm.record(
+                conn,
+                result,
+                request,
+                operation=operation,
+                check_run_id=batch.check_run_id,
+                trial_id=item.trial_id,
+                call_number=item.call_number,
+                annotation_run_id=batch.annotation_run_id,
+            )
+            recorded += 1
+        batches_db.collected(conn, batch.id)
     return recorded
 
 
+def settle(conn: psycopg.Connection, client: MessagesClient, batches: list[Batch], operation: str) -> None:
+    """A run that ends before its rounds do: its ended batches are collected (their answers are billed)
+    and the others cancelled at Anthropic, where what they answered is billed all the same. Best
+    effort: a batch Anthropic can't be asked about is left as it is, and logged."""
+    for batch in batches:
+        if batch.status != "submitted":
+            continue
+        try:
+            state = llm.batch_state(client, batch.provider_batch_id)
+            batches_db.set_counts(conn, batch.id, state.counts(), state.ended)
+            if state.ended:
+                collect(conn, client, batch, batches_db.items(conn, batch.id), operation)
+            elif state.status == "in_progress":
+                llm.cancel_batch(client, batch.provider_batch_id)
+        except Exception as exc:  # Anthropic or the network: the run ends all the same
+            log.warning("batch %s could not be settled: %s", batch.provider_batch_id, exc)
+
+
 def estimate(pending: list[llm.PendingRequest]) -> Decimal:
-    """What these requests may cost at batch prices: their characters as input tokens, and a fixed share
-    of output each. An estimate only: the calls are priced from their usage when answered."""
+    """What these requests may cost at batch prices: their text as input tokens (characters as written,
+    not JSON-escaped), each attached PDF by its size, and a fixed share of output each. An estimate
+    only: the calls are priced from their usage when answered."""
     total = Decimal(0)
     for request in pending:
-        characters = len(json.dumps(request.request.get("messages", []))) + len(str(request.request.get("system", "")))
-        input_tokens = int(characters / CHARS_PER_TOKEN)
+        input_tokens = request_tokens(request.request)
         cost = llm.price_tokens(request.request.get("model", ""), input_tokens, OUTPUT_ALLOWANCE, batch=True)
         if cost.cost_usd is not None:
             total += cost.cost_usd
     return total
 
 
+def request_tokens(request: dict) -> int:
+    """About how many input tokens a request is: its text, and its PDFs by their size."""
+    characters = len(str(request.get("system", "")))
+    document_bytes = 0
+    for message in request.get("messages", []):
+        content = message.get("content", "")
+        if isinstance(content, str):
+            characters += len(content)
+            continue
+        for block in content:
+            if block.get("type") == "text":
+                characters += len(block.get("text", ""))
+            elif block.get("type") == "document":
+                data = block.get("source", {}).get("data", "")
+                # base64: four characters for three bytes
+                document_bytes += len(data) * 3 // 4
+    return int(characters / CHARS_PER_TOKEN) + document_bytes // PDF_BYTES_PER_TOKEN
+
+
 def over_cap(conn: psycopg.Connection, estimated: Decimal) -> bool:
-    """Whether sending a batch that may cost this would take this month's spend over the cap."""
+    """Whether sending a batch that may cost this would take this month's spend over the cap: what was
+    recorded, what batches sent and not answered yet may cost, and this one."""
     cap = costs_db.monthly_cap(conn)
     if cap is None:
         return False
-    return costs_db.spent_this_month(conn) + estimated > cap
+    return costs_db.spent_this_month(conn) + batches_db.in_flight_usd(conn) + estimated > cap
 
 
 def submit(

@@ -169,9 +169,13 @@ within the hour); `direct` calls the model at once, at list price. A check job i
 while the worker does other jobs; once Anthropic has answered, it goes through its trials again with the batch's
 answers in place of the model (`llm.BatchReplay`), so each trial is judged by the same steps as a direct check.
 A trial whose widening call is still unanswered goes into a second batch. A refusal in a batch is asked again
-directly, with the server-side fallback (batches can't ask for it); a request a batch did not answer (errored,
-expired) is sent again, three times in all. A trial whose evidence changed between rounds asks anew; the answer it
-no longer needs is recorded as unused. On the site, tick "now, at list price" for a check you want answered at once;
+directly, with the server-side fallback (batches can't ask for it), once: its answer is kept with the refusal's
+call. A request a batch did not answer (errored, expired) is sent again, three times in all, then fails its trial
+with an error a later attempt tries again. Every answer is recorded in `core.llm_call` when its batch is collected
+(it is billed, whatever becomes of its trial), and a trial that uses it brings that row up to date: nothing billed
+goes unrecorded, nothing is recorded twice. A trial whose evidence changed between rounds asks anew. A run waiting on
+a batch publishes nothing yet: its judgements go public when it ends. A run taken back whose prompt, requirement set,
+model or effort is no longer the setup's ends (stopped), and a new one starts. On the site, tick "now, at list price" for a check you want answered at once;
 on the command line, `--direct` (`--batch` waits here for the batches). Only what happens to a trial whose evidence
 is not complete and current differs, by who chose it: a trial a person asked for is refused before anything is sent,
 with why; a trial TrialWatch chose (the refresh) or a gold evaluation took is left out, and the run's summary says
@@ -190,7 +194,7 @@ why. With no trial left, no run is started.
 | `checks/settings.py`, `configs/` | setups |
 | `checks/prompts/` | the system prompts and loading them |
 | `llm.py` (shared) | the model call and its cost; Message Batches: sending, asking about, reading their answers (`BatchReplay`) |
-| `batching.py` (shared) | a run's rounds of batches: their answers, unused answers recorded, the cost estimate checked against the cap, sending |
+| `batching.py` (shared) | a run's rounds of batches: collecting and recording their answers, settling a run that ends early, the cost estimate checked against the cap, sending |
 | `checks/publishing.py` | publication and its gold agreement |
 | `checks/routes.py`, `checks/views.py` | the run, prompts and requirements pages, withdrawing a judgement; the trace as the trial page shows it |
 | `gold/converters/due_date.py` | due-date rules (the Bruckner converter uses them) |

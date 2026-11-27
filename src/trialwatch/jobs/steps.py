@@ -67,6 +67,9 @@ class Context:
             return {}
         return dict(kept)
 
+    def keep_batch(self, state: dict) -> None:
+        """Keep a batched run's state with the job (nothing to keep from the command line)."""
+
     def cancel_asked(self) -> bool:
         return False
 
@@ -86,6 +89,8 @@ class JobContext(Context):
         self.automatic = job.automatic
         self.cancelled = False
         self.hold_reason = None
+        # a batched run's state, kept as soon as it changes (keep_batch)
+        self.kept_result: dict | None = None
         # only automatic model calls (checks, AI tags; jobs/tasks.py says which kinds) are held by the
         # cap; a person's always run. The refresh turns it on before its paid steps.
         self.watch_cap = job.automatic and capped
@@ -96,6 +101,16 @@ class JobContext(Context):
             jobs_db.add_line(self.queue, self.job.id, self.job.attempts, line)
         except psycopg.OperationalError as exc:  # the queue's database went away: the work goes on
             log.warning("job %s: progress line not written (%s): %s", self.job.id, exc, line)
+
+    def keep_batch(self, state: dict) -> None:
+        """Keep a batched run's state in jobs.job.result at once (the run started, a batch about to be
+        sent): an attempt that then fails is tried again from it, not from a new run. The worker records
+        it as the attempt's result too (kept_result)."""
+        self.kept_result = {"batch": dict(state), "trials": len(state.get("trials", []))}
+        try:
+            jobs_db.keep_result(self.queue, self.job.id, self.kept_result)
+        except psycopg.OperationalError as exc:  # the worker writes it with the attempt's outcome
+            log.warning("job %s: batch state not kept now (%s)", self.job.id, exc)
 
     def cancel_asked(self) -> bool:
         """Whether a person asked to stop: a batched run stops for that alone (it checks the cap itself,
@@ -288,8 +303,10 @@ def run_check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
     if ctx.automatic:
         unready = evidence.SKIP
     prompt = load_prompt(settings.prompt)
+    # a batched run going on from its batch's answers: its own trials, whatever is chosen now
+    state = ctx.batch_state()
     ctx.add(f"{len(trial_ids)} trials · {settings.summary()} (prompt sha256 {prompt.sha256.hex()[:12]})")
-    if not trial_ids:
+    if not trial_ids and "run_id" not in state:
         return Outcome({"trials": 0})
     if params.get("dry_run"):
         if unready == evidence.REFUSE:
@@ -304,16 +321,15 @@ def run_check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
                 ctx.add(f"  {question.key}")
         ctx.add("dry run: nothing was sent")
         return Outcome({"trials": len(trial_ids), "dry_run": True})
-    # a batched run going on from its batch's answers records them, whatever happens next (they are paid)
-    state = ctx.batch_state()
-    # an automatic check never starts over the cap; it is held before anything is sent
+    # an automatic check never starts over the cap; it is held before anything is sent. A batched run
+    # going on records its batch's answers whatever happens next (they are paid), and checks the cap itself
     if not state and ctx.should_stop():
         return Outcome({"trials": 0})
     try:
-        if settings.mode == "batch":
+        if settings.mode == "batch" or state:
             found = evidence.run_batched(conn, anthropic_client(), trial_ids, settings, state, progress=ctx.add,
                                          should_stop=ctx.cancel_asked, unready=unready, capped=ctx.watch_cap,
-                                         foreground=ctx.foreground)
+                                         foreground=ctx.foreground, keep=ctx.keep_batch)
             if isinstance(found, batching.Waiting):
                 return Outcome({"batch": state, "trials": len(state["trials"])}, waiting=found)
             if isinstance(found, evidence.Held):
@@ -400,23 +416,24 @@ def run_annotate(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcom
     if params.get("mode") in check_settings.MODES:
         settings = dataclasses.replace(settings, mode=params["mode"])
     chosen = trials_to_tag(conn, ctx, params, settings)
+    # a batched run going on from its batch's answers: its own trials, whatever is chosen now
+    state = ctx.batch_state()
     ctx.add(f"{len(chosen)} trials to tag with {settings.model} (effort {settings.effort})")
-    if not chosen:
+    if not chosen and "run_id" not in state:
         return Outcome({"trials": 0})
     if params.get("dry_run"):
         _show_annotate_request(ctx, conn, settings, chosen[0])
         ctx.add("dry run: nothing was sent")
         return Outcome({"trials": len(chosen), "dry_run": True})
-    # a batched run going on from its batch's answers records them, whatever happens next (they are paid)
-    state = ctx.batch_state()
-    # an automatic run never starts over the cap; it is held before anything is sent
+    # an automatic run never starts over the cap; it is held before anything is sent. A batched run
+    # going on records its batch's answers whatever happens next (they are paid), and checks the cap itself
     if not state and ctx.should_stop():
         return Outcome({"trials": 0})
     try:
-        if settings.mode == "batch":
+        if settings.mode == "batch" or state:
             found = annotate.run_batched(conn, anthropic_client(), chosen, settings, state, progress=ctx.add,
                                          should_stop=ctx.cancel_asked, capped=ctx.watch_cap,
-                                         foreground=ctx.foreground)
+                                         foreground=ctx.foreground, keep=ctx.keep_batch)
             if isinstance(found, batching.Waiting):
                 return Outcome({"batch": state, "trials": len(state["trials"])}, waiting=found)
             if isinstance(found, annotate.Held):

@@ -1038,7 +1038,7 @@ def test_a_waiting_job_cancelled_cancels_its_batch_and_keeps_what_was_answered(a
     job = jobs_db.job(app_conn, job_id)
     assert job.status == "cancelled"
     # the answer it had paid for is recorded, though no trial was judged from it
-    calls = app_conn.execute("SELECT request ? 'unused', tier FROM core.llm_call WHERE job_id = %s",
+    calls = app_conn.execute("SELECT NOT (request ? 'messages'), tier FROM core.llm_call WHERE job_id = %s",
                              (job_id,)).fetchall()
     assert calls == [(True, "batch")]
     run = app_conn.execute("SELECT status FROM checks.run WHERE job_id = %s", (job_id,)).fetchone()
@@ -1097,3 +1097,102 @@ def test_staff_see_a_waiting_job_its_batch_and_what_batches_saved(app_conn, fake
     worker.run(once=True)
     spend = admin_client.get("/admin/spend").text
     assert "In batches this month" in spend and "1 calls, about $0.0000 saved" in spend
+
+
+# --- review of PR 4: waiting, holding and cancelling batched jobs ----------------------------------
+
+def test_a_job_held_for_its_batch_estimate_waits_until_the_cap_has_room_for_it(app_conn, fake_world, monkeypatch):
+    fake, model = fake_world
+    trial = seed(app_conn)
+    # room for something, not for this batch
+    costs_db.set_monthly_cap(app_conn, Decimal("0.000001"))
+    job_id = queue(app_conn, "check", {"trial_ids": [trial], "config": "default"}, actor=db.SYSTEM_ACTOR,
+                   automatic=True)
+    worker.run(once=True)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "held" and Decimal(job.result["batch"]["held_usd"]) > Decimal("0.000001")
+    # housekeeping does not let it go while the cap has no room for its estimate
+    worker.housekeeping(app_conn)
+    assert jobs_db.job(app_conn, job_id).status == "held"
+    costs_db.set_monthly_cap(app_conn, Decimal("10"))
+    worker.housekeeping(app_conn)
+    assert jobs_db.job(app_conn, job_id).status == "queued"
+
+
+def test_a_failed_first_round_goes_on_with_the_same_run(app_conn, fake_world, monkeypatch):
+    import anthropic
+
+    fake, model = fake_world
+    trial = seed(app_conn)
+    overloaded = httpx.Response(529, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages/batches"))
+    model.client.batches.create_error = anthropic.InternalServerError("overloaded", response=overloaded, body=None)
+    job_id = queue(app_conn, "check", {"trial_ids": [trial], "config": "default"})
+    worker.run(once=True)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "queued" and "run_id" in job.result["batch"]
+    first_run = job.result["batch"]["run_id"]
+    due_now(app_conn, job_id)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "succeeded", job.last_error
+    assert jobs_db.runs_of(app_conn, job_id).check_runs == [first_run]
+
+
+def test_a_queued_batched_job_cancelled_still_records_its_answers(app_conn, fake_world, monkeypatch):
+    fake, model = fake_world
+    trial = seed(app_conn)
+    job_id = queue(app_conn, "check", {"trial_ids": [trial], "config": "default"})
+    worker.run(once=True)
+    answer_batches(app_conn)
+    assert jobs_db.job(app_conn, job_id).status == "queued"
+    # cancelled before a worker takes it: it runs once more to record what its batch answered
+    assert jobs_db.request_cancel(app_conn, job_id) == "queued"
+    worker.run(once=True)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "cancelled"
+    calls = app_conn.execute("SELECT count(*) FROM core.llm_call WHERE job_id = %s", (job_id,)).fetchone()
+    assert calls == (1,)
+
+
+def test_a_waiting_job_whose_batch_is_gone_fails_and_a_cancelled_one_ends(app_conn, fake_world, monkeypatch):
+    import anthropic
+
+    fake, model = fake_world
+    trial = seed(app_conn)
+    model.client.batches.polls_before_end = 100
+    gone = queue(app_conn, "check", {"trial_ids": [trial], "config": "default"})
+    worker.run(once=True)
+    missing = httpx.Response(404, request=httpx.Request("GET", "https://api.anthropic.com/v1/messages/batches/x"))
+    model.client.batches.retrieve_error = anthropic.NotFoundError("not found", response=missing, body=None)
+    answer_batches(app_conn)
+    job = jobs_db.job(app_conn, gone)
+    assert job.status == "failed" and "could not be reached" in job.last_error
+    # a passing error keeps a job waiting, unless a person cancelled it
+    overloaded = httpx.Response(529, request=httpx.Request("GET", "https://api.anthropic.com/v1/messages/batches/x"))
+    model.client.batches.retrieve_error = None
+    second = queue(app_conn, "check", {"trial_ids": [trial], "config": "default"})
+    worker.run(once=True)
+    model.client.batches.retrieve_error = anthropic.InternalServerError("overloaded", response=overloaded, body=None)
+    answer_batches(app_conn)
+    assert jobs_db.job(app_conn, second).status == "waiting"
+    jobs_db.request_cancel(app_conn, second)
+    answer_batches(app_conn)
+    assert jobs_db.job(app_conn, second).status == "cancelled"
+
+
+def test_a_batch_past_the_longest_is_cancelled_not_woken(app_conn, fake_world, monkeypatch):
+    fake, model = fake_world
+    trial = seed(app_conn)
+    model.client.batches.polls_before_end = 100
+    job_id = queue(app_conn, "check", {"trial_ids": [trial], "config": "default"})
+    worker.run(once=True)
+    app_conn.execute("UPDATE core.llm_batch SET submitted_at = now() - interval '26 hours'")
+    assert answer_batches(app_conn) == []
+    assert model.client.batches.cancelled == ["msgbatch_1"]
+    assert jobs_db.job(app_conn, job_id).status == "waiting"
+
+
+def test_waiting_jobs_are_listed_with_the_running_ones():
+    from trialwatch.jobs import routes
+
+    assert "waiting" in routes.JOB_TABS["active"][1]

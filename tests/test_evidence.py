@@ -193,8 +193,15 @@ class FakeBatches:
         self.polls = {}
         self.polls_before_end = 0
         self.cancelled = []
+        # raised by the next create, or by every retrieve while set
+        self.create_error = None
+        self.retrieve_error = None
 
     def create(self, requests, betas=None):
+        if self.create_error is not None:
+            error = self.create_error
+            self.create_error = None
+            raise error
         batch_id = f"msgbatch_{len(self.sent) + 1}"
         self.sent.append({"id": batch_id, "requests": requests, "betas": betas})
         lines = []
@@ -218,6 +225,8 @@ class FakeBatches:
         return SimpleNamespace(id=batch_id)
 
     def retrieve(self, batch_id):
+        if self.retrieve_error is not None:
+            raise self.retrieve_error
         self.polls[batch_id] += 1
         status = "ended"
         if self.polls[batch_id] <= self.polls_before_end:

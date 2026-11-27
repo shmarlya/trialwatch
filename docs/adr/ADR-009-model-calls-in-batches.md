@@ -49,7 +49,7 @@ How it works: separate prepare / after-first-call / after-widening functions, th
 |---|---|---|---|
 | Quality | 0 same model, prompt and rules | 0 | 0 |
 | Cost | + half | – list price | + half |
-| Risk | 0 a changed trial re-asks (its unused answer is recorded) | + none | – two flows can drift apart |
+| Risk | 0 a changed trial re-asks (its first answer stays recorded) | + none | – two flows can drift apart |
 | Effort | + small: the check code is unchanged | + none | – large |
 | Undo | + `mode: direct` in a setup | + | – |
 | Latency | – up to 24 h (usually < 1 h), two rounds for widening | + minutes | – same as A |
@@ -65,8 +65,9 @@ We choose A: batches are half the cost for work nobody waits on, and replaying t
 batched (`tier`, `llm_batch_id`, `custom_id`) and each attempt keeps the price it paid.
 
 **Harder:** a check job ends hours after it starts; a round recomputes retrieval for trials it replays; a trial whose
-evidence changed between rounds asks again (its first answer is recorded as unused, billed all the same); the cap is
-checked against an estimate before each batch, since a batch's cost is known only when answered.
+evidence changed between rounds asks again (its first answer stays recorded, billed all the same); the cap is
+checked against an estimate before each batch (what batches in flight may cost included), since a batch's cost is
+known only when answered; a run resumed after its prompt or rules changed ends, and a new one starts.
 
 ## Revisit when · Lab
 
@@ -80,7 +81,9 @@ in about 2 minutes. Documents ran at about 2.6 characters per token: the cap's e
 
 ## Session notes
 
-- Answers are fetched again from Anthropic on every round (kept 29 days there), so nothing large is stored here.
+- Each answer is recorded in core.llm_call when its batch is collected, once; later rounds rebuild it from there, so
+  a batch is downloaded once (Anthropic keeps results 29 days) and nothing billed goes unrecorded.
+- A refusal in a batch is asked again directly once; that answer is kept with the refusal's call.
 - A request's custom id is the sha256 of the request as sent: the same request asked again finds its answer.
 - Errored or expired requests are sent again, three sends in all; then the trial fails with an error a later
   attempt may fix.

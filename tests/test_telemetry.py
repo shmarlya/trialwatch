@@ -160,3 +160,20 @@ def test_uvicorn_logs_an_unhandled_error_by_its_type_only():
     line = telemetry.JsonFormatter().format(record)
     assert SECRET not in line
     assert "Exception in ASGI application ValueError" in line and "test_telemetry.py" in line
+
+
+def test_a_trial_waiting_on_a_batch_is_no_failed_span(traced_app, conn):
+    from opentelemetry.trace import StatusCode
+    from test_evidence import GOOD, PROMPT, FakeClient, seed
+
+    from conftest import default_settings
+    from trialwatch.checks import evidence
+
+    trial = seed(conn)
+    SPANS.clear()
+    evidence.run_batched(conn, FakeClient(GOOD), [trial], default_settings(), {}, PROMPT)
+    spans = [span for span in SPANS.get_finished_spans() if span.name == "checks.trial"]
+    assert len(spans) == 1
+    assert spans[0].status.status_code != StatusCode.ERROR
+    assert spans[0].attributes["trialwatch.check.waiting"] is True
+    assert not spans[0].events

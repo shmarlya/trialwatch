@@ -18,7 +18,10 @@ TRANSIENT_ERRORS = ("APIConnectionError", "APITimeoutError", "RateLimitError", "
                     "OverloadedError", "ServiceUnavailableError", "DeadlineExceededError",
                     # the SDK names a 504 GatewayTimeoutError (DeadlineExceededError is its alias) and a 408
                     # RequestTimeoutError
-                    "GatewayTimeoutError", "RequestTimeoutError")
+                    "GatewayTimeoutError", "RequestTimeoutError",
+                    # a Message Batch that did not answer a request (llm.batch_error): it errored at Anthropic
+                    # (overloaded, an API error), expired or was cancelled; never BatchInvalidRequest
+                    "BatchErrored", "BatchExpired", "BatchCanceled")
 
 
 class PermanentError(Exception):

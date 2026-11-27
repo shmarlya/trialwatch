@@ -1,6 +1,6 @@
 # ADR-009: Model calls in Message Batches, at half price
 
-**Status:** proposed · **Date:** 2026-11-27 · **Session:** S11 · **Cards:** 18 · **Exam:** F3 · P3 · **Supersedes:** none · **Superseded by:** none
+**Status:** accepted · **Date:** 2026-11-27 · **Session:** S11 · **Cards:** 18 · **Exam:** F3 · P3 · **Supersedes:** none · **Superseded by:** none
 
 ## Question
 
@@ -74,7 +74,9 @@ checked against an estimate before each batch, since a batch's cost is known onl
 Anthropic changes batch pricing or limits.
 
 **Lab:** `tests/test_batches.py`, `tests/test_jobs.py` (waiting jobs): a batched check judges like a direct one at half
-the cost. Pending: one live 3-trial run, batched against direct, labels and cost compared.
+the cost. Live, 2026-11-27, 3 trials (16, 142 and 1,266 pages; claude-haiku-5-5): batched and direct gave the same
+labels, parts and 15 verified quotes, with 5 questions widened; $0.08 against $0.16; two rounds, each batch answered
+in about 2 minutes. Documents ran at about 2.6 characters per token: the cap's estimate uses 2.5.
 
 ## Session notes
 

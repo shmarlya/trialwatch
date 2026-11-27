@@ -611,7 +611,7 @@ def batch_results(
 ) -> dict[str, CallResult]:
     """An ended batch's results by custom id, each a CallResult like a direct call's, priced at batch
     prices. `requested_models` maps each custom id to the model it asked for. A request the batch did
-    not answer has an error that says why: BatchErrored (worth asking again), BatchInvalidRequest (not),
+    not answer has an error that says why: BatchErrored (worth asking again, a rate limit too), BatchInvalidRequest (not),
     BatchExpired or BatchCanceled."""
     results = {}
     for line in messages_client.beta.messages.batches.results(batch_id):
@@ -638,7 +638,9 @@ def batch_error(outcome: Any) -> str:
     detail = getattr(outcome.error, "error", None)
     error_type = getattr(detail, "type", "error")
     message = getattr(detail, "message", "")
-    if error_type == "invalid_request_error":
+    # a rate limit inside a batch (as on grammar compilations per minute) comes as an invalid request, but
+    # passes: worth sending again
+    if error_type == "invalid_request_error" and "rate limit" not in message.lower():
         return f"BatchInvalidRequest: {message}"
     return f"BatchErrored: {error_type}: {message}"
 

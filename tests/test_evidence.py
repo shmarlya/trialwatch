@@ -593,7 +593,7 @@ def test_two_different_answers_to_one_question_are_left_to_a_person(conn):
              answer("participants", found=False, kind="other"),
              answer("cancelled", found=False, kind="other"),
              answer("cancelled", found=False, kind="other")]
-    called, answers_by_key = asking.ask(FakeClient(twice), {"model": "claude-test"})
+    called, answers_by_key = asking.ask(FakeClient(twice), {"model": "claude-test"}, ["participants", "cancelled"])
     assert answers_by_key["participants"] == {"key": "participants", "found": "dont_know", "quote": "", "document": 0,
                                               "page": 0, "kind": "other",
                                               "note": "the model answered this question twice, differently"}
@@ -981,14 +981,23 @@ def test_token_counts_include_every_attempt():
     assert llm.CallResult(costs=llm.price_usage(SimpleNamespace(iterations=[]), "claude-test")).input_tokens == 0
     client = FakeClient([])
     client.usage = usage
-    called, _answers = asking.ask(client, {"model": "claude-test"})
+    called, _answers = asking.ask(client, {"model": "claude-test"}, ["participants"])
     assert (called.input_tokens, called.output_tokens, called.error) == (1850, 52, None)
+
+
+def test_every_request_has_the_same_schema_and_unasked_keys_are_dropped():
+    # one schema for every trial, so its grammar is compiled once (an enum of each trial's keys was not)
+    assert "enum" not in asking.answer_schema()["properties"]["answers"]["items"]["properties"]["key"]
+    client = FakeClient([answer("participants", quote="24 participants were randomised", page=2),
+                         answer("endpoint:99", found=False, kind="other")])
+    called, answers_by_key = asking.ask(client, {"model": "claude-test"}, ["participants"])
+    assert list(answers_by_key) == ["participants"]
 
 
 def test_a_refusal_is_an_error_not_an_answer():
     client = FakeClient(GOOD)
     client.stop_reason = "refusal"
-    called, answers_by_key = asking.ask(client, {"model": "claude-test"})
+    called, answers_by_key = asking.ask(client, {"model": "claude-test"}, ["participants"])
     assert (called.error, answers_by_key) == ("stop_reason refusal", {})
 
 
@@ -1085,7 +1094,7 @@ def test_dont_know_is_asked_again_with_every_page_then_left_to_a_person(conn):
 
 
 def test_the_model_is_offered_dont_know_for_every_question():
-    schema = asking.answer_schema(["participants"])
+    schema = asking.answer_schema()
     assert schema["properties"]["answers"]["items"]["properties"]["found"]["enum"] == ["yes", "no", "dont_know"]
     assert "dont_know" in PROMPT.text
     assert (asking.found_value("yes"), asking.found_value("no"), asking.found_value("dont_know")) == (True, False, None)

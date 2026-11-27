@@ -7,8 +7,9 @@ reads its source and says what it read (trialwatch.sources.registry); everything
 2. transfer: for chosen trials, the adapter fetches the full record and reads it (a SourceTrial);
    `save` stores the record as a new version if it changed (the trial matched by all its identifiers
    or created), its sponsors, sites and profile, and every listed document of the configured kinds
-   (downloaded each time, a new version when its bytes changed), and unlinks the ones the source no
-   longer lists; then their page text is read. The trial's
+   (downloaded when new or at a new version label; with recheck, every time, a new version when its
+   bytes changed), and unlinks the ones the source no longer lists; then their page text is read, in
+   child processes, while the next trial is fetched (pages.Reading). The trial's
    core.evidence_transfer row says 'complete' only when the record, every configured document and
    every page came in, else 'failed' and why. While a trial is being transferred its row says
    failed, so an interrupted transfer never leaves half-new evidence looking complete. Each trial is
@@ -23,7 +24,7 @@ errors. Both can be stopped between trials (or list pages): what was done so far
 at a time reads a source (an advisory lock), and a run whose process died is closed by the next one.
 """
 
-import hashlib
+import functools
 import logging
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -37,13 +38,16 @@ from trialwatch.db import search as search_db
 from trialwatch.db.core import RegisteredSource
 from trialwatch.geo import load as geo_load
 from trialwatch.hashing import storable
-from trialwatch.progress import Progress, report
+from trialwatch.progress import Progress, beat, report
+from trialwatch.progress import count as count_done
 from trialwatch.search import index as search_index
 from trialwatch.sources import profile
 from trialwatch.sources.registry import Adapter, DocumentRef, DownloadedFile, TrialNotFound
-from trialwatch.trials.pages import extract_missing
+from trialwatch.trials import pages
 
 ShouldStop = Callable[[], bool] | None
+# Where a PDF's end-of-file marker is looked for: it ends the file, give or take trailing bytes
+PDF_END_BYTES = 2048
 # One line per trial transferred, with its errors when it failed, in the worker's log (Coolify shows it)
 log = logging.getLogger("trialwatch.ingest")
 
@@ -214,16 +218,28 @@ class TransferResult:
     documents: int = 0
     new_versions: int = 0
     unchanged: int = 0
+    # of the unchanged: held at the version the source lists, so not downloaded (without recheck)
+    known: int = 0
     unlinked: int = 0
     pages: int = 0
     possible_duplicates: int = 0
+    # every document was downloaded and its bytes compared, whatever its version label
+    recheck: bool = False
     stopped: bool = False
     # key -> 'complete' or 'failed'
     statuses: dict[str, str] = field(default_factory=dict)
     # the core.trial ids transferred, in order
     trial_ids: list[int] = field(default_factory=list)
-    # "key" or "key/what" -> what went wrong
+    # "key" or "key/what" -> what went wrong, that another try may mend (a download, a reading cut off)
     failed: dict[str, str] = field(default_factory=dict)
+    # "key/what" -> what went wrong that trying again would not mend: a file whose bytes can't be read,
+    # or that the source publishes cut short (the same bytes on two downloads). The trial's transfer
+    # records it as failed (a person sees it; it becomes stuck); the job does not fail and try again.
+    left: dict[str, str] = field(default_factory=dict)
+
+    def problems(self) -> dict[str, str]:
+        """Everything that went wrong: what may be mended by trying again, and what is left to people."""
+        return {**self.failed, **self.left}
 
     def counts(self) -> dict:
         return {
@@ -233,19 +249,29 @@ class TransferResult:
             "documents": self.documents,
             "new_versions": self.new_versions,
             "unchanged": self.unchanged,
+            "known": self.known,
+            "recheck": self.recheck,
             "unlinked": self.unlinked,
             "pages": self.pages,
             "possible_duplicates": self.possible_duplicates,
             "stopped": self.stopped,
             "failed": len(self.failed),
+            "left": len(self.left),
         }
 
     def summary(self) -> str:
         return (
             f"transfer run {self.run_id}: {self.complete} of {self.trials} complete, {self.new_trials} new trials, "
-            f"documents {self.documents} ({self.new_versions} new versions, {self.unchanged} unchanged, "
+            f"documents {self.documents} ({self.new_versions} new versions, {self.unchanged} unchanged{self._known()}, "
             f"{self.unlinked} no longer listed), {self.pages} pages read"
         )
+
+    def _known(self) -> str:
+        if self.recheck:
+            return " (every document downloaded and compared)"
+        if self.known:
+            return f" ({self.known} held at their version, not downloaded)"
+        return ""
 
 
 def transfer(
@@ -258,9 +284,11 @@ def transfer(
     progress: Progress = None,
     should_stop: ShouldStop = None,
     extract: Callable[[bytes], list[str]] | None = None,
+    recheck: bool = False,
 ) -> TransferResult:
     """Transfer the evidence of these trials (the source's keys), each once (see the module's
-    docstring). `why` says how they were chosen, for the run's record."""
+    docstring). `why` says how they were chosen, for the run's record. A document held at the version
+    the source lists is not downloaded again, unless `recheck`: then every one is, and its bytes decide."""
     if not adapter.transfers:
         raise ValueError(f"source {source.code} has no evidence to transfer")
     _usable(source, adapter)
@@ -272,10 +300,14 @@ def transfer(
         if key not in wanted:
             wanted.append(key)
     kinds = adapter.evidence_kinds(source.config)
-    run_args = {"keys": wanted, "why": why, "config": source.config}
+    run_args = {"keys": wanted, "why": why, "config": source.config, "recheck": recheck}
     _hold_source(conn, source)
     try:
-        result = TransferResult(run_id=core.start_ingest(conn, source.code, run_args, kind="transfer"))
+        result = TransferResult(run_id=core.start_ingest(conn, source.code, run_args, kind="transfer"), recheck=recheck)
+        run_started = time.monotonic()
+        # The trial whose files are being read while the next one is fetched: its page text is saved,
+        # and its status recorded, once that next trial's record and documents are in
+        reading: _Reading | None = None
         try:
             for number, key in enumerate(wanted, start=1):
                 if _stopping(should_stop):
@@ -283,63 +315,155 @@ def transfer(
                     report(progress, "stopped: the trials transferred so far are kept")
                     break
                 started = time.monotonic()
+                if reading is not None and core.trial_of_key(conn, source.code, key) == reading.fetched.trial_id:
+                    # another key of the trial being read: its fetch would change that trial's evidence
+                    # before its status is recorded, so that comes first
+                    _finish_and_tell(conn, source, kinds, result, reading, len(wanted), progress)
+                    reading = None
+                between = None
+                if reading is not None:
+                    between = functools.partial(reading.pages.drain, conn)
                 with telemetry.tracer.start_as_current_span("ingest.trial") as span:
                     span.set_attribute("trialwatch.source", source.code)
                     span.set_attribute("trialwatch.source.key", key)
-                    status = _transfer_one(conn, source, adapter, key, kinds, extract, result)
-                    span.set_attribute("trialwatch.ingest.status", status)
-                result.statuses[key] = status
-                _log_trial(source.code, key, status, time.monotonic() - started, result.failed)
-                report(progress, f"{number}/{len(wanted)} {key}: {status}")
+                    fetched = _fetch_one(conn, source, adapter, key, kinds, result, recheck, between)
+                fetch_seconds = time.monotonic() - started
+                if reading is not None:
+                    _finish_and_tell(conn, source, kinds, result, reading, len(wanted), progress)
+                    reading = None
+                if fetched is None:
+                    took = f"in {fetch_seconds:.0f} s"
+                    _tell(source, key, number, len(wanted), "failed", took, result, progress)
+                else:
+                    reading = _Reading(
+                        key,
+                        number,
+                        fetch_seconds,
+                        fetched,
+                        pages.start_reading(conn, [fetched.trial_id], kinds, extract),
+                    )
+                _rate(number, len(wanted), run_started, progress)
+            if reading is not None:
+                _finish_and_tell(conn, source, kinds, result, reading, len(wanted), progress)
+                reading = None
             if result.trial_ids:
                 _refresh_search_words(conn, result)
         except BaseException as exc:
-            # Ctrl-C or a database error: the run is closed as failed (the trial in hand stays failed),
-            # then the error goes on
+            # Ctrl-C or a database error: the run is closed as failed (the trials in hand stay failed:
+            # marked so before their evidence changed), then the error goes on
             result.failed["run"] = f"interrupted: {type(exc).__name__}: {exc}"
+            if reading is not None:
+                reading.pages.cancel()
             raise
         finally:
-            core.finish_ingest(conn, result.run_id, counts=result.counts(), errors=result.failed)
+            core.finish_ingest(conn, result.run_id, counts=result.counts(), errors=result.problems())
     finally:
         core.unlock(conn, core.LOCK_SOURCE, source.id)
     return result
 
 
-def _log_trial(source: str, key: str, status: str, seconds: float, failed: dict[str, str]) -> None:
+def _log_trial(source: str, key: str, status: str, took: str, failed: dict[str, str]) -> None:
+    """One line for the trial; `took` says how long its parts took ("in 5 s", or its fetch and its reading
+    apart, since the reading runs while the next trial is fetched)."""
     problems = []
     for where, message in failed.items():
         if where.startswith(f"{key}/"):
             problems.append(f"{where.removeprefix(key + '/')}: {message}")
     if status == "failed":
-        log.warning("transfer %s %s failed in %.0f s: %s", source, key, seconds, "; ".join(problems))
+        log.warning("transfer %s %s failed %s: %s", source, key, took, "; ".join(problems))
     elif problems:
-        log.info("transfer %s %s %s in %.0f s, with warnings: %s", source, key, status, seconds, "; ".join(problems))
+        log.info("transfer %s %s %s %s, with warnings: %s", source, key, status, took, "; ".join(problems))
     else:
-        log.info("transfer %s %s %s in %.0f s", source, key, status, seconds)
+        log.info("transfer %s %s %s %s", source, key, status, took)
 
 
-def _transfer_one(
+@dataclass
+class _Reading:
+    """A trial fetched and saved whose files are being read; its status comes when they are."""
+
+    key: str
+    number: int
+    # seconds its record and documents took
+    fetch_seconds: float
+    fetched: "Saved"
+    pages: "pages.Reading | pages.ReadingHere"
+
+
+def _tell(
+    source: RegisteredSource,
+    key: str,
+    number: int,
+    total: int,
+    status: str,
+    took: str,
+    result: TransferResult,
+    progress: Progress,
+) -> None:
+    result.statuses[key] = status
+    _log_trial(source.code, key, status, took, result.problems())
+    report(progress, f"{number}/{total} {key}: {status}")
+    count_done(len(result.statuses), total)
+
+
+def _finish_and_tell(
+    conn: psycopg.Connection,
+    source: RegisteredSource,
+    kinds: Sequence[str] | None,
+    result: TransferResult,
+    reading: _Reading,
+    total: int,
+    progress: Progress,
+) -> None:
+    with telemetry.tracer.start_as_current_span("ingest.trial.pages") as span:
+        span.set_attribute("trialwatch.source", source.code)
+        span.set_attribute("trialwatch.source.key", reading.key)
+        status = _finish_one(conn, source, kinds, result, reading)
+        span.set_attribute("trialwatch.ingest.status", status)
+    took = f"in {reading.fetch_seconds:.0f} s, its files read in {reading.pages.seconds:.0f} s"
+    _tell(source, reading.key, reading.number, total, status, took, result, progress)
+
+
+# A long transfer says how it goes every this many trials
+RATE_EVERY = 50
+
+
+def _rate(number: int, total: int, run_started: float, progress: Progress) -> None:
+    """Every RATE_EVERY trials: how long a trial takes, and about how long is left."""
+    if number % RATE_EVERY != 0 or number >= total:
+        return
+    per_trial = (time.monotonic() - run_started) / number
+    left = per_trial * (total - number)
+    report(progress, f"{number}/{total}: {per_trial:.0f} s a trial, about {_duration(left)} left")
+
+
+def _duration(seconds: float) -> str:
+    if seconds < 90 * 60:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"
+
+
+def _fetch_one(
     conn: psycopg.Connection,
     source: RegisteredSource,
     adapter: Adapter,
     key: str,
     kinds: Sequence[str] | None,
-    extract: Callable[[bytes], list[str]] | None,
     result: TransferResult,
-) -> str:
+    recheck: bool = False,
+    between: Callable[[], None] | None = None,
+) -> "Saved | None":
+    """The trial's record and documents, saved; None when even its record could not be (its failed
+    transfer recorded then, if the trial is known)."""
     result.trials += 1
     known = core.source_key_known(conn, source.code, key)
     if known:
         core.mark_transfer_started(conn, source=source.code, source_key=key, run_id=result.run_id)
     try:
-        fetched = save(conn, source.code, key, adapter, kinds)
+        fetched = save(conn, source.code, key, adapter, kinds, recheck, between)
     except Exception as exc:  # save reports errors itself; this keeps the run going if not
         fetched = Saved(trial_id=None, errors={"record": f"{type(exc).__name__}: {exc}"})
-    errors = {}
-    for where, message in fetched.errors.items():
-        errors[where] = message
     if fetched.trial_id is None:
-        for where, message in errors.items():
+        for where, message in fetched.errors.items():
             result.failed[f"{key}/{where}"] = message
         if known:
             core.save_transfer(
@@ -349,13 +473,17 @@ def _transfer_one(
                 run_id=result.run_id,
                 documents=0,
                 pages=0,
-                errors=errors,
+                errors=dict(fetched.errors),
                 document_kinds=kinds,
             )
         # else: neither listed nor fetched before, so there is no trial to record the failed transfer on
-        return "failed"
+        return None
     for where, message in fetched.warnings.items():
-        result.failed[f"{key}/{where}"] = message
+        if message == CUT_SHORT:
+            # downloaded twice, cut short both times: the source publishes it so (see _download)
+            result.left[f"{key}/{where}"] = message
+        else:
+            result.failed[f"{key}/{where}"] = message
     if fetched.trial_id not in result.trial_ids:
         result.trial_ids.append(fetched.trial_id)
     if fetched.new_trial:
@@ -364,19 +492,39 @@ def _transfer_one(
     result.documents += fetched.documents
     result.new_versions += fetched.new_versions
     result.unchanged += fetched.unchanged
+    result.known += fetched.known
     result.unlinked += fetched.unlinked
-    pages = extract_missing(conn, [fetched.trial_id], kinds=kinds, extract=extract)
-    result.pages += pages.pages
-    for sha, message in pages.failed.items():
+    return fetched
+
+
+def _finish_one(
+    conn: psycopg.Connection,
+    source: RegisteredSource,
+    kinds: Sequence[str] | None,
+    result: TransferResult,
+    reading: _Reading,
+) -> str:
+    """Save the trial's page text as its reading ends, index it, and record its transfer's status."""
+    key = reading.key
+    trial_id = reading.fetched.trial_id
+    errors = dict(reading.fetched.errors)
+    read = reading.pages.finish(conn)
+    result.pages += read.pages
+    for sha, message in read.failed.items():
         errors[f"file {sha}"] = message
-    unread = core.files_without_pages(conn, [fetched.trial_id], kinds=kinds)
-    if unread and not pages.failed:
+    unread = core.files_without_pages(conn, [trial_id], kinds=kinds)
+    own = reading.pages.files
+    if own is not None:
+        # a file another trial's fetch linked meanwhile (a document they share, at a new version) is
+        # that trial's to read: it is not this one's failure
+        unread = [sha for sha in unread if sha in own]
+    if unread and not read.failed:
         errors["pages"] = f"{len(unread)} files without page text"
-    problem = _index(conn, fetched.trial_id)
+    problem = _index(conn, trial_id)
     if problem is not None:
         # what search reads is not evidence: reported, the transfer can still complete
         result.failed[f"{key}/search"] = problem
-    documents, page_count = core.evidence_counts(conn, fetched.trial_id, kinds)
+    documents, page_count = core.evidence_counts(conn, trial_id, kinds)
     status = core.save_transfer(
         conn,
         source=source.code,
@@ -387,8 +535,14 @@ def _transfer_one(
         errors=errors,
         document_kinds=kinds,
     )
+    unreadable = set()
+    for sha in read.unreadable:
+        unreadable.add(f"file {sha}")
     for where, message in errors.items():
-        result.failed[f"{key}/{where}"] = message
+        if where in unreadable:
+            result.left[f"{key}/{where}"] = message
+        else:
+            result.failed[f"{key}/{where}"] = message
     if status == "complete":
         result.complete += 1
     return status
@@ -430,8 +584,9 @@ class Saved:
     # documents of the wanted kinds the record lists
     documents: int = 0
     new_versions: int = 0
-    # documents whose current file we already held, byte for byte
+    # documents whose current file we already held, byte for byte or (known) by its version label
     unchanged: int = 0
+    known: int = 0
     # links to documents the source no longer lists, now removed
     unlinked: int = 0
     # "record", or a document's key -> what went wrong: the evidence is not complete
@@ -454,10 +609,20 @@ def _fetch(source: str, adapter: Adapter, key: str) -> dict:
     return payload
 
 
-def save(conn: psycopg.Connection, source: str, key: str, adapter: Adapter, kinds: Sequence[str] | None) -> Saved:
+def save(
+    conn: psycopg.Connection,
+    source: str,
+    key: str,
+    adapter: Adapter,
+    kinds: Sequence[str] | None,
+    recheck: bool = False,
+    between: Callable[[], None] | None = None,
+) -> Saved:
     """Fetch one trial from its source and save what its record says: the record (a new version if it
     changed), its sponsors, sites and profile, and every listed document of these kinds (None: every
-    kind); documents of these kinds the source no longer lists are unlinked."""
+    kind); documents of these kinds the source no longer lists are unlinked. A document held at the
+    listed version is linked without downloading it, unless `recheck`. `between` runs after each
+    document (a transfer saves the previous trial's page text read meanwhile)."""
     try:
         # text fields can hold characters Postgres can't store (a NUL): cleaned before anything else
         payload = storable(_fetch(source, adapter, key))
@@ -512,9 +677,14 @@ def save(conn: psycopg.Connection, source: str, key: str, adapter: Adapter, kind
             saved.errors[f"document {document.key}"] = document.problem
             continue
         try:
-            _save_document(conn, adapter, source, key, record.trial_id, document, saved)
+            _save_document(conn, adapter, source, key, record.trial_id, document, saved, recheck)
+            beat(f"{key}: document {document.key}")
         except Exception as exc:  # recorded per document, the others go on
             saved.errors[f"document {document.key}"] = f"{type(exc).__name__}: {exc}"
+        if between is not None:
+            # another trial's work (its page text, each file's failure recorded there): what goes wrong
+            # here beyond a file is not this document's, and goes on up like any database error
+            between()
     saved.unlinked = core.unlink_documents_not_listed(
         conn,
         trial_id=record.trial_id,
@@ -526,10 +696,43 @@ def save(conn: psycopg.Connection, source: str, key: str, adapter: Adapter, kind
 
 
 def _check_file(document: DocumentRef, file: DownloadedFile) -> None:
-    if not file.content:
+    if file.size == 0:
         raise ValueError("empty file")
-    if document.listed_as_pdf and not file.content.startswith(b"%PDF"):
-        raise ValueError(f"listed as PDF but is not one (starts {file.content[:20]!r})")
+    if document.listed_as_pdf and not file.head(5).startswith(b"%PDF"):
+        raise ValueError(f"listed as PDF but is not one (starts {file.head(20)!r})")
+
+
+def _cut_short(document: DocumentRef, file: DownloadedFile) -> bool:
+    """A PDF without its end-of-file marker near its end: most likely cut short on the way."""
+    return document.listed_as_pdf and b"%%EOF" not in file.tail(PDF_END_BYTES)
+
+
+CUT_SHORT = "no %%EOF at its end on two downloads: the source publishes it cut short"
+
+
+def _download(adapter: Adapter, key: str, document: DocumentRef, saved: Saved) -> tuple[DownloadedFile, str | None]:
+    """The document's file, checked, and why it is suspect, if it is: a PDF that looks cut short is
+    downloaded once more, and kept with a warning if it still does (pypdf may read it anyway; if not,
+    its pages fail as a broken file). A suspect version is downloaded again by the next transfer."""
+    file = adapter.download(key, document)
+    try:
+        _check_file(document, file)
+        if not _cut_short(document, file):
+            return file, None
+    except BaseException:
+        file.close()
+        raise
+    file.close()
+    file = adapter.download(key, document)
+    try:
+        _check_file(document, file)
+    except BaseException:
+        file.close()
+        raise
+    if _cut_short(document, file):
+        saved.warnings[f"document {document.key}"] = CUT_SHORT
+        return file, CUT_SHORT
+    return file, None
 
 
 def _save_document(
@@ -540,23 +743,40 @@ def _save_document(
     trial_id: int,
     document: DocumentRef,
     saved: Saved,
+    recheck: bool = False,
 ) -> None:
-    file = adapter.download(key, document)
-    _check_file(document, file)
-    sha256 = hashlib.sha256(file.content).digest()
-    stored = core.save_document_version(
-        conn,
-        source=source,
-        source_key=document.key,
-        kind=document.kind,
-        title=document.title,
-        language=document.language,
-        version=document.version,
-        content=file.content,
-        media_type=file.media_type,
-        sha256=sha256,
-        published_at=document.published_at,
-    )
+    if not recheck:
+        known = core.known_document(
+            conn,
+            source=source,
+            source_key=document.key,
+            kind=document.kind,
+            title=document.title,
+            language=document.language,
+            version=document.version,
+        )
+        if known is not None:
+            saved.unchanged += 1
+            saved.known += 1
+            core.link_document(conn, trial_id=trial_id, document_id=known, basis="listed-by-source", source=source)
+            return
+    file, suspect = _download(adapter, key, document, saved)
+    with file:
+        stored = core.save_document_version(
+            conn,
+            source=source,
+            source_key=document.key,
+            kind=document.kind,
+            title=document.title,
+            language=document.language,
+            version=document.version,
+            # read (from its spool) only if the file is not stored yet
+            content=lambda: file.content,
+            media_type=file.media_type,
+            sha256=file.sha256(),
+            published_at=document.published_at,
+            suspect=suspect,
+        )
     if stored.new_version:
         saved.new_versions += 1
     else:

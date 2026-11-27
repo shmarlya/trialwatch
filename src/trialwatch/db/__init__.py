@@ -22,6 +22,15 @@ from trialwatch import config
 
 # Sessions run in UTC so timestamps come back as UTC-aware datetimes, whatever the server default
 SESSION_OPTIONS = "-c TimeZone=UTC"
+# Every connection: give up connecting after 10 s, and notice a database that went away without a word
+# (a restart, a network cut) within about 90 s, instead of waiting on it for ever
+LIVENESS = {
+    "connect_timeout": 10,
+    "keepalives": 1,
+    "keepalives_idle": 60,
+    "keepalives_interval": 10,
+    "keepalives_count": 3,
+}
 # TrialWatch itself (core.actor 1): who writes what no person does, such as scheduled jobs, automatic
 # checks and publishing, migrations and seeding the first admin
 SYSTEM_ACTOR = "trialwatch"
@@ -42,7 +51,7 @@ def open_pool(max_size: int = 10) -> None:
     global _pool
     if _pool is not None:
         return
-    settings = {"autocommit": True, "options": SESSION_OPTIONS}
+    settings = {"autocommit": True, "options": SESSION_OPTIONS, **LIVENESS}
     _pool = ConnectionPool(
         config.database_url(),
         min_size=1,
@@ -89,7 +98,7 @@ def connect(actor: str | None = None, actor_kind: str = "person") -> Iterator[ps
             act_as(conn, actor, actor_kind)
             yield conn
         return
-    with psycopg.connect(config.database_url(), autocommit=True, options=SESSION_OPTIONS) as conn:
+    with psycopg.connect(config.database_url(), autocommit=True, options=SESSION_OPTIONS, **LIVENESS) as conn:
         act_as(conn, actor, actor_kind)
         yield conn
 

@@ -10,6 +10,12 @@ session's trialwatch.job naming the job, so the runs and billed calls it makes r
 own connection (as trialwatch) keeps the queue: claims, progress lines, heartbeats, outcomes. While a
 job runs, a heartbeat thread says it is alive; a job whose worker died (no heartbeat for STALLED) has
 lost its attempt and is queued again by whichever worker looks next.
+
+A job that stops moving (no progress line or beat for TRIALWATCH_STUCK_MINUTES: a read or a query that
+never returns) is not kept alive by its heartbeat: the worker logs where it was and exits, so the
+container's restart policy starts a fresh one, and the job, requeued after STALLED, resumes where it
+was. A lost database connection is opened again (the queue's, the heartbeat's) rather than ending the
+worker; the job's own fails its attempt, which is tried again later.
 """
 
 import logging
@@ -25,7 +31,7 @@ from datetime import timedelta
 import psycopg
 from opentelemetry.trace import StatusCode
 
-from trialwatch import db, telemetry
+from trialwatch import config, db, progress, telemetry
 from trialwatch.auth import sessions
 from trialwatch.db import auth as auth_db
 from trialwatch.db import core
@@ -46,6 +52,10 @@ JOB_LINES_KEPT = timedelta(days=90)
 # How long it sleeps when nothing is queued
 IDLE = 5.0
 LONGEST_ERROR = 4000
+# The longest a statement of a job may run: a query that never returns fails its attempt instead
+STATEMENT_TIMEOUT = timedelta(minutes=15)
+# The longest pause before connecting again to a database that went away
+LONGEST_RECONNECT_WAIT = 60.0
 
 log = logging.getLogger("trialwatch.worker")
 
@@ -63,19 +73,44 @@ def job_connection(job: Job) -> Iterator[psycopg.Connection]:
     with db.connect(actor=job.actor, actor_kind=kind) as conn:
         core.act_as(conn, job.actor, kind)
         jobs_db.work_for_job(conn, job.id)
+        jobs_db.limit_statements(conn, STATEMENT_TIMEOUT)
         yield conn
 
 
-class Heartbeat:
-    """Says the job is alive every HEARTBEAT, on a connection of its own, until stopped."""
+def stop_stuck_worker() -> None:
+    """What the watchdog does with a stuck job: end this process at once (a stuck thread can't be
+    stopped from outside); the container's restart policy starts a new worker."""
+    os._exit(1)
 
-    def __init__(self, job_id: int, worker: str) -> None:
+
+class Heartbeat:
+    """Says the job is alive every HEARTBEAT, on a connection of its own (opened again if it is lost),
+    until stopped; unless the job has not moved for `stuck` (progress.beat), then it says nothing more
+    and calls `on_stuck` (by default, ends the worker)."""
+
+    def __init__(
+        self,
+        job_id: int,
+        worker: str,
+        stuck: timedelta | None = None,
+        on_stuck: Callable[[], None] = stop_stuck_worker,
+        every: timedelta = HEARTBEAT,
+    ) -> None:
         self.job_id = job_id
         self.worker = worker
+        if stuck is None:
+            stuck = timedelta(minutes=config.stuck_minutes())
+        self.stuck = stuck
+        self.on_stuck = on_stuck
+        self.every = every
+        # the database session the heartbeat writes from (tests end it to see it come back)
+        self.backend_pid: int | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._beat, name=f"heartbeat-{job_id}", daemon=True)
 
     def __enter__(self) -> "Heartbeat":
+        progress.start_counting()
+        progress.beat(f"job {self.job_id} started")
         self._thread.start()
         return self
 
@@ -84,14 +119,38 @@ class Heartbeat:
         self._thread.join(timeout=5)
 
     def _beat(self) -> None:
-        try:
-            with db.connect_system() as conn:
-                while not self._stop.wait(HEARTBEAT.total_seconds()):
-                    jobs_db.heartbeat(conn, self.job_id, self.worker)
-                    # the worker itself is alive too, while a long job runs
-                    telemetry.heartbeat()
-        except Exception:  # a missed heartbeat only means another worker may take the job over later
-            log.exception("heartbeat of job %s stopped", self.job_id)
+        failures = 0
+        while not self._stop.is_set():
+            try:
+                with db.connect_system() as conn:
+                    self.backend_pid = conn.info.backend_pid
+                    failures = 0
+                    while not self._stop.wait(self.every.total_seconds()):
+                        if self._is_stuck():
+                            return
+                        jobs_db.heartbeat(conn, self.job_id, self.worker, progress.counted())
+                        # the worker itself is alive too, while a long job runs
+                        telemetry.heartbeat()
+                return
+            except psycopg.Error as exc:  # the database went away: try again, the job may still finish
+                failures += 1
+                wait = min(LONGEST_RECONNECT_WAIT, 2.0**failures)
+                log.warning("heartbeat of job %s lost the database (%s): connecting again in %.0f s",
+                            self.job_id, exc, wait)
+                if self._stop.wait(wait):
+                    return
+            except Exception:  # a missed heartbeat only means another worker may take the job over later
+                log.exception("heartbeat of job %s stopped", self.job_id)
+                return
+
+    def _is_stuck(self) -> bool:
+        seconds, what = progress.since_last_beat()
+        if seconds < self.stuck.total_seconds():
+            return False
+        log.error("job %s has not moved for %.0f min (last: %s): stopping the worker, the job will be "
+                  "queued again", self.job_id, seconds / 60, what)
+        self.on_stuck()
+        return True
 
 
 def _short(text: str) -> str:
@@ -120,7 +179,7 @@ def run_one(queue: psycopg.Connection, job: Job, worker: str) -> str:
             jobs_db.set_trace_id(queue, job.id, trace_id)
         status = _attempt(queue, job, worker)
         span.set_attribute("trialwatch.job.status", status)
-        if status in ("failed", "queued"):
+        if status in ("failed", "partial", "queued"):
             span.set_status(StatusCode.ERROR, f"the attempt failed; the job is {status}")
     labels = {"kind": job.kind, "status": status}
     telemetry.jobs_finished.add(1, labels)
@@ -154,8 +213,12 @@ def _record(
     queue: psycopg.Connection, ctx: JobContext, job: Job, outcome: Outcome | None, error: str | None, permanent: bool
 ) -> str:
     result = job.result
+    failures = {}
     if outcome is not None:
         result = outcome.result
+        # what another attempt can't fix is shown with the rest, but fails nothing (Outcome)
+        failures = {**outcome.failed, **outcome.left}
+    jobs_db.record_attempt(queue, job.id, failures, progress.counted())
     if ctx.cancelled:
         jobs_db.finish(queue, job.id, "cancelled", result, "cancelled by a person")
         ctx.add("cancelled")
@@ -163,16 +226,31 @@ def _record(
     if ctx.hold_reason is not None and error is None:
         jobs_db.hold(queue, job.id, result, ctx.hold_reason)
         return "held"
+    # the step failed as a whole (it raised, or said so: Outcome.broken): failed once no attempt is left.
+    # It ran, but items failed (worth another attempt) or were left to people: partial at the end.
+    whole = error is not None or (outcome is not None and outcome.broken is not None)
+    if error is None and outcome is not None and outcome.broken is not None:
+        error = outcome.broken
     if error is None and outcome is not None and outcome.failed:
         error = failures_text(outcome.failed)
     if error is None:
+        if outcome is not None and outcome.left:
+            text = f"{len(outcome.left)} left to a person"
+            jobs_db.finish(queue, job.id, "partial", result, text)
+            ctx.add(f"partial: {text}")
+            return "partial"
         jobs_db.finish(queue, job.id, "succeeded", result)
         ctx.add("succeeded")
         return "succeeded"
     ctx.add(f"failed: {error}")
     if permanent or job.attempts >= job.max_attempts:
-        jobs_db.finish(queue, job.id, "failed", result, error)
-        return "failed"
+        status = "partial"
+        if whole:
+            status = "failed"
+        jobs_db.finish(queue, job.id, status, result, error)
+        if status == "partial":
+            ctx.add(f"partial: {len(failures)} items did not succeed")
+        return status
     delay = backoff(job.attempts)
     jobs_db.try_later(queue, job.id, delay, result, error)
     ctx.add(f"tried again in {_minutes(delay)}")
@@ -230,31 +308,52 @@ def start_due_schedules(queue: psycopg.Connection) -> list[int]:
         started.append(job_id)
 
 
-def run(once: bool = False, should_stop: Callable[[], bool] | None = None) -> int:
-    """Work until stopped (Ctrl-C), or with `once` until the queue is empty. Returns the jobs run."""
+def run(once: bool = False, should_stop: Callable[[], bool] | None = None,
+        sleep: Callable[[float], None] = time.sleep) -> int:
+    """Work until stopped (Ctrl-C), or with `once` until the queue is empty. Returns the jobs run.
+    A lost database is connected to again, after a growing pause (a job it was recording is queued
+    again once its heartbeat lapses); `sleep` waits it out (tests give their own)."""
     worker = worker_name()
-    ran = 0
+    ran = [0]
+    failures = 0
+    while True:
+        try:
+            with db.connect_system() as queue:
+                failures = 0
+                _work(queue, worker, once, should_stop, ran)
+                return ran[0]
+        except psycopg.OperationalError as exc:
+            if once:
+                raise
+            failures += 1
+            wait = min(LONGEST_RECONNECT_WAIT, 2.0**failures)
+            log.warning("the worker lost the database (%s): connecting again in %.0f s", exc, wait)
+            sleep(wait)
+
+
+def _work(queue: psycopg.Connection, worker: str, once: bool, should_stop: Callable[[], bool] | None,
+          ran: list[int]) -> None:
+    """The worker's loop on one queue connection: housekeeping, then the next job, until stopped."""
     last_housekeeping = None
     last_purge = None
-    with db.connect_system() as queue:
-        while True:
-            if should_stop is not None and should_stop():
-                return ran
-            telemetry.heartbeat()
-            now = time.monotonic()
-            if last_housekeeping is None or now - last_housekeeping >= HOUSEKEEPING.total_seconds():
-                housekeeping(queue)
-                last_housekeeping = now
-            if last_purge is None or now - last_purge >= PURGE.total_seconds():
-                purge(queue)
-                last_purge = now
-            job = jobs_db.claim_next(queue, worker)
-            if job is None:
-                if once:
-                    return ran
-                time.sleep(IDLE)
-                continue
-            log.info("job %s (%s) attempt %s", job.id, job.kind, job.attempts)
-            status = run_one(queue, job, worker)
-            log.info("job %s: %s", job.id, status)
-            ran += 1
+    while True:
+        if should_stop is not None and should_stop():
+            return
+        telemetry.heartbeat()
+        now = time.monotonic()
+        if last_housekeeping is None or now - last_housekeeping >= HOUSEKEEPING.total_seconds():
+            housekeeping(queue)
+            last_housekeeping = now
+        if last_purge is None or now - last_purge >= PURGE.total_seconds():
+            purge(queue)
+            last_purge = now
+        job = jobs_db.claim_next(queue, worker)
+        if job is None:
+            if once:
+                return
+            time.sleep(IDLE)
+            continue
+        log.info("job %s (%s) attempt %s", job.id, job.kind, job.attempts)
+        status = run_one(queue, job, worker)
+        log.info("job %s: %s", job.id, status)
+        ran[0] += 1

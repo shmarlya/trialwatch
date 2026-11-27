@@ -4,7 +4,8 @@
   "description": "Whether a trial's results documents report how many participants took part, give a result for every registered primary endpoint, and whether the trial enrolled nobody: the three questions Bruckner et al.'s reviewers answered for each results document (Regulation 536/2014). Not reported needs the whole document read; anything the rules can't settle is undecided, for a person.",
   "document_kinds": ["results-summary", "study-report", "publication"],
   "not_reported_kinds": ["narrative_only", "chart_only", "redacted", "not_analysed"],
-  "open_kinds": ["not_conducted", "partial_result"],
+  "reported_kinds": ["partial_result"],
+  "open_kinds": ["not_conducted"],
   "requirements": [
     {
       "key": "participants",

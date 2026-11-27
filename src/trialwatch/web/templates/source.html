@@ -39,6 +39,8 @@
       <select name="which">{% for name, text in choices.items() %}<option value="{{ name }}">{{ name }}: {{ text }}</option>{% endfor %}</select>
     </label>
     <label>Limit<input type="number" name="limit" min="1" placeholder="all"></label>
+    <label class="small"><input type="checkbox" name="recheck" value="true"> Download every document again
+      (else those held at the listed version are not)</label>
     <button {% if not row.enabled %}disabled{% endif %}>Transfer</button>
   </form>
   <form class="panel step" method="post" action="/jobs">
@@ -80,7 +82,7 @@
       <td class="small">{{ (trial.title or "")[:110] }}{% if trial.title and trial.title | length > 110 %}…{% endif %}</td>
       {% if adapter %}{% for name, field in adapter.listing_columns %}<td class="small">{{ (trial.summary or {}).get(field) or "—" }}</td>{% endfor %}{% endif %}
       <td class="small">{{ trial.source_updated_on or "—" }}</td>
-      <td>{{ evidence_state(trial.status) }}{% if trial.transferred_at %}<br><span class="small muted">{{ when(trial.transferred_at) }}</span>{% endif %}
+      <td>{{ evidence_state(trial.status) }}{% if trial.stuck %} <span class="small">stuck: failed on {{ trial.failures }} days, left for a person</span>{% endif %}{% if trial.transferred_at %}<br><span class="small muted">{{ when(trial.transferred_at) }}</span>{% endif %}
         {% for where, message in (trial.errors or {}).items() %}<br><span class="small" title="{{ message }}"><span class="flag">{{ where }}</span> {{ message[:60] }}</span>{% endfor %}</td>
       <td class="num small">{% if trial.transferred_at %}{{ trial.documents }} · {{ trial.pages }}{% else %}—{% endif %}</td>
     </tr>

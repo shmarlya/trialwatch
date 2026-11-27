@@ -1,6 +1,10 @@
 """The CTIS adapter into the central model (ADR-003, ADR-005), against a fake CTIS."""
 
 import copy
+import re
+import threading
+import time
+import pytest
 import dataclasses
 from datetime import UTC, datetime
 
@@ -8,7 +12,7 @@ from trialwatch.db import core, overview
 from trialwatch.db.core import Identifier
 from trialwatch.hashing import storable
 from trialwatch.sources import ctis
-from trialwatch.trials import ingest, readiness
+from trialwatch.trials import ingest, pages, readiness
 from trialwatch.sources.ctis_client import DownloadedFile
 from trialwatch.trials.pages import extract_missing, text_fingerprint
 
@@ -84,6 +88,8 @@ class FakeCtis:
 
     def __init__(self, record, listing=None):
         self.record = record
+        # uuid -> how many more downloads of it come without the PDF's %%EOF (cut short)
+        self.cut_short: dict[str, int] = {}
         self.listing = []
         if listing is not None:
             self.listing = listing
@@ -110,7 +116,13 @@ class FakeCtis:
         extra = ""
         if uuid in self.replaced:
             extra = self.replaced[uuid]
-        return DownloadedFile(f"%PDF-1.7 {uuid} v{version}{extra}".encode(), "application/pdf", None)
+        end = "\n%%EOF"
+        if uuid in self.cut_short:
+            end = ""
+            self.cut_short[uuid] -= 1
+            if self.cut_short[uuid] == 0:
+                del self.cut_short[uuid]
+        return DownloadedFile(f"%PDF-1.7 {uuid} v{version}{extra}{end}".encode(), "application/pdf", None)
 
     def search(self, criteria, page, size, direction="ASC"):
         """Like CTIS: sorted by EU CT number, and nothing past ctis.SEARCH_LIMIT rows of one query."""
@@ -153,12 +165,13 @@ def ctis_source(conn, **config):
     return dataclasses.replace(source, config=changed)
 
 
-def transfer(conn, fake, keys=(CT,), source=None, extract=read_text, why="chosen", should_stop=None):
+def transfer(conn, fake, keys=(CT,), source=None, extract=read_text, why="chosen", should_stop=None,
+             recheck=False):
     """A transfer from the fake CTIS, as the registered source (or `source`) is configured."""
     if source is None:
         source = ctis_source(conn)
     return ingest.transfer(conn, source, ctis.CtisAdapter(fake), keys, why=why, should_stop=should_stop,
-                           extract=extract)
+                           extract=extract, recheck=recheck)
 
 
 def listing_rows(keys):
@@ -260,10 +273,11 @@ def test_ingests_the_trial_and_its_result_documents_once(conn):
     second = transfer(conn, fake)
     assert (first.trials, first.new_trials, first.new_versions, first.failed) == (1, 1, 2, {})
     assert first.statuses == {CT: "complete"} and first.pages == 2
-    # the summary and the study report, not the lay summary or the protocol: downloaded by every
-    # transfer, to compare their bytes, and stored once
-    assert sorted(fake.downloads) == [SUMMARY["uuid"], SUMMARY["uuid"], REPORT["uuid"], REPORT["uuid"]]
-    assert (second.new_trials, second.new_versions, second.unchanged) == (0, 0, 2)
+    # the summary and the study report, not the lay summary or the protocol: downloaded once, the
+    # second transfer finds them held at the version CTIS lists
+    assert sorted(fake.downloads) == [SUMMARY["uuid"], REPORT["uuid"]]
+    assert (second.new_trials, second.new_versions, second.unchanged, second.known) == (0, 0, 2, 2)
+    assert "2 held at their version, not downloaded" in second.summary()
     records = conn.execute("SELECT count(*) FROM core.trial_record WHERE source_key = %s", (CT,)).fetchone()
     assert records == (1,)  # the same record again is not a new version
     links = conn.execute("SELECT count(*) FROM core.trial_document l JOIN core.trial_source s USING (trial_id) "
@@ -398,8 +412,61 @@ def test_page_text_is_extracted_once_and_fingerprinted(conn, monkeypatch):
     assert text_fingerprint(["", "  "]) is None  # scanned: no fingerprint, so never "the same" as another
 
 
+def test_the_worker_reads_a_trials_files_in_children_several_at_once(conn, monkeypatch):
+    # extract_missing's own path in the worker: sizes from the database, read_in_children, each saved
+    core.act_as(conn, "ctis-adapter", "process")
+    transfer(conn, FakeCtis(RECORD), extract=unreadable)
+    monkeypatch.setattr("trialwatch.trials.pages.READ_IN_CHILD", True)
+    read = []
+
+    def read_in_child(sha256, stop=None):  # in this process: a child can't see the test's transaction
+        read.append(sha256)
+        return ["page one", "page two"]
+
+    monkeypatch.setattr("trialwatch.trials.pages.read_in_child", read_in_child)
+    result = extract_missing(conn, readers=2)
+    assert (result.files, result.pages, result.failed) == (2, 4, {})
+    assert len(read) == 2
+
+
 def unreadable(content):
     raise ValueError("not read in this test")
+
+
+def test_what_goes_wrong_saving_another_trials_pages_is_not_a_documents_failure(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    calls = []
+
+    def between():
+        calls.append(1)
+        raise RuntimeError("the database went away")
+
+    # raised, not recorded as a failure of the document just saved (which is stored)
+    with pytest.raises(RuntimeError, match="went away"):
+        ingest.save(conn, "ctis", CT, ctis.CtisAdapter(FakeCtis(RECORD)), None, between=between)
+    assert calls == [1]
+
+
+def test_a_trials_log_line_gives_its_fetch_and_its_reading_apart(conn, caplog):
+    # its files are read while the next trial is fetched: one time for both would count that fetch too
+    core.act_as(conn, "ctis-adapter", "process")
+    with caplog.at_level("INFO", logger="trialwatch.ingest"):
+        transfer(conn, FakeCtis(RECORD))
+    [line] = [r.getMessage() for r in caplog.records if r.getMessage().startswith(f"transfer ctis {CT}")]
+    assert re.fullmatch(rf"transfer ctis {CT} complete in \d+ s, its files read in \d+ s", line), line
+
+
+def test_a_file_whose_reading_runs_out_of_memory_is_tried_again_not_left_to_people(conn):
+    # memory depends on what else is read at once, not on the file: another attempt may read it
+    core.act_as(conn, "ctis-adapter", "process")
+
+    def out_of_memory(content):
+        raise MemoryError("no room")
+
+    result = transfer(conn, FakeCtis(RECORD), extract=out_of_memory)
+    assert result.statuses == {CT: "failed"}
+    assert result.left == {}
+    assert len(result.failed) == 2 and set(result.failed.values()) == {"MemoryError: no room"}
 
 
 def two_pages(content):
@@ -536,7 +603,10 @@ def test_a_file_replaced_without_a_new_system_version_is_a_new_version(conn):
     fake = FakeCtis(RECORD)
     trial_id = transfer(conn, fake).trial_ids[0]
     fake.replaced[SUMMARY["uuid"]] = " corrected"
-    again = transfer(conn, fake)
+    # the label is the same: only a transfer that downloads every document again finds the new bytes
+    unchecked = transfer(conn, fake)
+    assert (unchecked.new_versions, unchecked.known) == (0, 2)
+    again = transfer(conn, fake, recheck=True)
     # the label is the same, the bytes are not: kept apart, the newer one current
     assert (again.new_versions, again.unchanged) == (1, 1)
     assert versions_of(conn, SUMMARY["uuid"]) == [(SUMMARY["systemVersion"], False), (SUMMARY["systemVersion"], True)]
@@ -546,6 +616,228 @@ def test_a_file_replaced_without_a_new_system_version_is_a_new_version(conn):
     ).fetchall()
     assert "corrected" in pages[0][0]
     # nothing new the next time
-    third = transfer(conn, fake)
+    third = transfer(conn, fake, recheck=True)
     assert (third.new_versions, third.unchanged) == (0, 2)
     assert trial_id == third.trial_ids[0]
+
+
+def test_a_document_at_a_new_version_is_downloaded_and_a_retry_downloads_only_what_failed(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.download_errors[REPORT["uuid"]] = OSError("connection reset")
+    first = transfer(conn, fake)
+    assert first.statuses == {CT: "failed"}
+    fake.download_errors.clear()
+    fake.downloads.clear()
+    retry = transfer(conn, fake)
+    assert retry.statuses == {CT: "complete"}
+    assert fake.downloads == [REPORT["uuid"]]  # the summary was held already
+    bumped = copy.deepcopy(RECORD)
+    for document in bumped["documents"]:
+        if document["uuid"] == SUMMARY["uuid"]:
+            document["systemVersion"] = "9.0"
+    fake.record = bumped
+    fake.downloads.clear()
+    third = transfer(conn, fake)
+    assert fake.downloads == [SUMMARY["uuid"]]
+    assert versions_of(conn, SUMMARY["uuid"])[-1] == ("9.0", True)
+    assert third.known == 1
+
+
+def test_a_recheck_is_recorded_on_the_run(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    result = transfer(conn, FakeCtis(RECORD), recheck=True)
+    args = conn.execute("SELECT args->>'recheck' FROM core.ingest_run WHERE id = %s", (result.run_id,)).fetchone()
+    assert args == ("true",)
+
+
+def test_a_pdf_cut_short_is_downloaded_once_more(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.cut_short[SUMMARY["uuid"]] = 1
+    result = transfer(conn, fake)
+    assert sorted(fake.downloads) == sorted([SUMMARY["uuid"], SUMMARY["uuid"], REPORT["uuid"]])
+    assert result.statuses == {CT: "complete"}
+    assert result.failed == {}
+
+
+def test_a_pdf_still_cut_short_is_kept_with_a_warning_left_to_people(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.cut_short[SUMMARY["uuid"]] = 2
+    result = transfer(conn, fake)
+    # cut short on both downloads: the source publishes it so, and another try would get the same bytes
+    assert result.left == {f"{CT}/document {SUMMARY['uuid']}": ingest.CUT_SHORT}
+    assert result.failed == {}
+    assert result.statuses == {CT: "complete"}  # a warning: the file is stored, its pages read
+
+
+def test_a_file_that_cannot_be_read_is_left_to_people_not_tried_again(conn):
+    # 2022-501485-22-00 (2026-11-25): CTIS stores a 32.7 MB PDF as its first 17.8 MB; pypdf fails on it
+    # the same way every time, so the job must not fail and try again for it
+    core.act_as(conn, "ctis-adapter", "process")
+    result = transfer(conn, FakeCtis(RECORD), extract=unreadable)
+    assert result.statuses == {CT: "failed"}  # the trial's evidence is not complete: a person sees why
+    assert result.failed == {}
+    assert len(result.left) == 2
+    for where, message in result.left.items():
+        assert where.startswith(f"{CT}/file ") and message == "ValueError: not read in this test"
+    errors = conn.execute("SELECT errors FROM core.ingest_run WHERE id = %s", (result.run_id,)).fetchone()[0]
+    assert set(errors) == set(result.left)  # the run records everything that went wrong
+
+
+def failing_days(conn):
+    return conn.execute(
+        "SELECT e.failures, e.stuck FROM core.evidence_status e WHERE e.source_key = %s", (CT,)
+    ).fetchone()
+
+
+def a_day_earlier(conn):
+    conn.execute("UPDATE core.evidence_transfer SET failed_on = failed_on - 1 WHERE source_key = %s", (CT,))
+
+
+def test_a_trial_failing_on_three_days_is_stuck_until_it_completes(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.download_errors[REPORT["uuid"]] = ValueError("too large to download: 400 MB")
+    transfer(conn, fake)
+    transfer(conn, fake)  # a retry the same day (a job's attempts during an outage) counts once
+    assert failing_days(conn) == (1, False)
+    a_day_earlier(conn)
+    transfer(conn, fake)
+    a_day_earlier(conn)
+    transfer(conn, fake)
+    assert failing_days(conn) == (3, True)
+    assert core.keys_to_transfer(conn, "ctis", "failed") == []
+    assert core.keys_to_transfer(conn, "ctis", "stuck") == [CT]
+    fake.download_errors.clear()
+    transfer(conn, fake)  # a person transfers it again
+    assert failing_days(conn) == (0, False)
+
+
+def test_a_stuck_trial_the_source_changed_is_taken_again(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.download_errors[REPORT["uuid"]] = ValueError("too large to download: 400 MB")
+    for _ in range(3):
+        transfer(conn, fake)
+        a_day_earlier(conn)
+    assert failing_days(conn) == (3, True)
+    source = conn.execute("SELECT id FROM core.source WHERE code = 'ctis'").fetchone()[0]
+    run = core.start_ingest(conn, "ctis", {}, kind="list")
+    conn.execute(
+        "INSERT INTO core.source_listing (source_id, source_key, source_updated_on, last_run) "
+        "VALUES (%s, %s, current_date, %s) "
+        "ON CONFLICT (source_id, source_key) DO UPDATE SET source_updated_on = current_date",
+        (source, CT, run),
+    )
+    assert failing_days(conn)[1] is False
+    assert core.keys_to_transfer(conn, "ctis", "failed") == [CT]
+
+
+# The next trial is fetched while the last one's files are read (children; here, threads in this process)
+
+CT2 = "1999-000000-00-12"
+
+
+def second_trial():
+    record = copy.deepcopy(RECORD)
+    record["ctNumber"] = CT2
+    del record["authorizedApplication"]["authorizedPartI"]["trialDetails"]["clinicalTrialIdentifiers"][
+        "secondaryIdentifyingNumbers"]
+    for number, document in enumerate(record["documents"], start=11):
+        document["uuid"] = f"00000000-0000-4000-8000-0000000000{number}"
+    return record
+
+
+class TwoTrials(FakeCtis):
+    def __init__(self):
+        super().__init__(RECORD)
+        self.records = {CT: RECORD, CT2: second_trial()}
+        self.second_fetched = threading.Event()
+
+    def retrieve(self, ct_number):
+        if ct_number == CT2:
+            self.second_fetched.set()
+            if self.retrieve_error is not None:
+                raise self.retrieve_error
+        self.record = self.records[ct_number]
+        return copy.deepcopy(self.record)
+
+
+def test_a_trials_files_are_read_while_the_next_trial_is_fetched(conn, monkeypatch):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = TwoTrials()
+    overlapped = []
+
+    def read_in_child(sha256, stop=None):
+        # the first trial's files wait for the second trial's fetch: only an overlap lets them finish
+        overlapped.append(fake.second_fetched.wait(5))
+        return ["page one"]
+
+    monkeypatch.setattr("trialwatch.trials.pages.READ_IN_CHILD", True)
+    monkeypatch.setattr("trialwatch.trials.pages.read_in_child", read_in_child)
+    result = transfer(conn, fake, keys=(CT, CT2), extract=None)
+    assert result.statuses == {CT: "complete", CT2: "complete"}
+    assert result.pages == 4
+    assert overlapped and all(overlapped)
+
+
+def test_an_interrupted_transfer_stops_the_reading_of_the_trial_in_hand(conn, monkeypatch):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = TwoTrials()
+    fake.retrieve_error = KeyboardInterrupt()
+    stopped = []
+
+    def read_in_child(sha256, stop=None):
+        deadline = time.monotonic() + 10
+        while not stop.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        stopped.append(stop.is_set())
+        raise pages.FileNotRead("stopped: the reading was interrupted")
+
+    monkeypatch.setattr("trialwatch.trials.pages.READ_IN_CHILD", True)
+    monkeypatch.setattr("trialwatch.trials.pages.read_in_child", read_in_child)
+    started = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        transfer(conn, fake, keys=(CT, CT2), extract=None)
+    assert time.monotonic() - started < 5
+    assert stopped and all(stopped)
+    status = conn.execute("SELECT status FROM core.evidence_transfer WHERE source_key = %s", (CT,)).fetchone()
+    assert status in (None, ("failed",))  # never complete without its page text
+
+
+def test_a_pdf_kept_cut_short_is_downloaded_again_by_the_next_transfer(conn):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = FakeCtis(RECORD)
+    fake.cut_short[SUMMARY["uuid"]] = 2
+    transfer(conn, fake)
+    fake.downloads.clear()
+    again = transfer(conn, fake)  # the same version, but its file was suspect: downloaded, now whole
+    assert fake.downloads == [SUMMARY["uuid"]]
+    assert again.failed == {}
+    fake.downloads.clear()
+    transfer(conn, fake)  # whole now: held at its version
+    assert fake.downloads == []
+
+
+def test_the_last_trials_pages_are_saved_while_the_next_trial_downloads(conn, monkeypatch):
+    core.act_as(conn, "ctis-adapter", "process")
+    fake = TwoTrials()
+    saved_meanwhile = []
+    original = fake.download_document
+
+    def download_document(ct_number, uuid):
+        if ct_number == CT2:
+            time.sleep(0.2)  # the first trial's files are read by now
+            pages_saved = conn.execute("SELECT count(*) FROM core.page").fetchone()[0]
+            saved_meanwhile.append(pages_saved)
+        return original(ct_number, uuid)
+
+    fake.download_document = download_document
+    monkeypatch.setattr("trialwatch.trials.pages.READ_IN_CHILD", True)
+    monkeypatch.setattr("trialwatch.trials.pages.read_in_child", lambda sha256, stop=None: ["page one"])
+    result = transfer(conn, fake, keys=(CT, CT2), extract=None)
+    assert result.statuses == {CT: "complete", CT2: "complete"}
+    # by the second trial's last document, the first trial's two files were saved
+    assert saved_meanwhile[-1] == 2

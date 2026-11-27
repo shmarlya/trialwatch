@@ -491,7 +491,8 @@ CREATE TABLE core.document_version (
     published_at timestamp with time zone,
     fetched_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     replaced_at timestamp with time zone,
-    created_by bigint NOT NULL
+    created_by bigint NOT NULL,
+    suspect text
 );
 
 
@@ -522,6 +523,24 @@ CREATE VIEW core.document_current AS
     v.fetched_at
    FROM (core.document d
      JOIN core.document_version v ON (((v.document_id = d.id) AND (v.replaced_at IS NULL))));
+
+
+--
+-- Name: page_ocr; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.page_ocr (
+    file_sha256 bytea NOT NULL,
+    page_no integer NOT NULL,
+    is_picture boolean NOT NULL,
+    text text,
+    extractor text,
+    tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, COALESCE(text, ''::text))) STORED,
+    letters integer GENERATED ALWAYS AS (length(regexp_replace(COALESCE(text, ''::text), '[^[:alpha:]]'::text, ''::text, 'g'::text))) STORED,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT page_ocr_check CHECK (((text IS NULL) = (extractor IS NULL))),
+    CONSTRAINT page_ocr_check1 CHECK (((text IS NULL) OR is_picture))
+);
 
 
 --
@@ -631,7 +650,10 @@ CREATE VIEW checks.judgement_current AS
              JOIN core.document_current d ON ((d.id = l.document_id)))
           WHERE ((l.trial_id = j.trial_id) AND (l.removed_at IS NULL) AND (NOT (d.version_id = ANY (j.document_versions))) AND (d.kind IN ( SELECT jsonb_array_elements_text(((r.requirements_text)::jsonb -> 'document_kinds'::text)) AS jsonb_array_elements_text))))) OR (EXISTS ( SELECT
            FROM core.trial_record_current c
-          WHERE ((c.trial_id = j.trial_id) AND (c.id IS DISTINCT FROM j.trial_record_id) AND (c.fetched_at > r.started_at))))) AS outdated,
+          WHERE ((c.trial_id = j.trial_id) AND (c.id IS DISTINCT FROM j.trial_record_id) AND (c.fetched_at > r.started_at)))) OR (EXISTS ( SELECT
+           FROM (core.document_version v
+             JOIN core.page_ocr o ON ((o.file_sha256 = v.file_sha256)))
+          WHERE ((v.id = ANY (j.document_versions)) AND (o.text IS NOT NULL) AND (o.created_at > r.started_at))))) AS outdated,
     r.finished_at AS published_at,
     j.agreement,
     j.withdrawn_at,
@@ -837,7 +859,10 @@ CREATE TABLE core.evidence_transfer (
     documents integer DEFAULT 0 NOT NULL,
     pages integer DEFAULT 0 NOT NULL,
     errors jsonb DEFAULT '{}'::jsonb NOT NULL,
+    failures integer DEFAULT 0 NOT NULL,
+    failed_on date,
     CONSTRAINT evidence_transfer_check CHECK (((status = 'complete'::text) = (errors = '{}'::jsonb))),
+    CONSTRAINT evidence_transfer_failures_check CHECK ((failures >= 0)),
     CONSTRAINT evidence_transfer_status_check CHECK ((status = ANY (ARRAY['complete'::text, 'failed'::text])))
 );
 
@@ -892,7 +917,9 @@ CREATE VIEW core.evidence_status AS
     e.documents,
     e.pages,
     e.errors,
-    l.recruiting
+    l.recruiting,
+    COALESCE(e.failures, 0) AS failures,
+    COALESCE(((e.status = 'failed'::text) AND (e.failures >= 3) AND (NOT COALESCE((l.source_updated_on >= e.failed_on), false))), false) AS stuck
    FROM ((core.trial_source ts
      LEFT JOIN core.source_listing l USING (source_id, source_key))
      LEFT JOIN core.evidence_transfer e USING (source_id, source_key));
@@ -911,6 +938,8 @@ CREATE TABLE core.file (
     pages_extracted_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     created_by bigint NOT NULL,
+    ocr_at timestamp with time zone,
+    ocr_error text,
     CONSTRAINT file_check CHECK ((size_bytes = length(content))),
     CONSTRAINT file_sha256_check CHECK ((length(sha256) = 32)),
     CONSTRAINT file_text_fingerprint_check CHECK ((length(text_fingerprint) = 32))
@@ -1083,6 +1112,28 @@ CREATE TABLE core.page (
     letters integer GENERATED ALWAYS AS (length(regexp_replace(text, '[^[:alpha:]]'::text, ''::text, 'g'::text))) STORED,
     CONSTRAINT page_page_no_check CHECK ((page_no >= 1))
 );
+
+
+--
+-- Name: page_text; Type: VIEW; Schema: core; Owner: -
+--
+
+CREATE VIEW core.page_text AS
+ SELECT p.file_sha256,
+    p.page_no,
+    COALESCE(o.text, p.text) AS text,
+    COALESCE(o.extractor, p.extractor) AS extractor,
+        CASE
+            WHEN (o.text IS NOT NULL) THEN o.tsv
+            ELSE p.tsv
+        END AS tsv,
+        CASE
+            WHEN (o.text IS NOT NULL) THEN o.letters
+            ELSE p.letters
+        END AS letters,
+    o.is_picture
+   FROM (core.page p
+     LEFT JOIN core.page_ocr o ON (((o.file_sha256 = p.file_sha256) AND (o.page_no = p.page_no))));
 
 
 --
@@ -1509,10 +1560,16 @@ CREATE TABLE jobs.job (
     started_at timestamp with time zone,
     finished_at timestamp with time zone,
     trace_id text,
-    CONSTRAINT job_check CHECK (((status = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text])) = (finished_at IS NOT NULL))),
+    progress_done integer,
+    progress_total integer,
+    attempt_started_at timestamp with time zone,
+    failures jsonb DEFAULT '{}'::jsonb NOT NULL,
+    CONSTRAINT job_check CHECK (((status = ANY (ARRAY['succeeded'::text, 'partial'::text, 'failed'::text, 'cancelled'::text])) = (finished_at IS NOT NULL))),
     CONSTRAINT job_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text, 'annotate'::text]))),
     CONSTRAINT job_max_attempts_check CHECK ((max_attempts >= 1)),
-    CONSTRAINT job_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'held'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
+    CONSTRAINT job_progress_done_check CHECK ((progress_done >= 0)),
+    CONSTRAINT job_progress_total_check CHECK ((progress_total >= 0)),
+    CONSTRAINT job_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'held'::text, 'succeeded'::text, 'partial'::text, 'failed'::text, 'cancelled'::text])))
 );
 
 
@@ -2205,6 +2262,14 @@ ALTER TABLE ONLY core.organisation
 
 
 --
+-- Name: page_ocr page_ocr_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.page_ocr
+    ADD CONSTRAINT page_ocr_pkey PRIMARY KEY (file_sha256, page_no);
+
+
+--
 -- Name: page page_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -2891,6 +2956,13 @@ CREATE TRIGGER page_never_changes BEFORE DELETE OR UPDATE ON core.page FOR EACH 
 
 
 --
+-- Name: page_ocr page_ocr_never_changes; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER page_ocr_never_changes BEFORE DELETE OR UPDATE ON core.page_ocr FOR EACH ROW EXECUTE FUNCTION core.refuse_change();
+
+
+--
 -- Name: possible_duplicate possible_duplicate_audit; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -3321,6 +3393,14 @@ ALTER TABLE ONLY core.organisation
 
 ALTER TABLE ONLY core.page
     ADD CONSTRAINT page_file_sha256_fkey FOREIGN KEY (file_sha256) REFERENCES core.file(sha256);
+
+
+--
+-- Name: page_ocr page_ocr_file_sha256_page_no_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.page_ocr
+    ADD CONSTRAINT page_ocr_file_sha256_page_no_fkey FOREIGN KEY (file_sha256, page_no) REFERENCES core.page(file_sha256, page_no);
 
 
 --
@@ -3761,4 +3841,10 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261124160000'),
     ('20261124170000'),
     ('20261124180000'),
-    ('20261124190000');
+    ('20261124190000'),
+    ('20261125100000'),
+    ('20261125110000'),
+    ('20261125120000'),
+    ('20261126100000'),
+    ('20261127100000'),
+    ('20261127110000');

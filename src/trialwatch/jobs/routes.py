@@ -5,6 +5,7 @@ its progress lines from the database. Also the admin pages for jobs, schedules a
 
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 from typing import Annotated
@@ -20,7 +21,7 @@ from trialwatch.checks import settings as check_settings
 from trialwatch.db import core, overview
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
-from trialwatch.jobs import PRIORITY_AUTOMATIC, PRIORITY_PERSON, tasks
+from trialwatch.jobs import PRIORITY_AUTOMATIC, PRIORITY_PERSON, failures, tasks
 from trialwatch.llm import dollars
 from trialwatch.sources import registry
 from trialwatch.db import auth as auth_db
@@ -51,6 +52,8 @@ class JobRequest:
     # evidence: the setup the check runs with (a file in checks/configs/)
     config: str = check_settings.DEFAULT
     dry_run: bool = False
+    # transfer: download every document again, even those held at the version the source lists
+    recheck: bool = False
 
 
 def job_params(request: JobRequest) -> tuple[str, dict]:
@@ -66,6 +69,8 @@ def job_params(request: JobRequest) -> tuple[str, dict]:
             params["keys"] = list(request.keys)
         if request.which:
             params["which"] = request.which
+        if request.recheck:
+            params["recheck"] = True
     if kind == "check":
         if request.trial_ids:
             params["trial_ids"] = list(request.trial_ids)
@@ -131,6 +136,7 @@ def start_job(
     # the check's setup: a file in checks/configs/
     config: Annotated[str, Form()] = check_settings.DEFAULT,
     dry_run: Annotated[bool, Form()] = False,
+    recheck: Annotated[bool, Form()] = False,
     back: Annotated[str, Form()] = "",
     user: auth_db.User = Depends(Requires("source.sync", "trial.transfer", "check.dry_run", "check.run")),
 ) -> Response:
@@ -185,6 +191,7 @@ def start_job(
         limit=chosen_limit,
         config=config.strip(),
         dry_run=dry_run,
+        recheck=recheck,
     )
     try:
         with db.connect(actor=user.email) as conn:
@@ -232,18 +239,113 @@ def retry_job(job_id: int, user: auth_db.User = Depends(Requires("job.retry"))) 
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
+# A job's page shows its lines this many at a time
+PAGE_LINES = 200
+# The most new lines one poll of a running job's page brings
+POLL_LINES = 500
+
+
+@dataclass
+class Timing:
+    """How far a job is and how long it has taken: for its page and the jobs list."""
+
+    done: int | None
+    total: int | None
+    # 0-100, when the job counts its items
+    percent: int | None
+    # seconds: its current (or last) attempt so far, and all attempts since it first started
+    attempt_seconds: float | None
+    total_seconds: float | None
+    # seconds left, estimated from the attempt's pace so far; None until it has done an item
+    left_seconds: float | None
+
+
+def job_timing(job: jobs_db.Job, now: datetime) -> Timing:
+    end = now
+    if job.finished_at is not None:
+        end = job.finished_at
+    total_seconds = None
+    if job.started_at is not None:
+        total_seconds = max(0.0, (end - job.started_at).total_seconds())
+    attempt_seconds = None
+    if job.attempt_started_at is not None:
+        attempt_end = end
+        if job.status != "running" and job.finished_at is None and job.heartbeat_at is not None:
+            attempt_end = job.heartbeat_at
+        attempt_seconds = max(0.0, (attempt_end - job.attempt_started_at).total_seconds())
+    percent = None
+    left = None
+    done, total = job.progress_done, job.progress_total
+    if done is not None and total:
+        percent = min(100, int(100 * done / total))
+        if job.status == "running" and done and attempt_seconds is not None and done < total:
+            left = attempt_seconds / done * (total - done)
+    return Timing(done, total, percent, attempt_seconds, total_seconds, left)
+
+
+def duration(seconds: float | None) -> str:
+    """A duration for people: 45 s, 12 min, 3 h 20 min."""
+    if seconds is None:
+        return "—"
+    if seconds < 90:
+        return f"{seconds:.0f} s"
+    minutes = seconds / 60
+    if minutes < 90:
+        return f"{minutes:.0f} min"
+    hours = int(minutes // 60)
+    return f"{hours} h {minutes - hours * 60:.0f} min"
+
+
+def _timing_json(timing: Timing) -> dict:
+    return {
+        "done": timing.done,
+        "total": timing.total,
+        "percent": timing.percent,
+        "attempt": duration(timing.attempt_seconds),
+        "elapsed": duration(timing.total_seconds),
+        "left": duration(timing.left_seconds) if timing.left_seconds is not None else None,
+    }
+
+
 @router.get("/jobs/{job_id}", response_class=HTMLResponse)
 def job_page(
-    request: Request, job_id: int, error: str | None = None, user: auth_db.User = Depends(Requires("job.view"))
+    request: Request,
+    job_id: int,
+    error: str | None = None,
+    page: int | None = None,
+    problems: bool = False,
+    user: auth_db.User = Depends(Requires("job.view")),
 ) -> HTMLResponse:
+    """A job: how far it is, what failed (each to look at or do again), and its lines a page at a time
+    (the last page by default, following a running job; only the lines that say something went wrong,
+    with `problems`)."""
     with db.connect_system() as conn:
         job = _job_or_404(conn, job_id)
-        lines = jobs_db.lines(conn, job_id)
+        line_total = jobs_db.line_count(conn, job_id, problems)
+        pages = max(1, -(-line_total // PAGE_LINES))
+        if page is None or page > pages:
+            page = pages
+        page = max(1, page)
+        lines = jobs_db.line_page(conn, job_id, (page - 1) * PAGE_LINES, PAGE_LINES, problems)
+        last_line = jobs_db.last_line_id(conn, job_id)
         runs = jobs_db.runs_of(conn, job_id)
         cost = jobs_db.job_cost(conn, job_id)
+        failed = failures.failed_items(conn, job)
     context = {
         "job": job,
         "lines": lines,
+        "line_total": line_total,
+        "page": page,
+        "pages": pages,
+        "problems": problems,
+        # new lines are appended as they come only on the last page of every line
+        "live": page == pages and not problems,
+        "page_lines": PAGE_LINES,
+        "last_line": last_line,
+        "timing": job_timing(job, datetime.now(UTC)),
+        "duration": duration,
+        "failed": failed,
+        "redo_all": failures.redo_all(job, failed),
         "runs": runs,
         "cost": cost,
         "steps": tasks.LABELS,
@@ -255,18 +357,29 @@ def job_page(
 
 @router.get("/jobs/{job_id}/progress")
 def job_progress(job_id: int, after: int = 0, user: auth_db.User = Depends(Requires("job.view"))) -> JSONResponse:
-    """The job's status and its lines after line id `after`, for the job page to poll."""
+    """The job's status, how far it is, and its lines after line id `after` (at most POLL_LINES; `more`
+    says there are others), for the job page to poll."""
     with db.connect_system() as conn:
         job = _job_or_404(conn, job_id)
-        new_lines = jobs_db.lines(conn, job_id, after)
+        new_lines = jobs_db.lines(conn, job_id, after, POLL_LINES + 1)
         cost = jobs_db.job_cost(conn, job_id)
+    more = len(new_lines) > POLL_LINES
+    new_lines = new_lines[:POLL_LINES]
     texts = []
     last = after
     for line in new_lines:
         texts.append(line.line)
         last = line.id
     return JSONResponse(
-        {"status": job.status, "lines": texts, "last": last, "attempts": job.attempts, "cost": dollars(cost)}
+        {
+            "status": job.status,
+            "lines": texts,
+            "last": last,
+            "more": more,
+            "attempts": job.attempts,
+            "cost": dollars(cost),
+            "progress": _timing_json(job_timing(job, datetime.now(UTC))),
+        }
     )
 
 
@@ -276,7 +389,7 @@ JOB_TABS = {
     "attention": ("Need attention", ("failed", "held")),
     "active": ("Running", ("running",)),
     "queued": ("Queued", ("queued",)),
-    "ended": ("Ended", ("succeeded", "cancelled", "failed")),
+    "ended": ("Ended", ("succeeded", "partial", "cancelled", "failed")),
 }
 
 
@@ -300,8 +413,14 @@ def jobs_page(
         for status in tab_info[1]:
             total += counts.get(status, 0)
         tab_counts[name] = total
+    now = datetime.now(UTC)
+    timings = {}
+    for found_job in found:
+        timings[found_job.id] = job_timing(found_job, now)
     context = {
         "tab": tab,
+        "timings": timings,
+        "duration": duration,
         "tabs": JOB_TABS,
         "tab_counts": tab_counts,
         "jobs": found,

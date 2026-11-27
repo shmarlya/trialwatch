@@ -2,7 +2,7 @@
 traces (see db/migrations/*_init.sql). Trials are core.trial ids (ADR-003)."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
@@ -364,22 +364,59 @@ def answer_details(conn: psycopg.Connection, run_id: int) -> list[AnswerDetail]:
         ).fetchall()
 
 
-def trials_needing_check(conn: psycopg.Connection, trial_ids: list[int], requirements: str) -> list[int]:
-    """The trials among these that have never been judged against the requirement set, or whose current
-    judgement is outdated (checks.judgement_current: a record or document it read changed since)."""
+@dataclass
+class ChecksNeeded:
+    """The trials among some that need a check, by why: never judged against the requirement set, a
+    record or document it read changed since (checks.judgement_current.outdated), or judged under other
+    rules or another prompt than the current ones (undecided judgements apart from decided ones)."""
+
+    never_judged: list[int] = field(default_factory=list)
+    evidence_changed: list[int] = field(default_factory=list)
+    other_rules_undecided: list[int] = field(default_factory=list)
+    other_rules_decided: list[int] = field(default_factory=list)
+
+    def ordered(self) -> list[int]:
+        """Every one, in the order they are worth a check: what was never judged or changed first, then
+        what other rules left undecided, then what they decided."""
+        return self.never_judged + self.evidence_changed + self.other_rules_undecided + self.other_rules_decided
+
+    def summary(self) -> str:
+        return (f"{len(self.never_judged)} never judged, {len(self.evidence_changed)} with changed evidence, "
+                f"{len(self.other_rules_undecided) + len(self.other_rules_decided)} judged under other rules or "
+                f"prompt ({len(self.other_rules_undecided)} of them undecided)")
+
+
+def trials_needing_check(conn: psycopg.Connection, trial_ids: list[int], requirements: str,
+                         requirements_text: str | None = None, prompt_sha256: bytes | None = None,
+                         open_labels: Sequence[str] = ()) -> ChecksNeeded:
+    """The trials among these that need a check against the requirement set, by why (ChecksNeeded). With
+    the current rules (`requirements_text`, compared as JSON, so reformatting the file changes nothing)
+    and prompt (`prompt_sha256`), a judgement made under others needs a check too; those whose label is
+    one of `open_labels` (the set's labels meaning "open", e.g. undecided) come apart."""
     rows = conn.execute(
         """
-        SELECT t.id FROM unnest(%(ids)s::bigint[]) AS t(id)
-         WHERE NOT EXISTS (SELECT FROM checks.judgement_current c
-                            WHERE c.trial_id = t.id AND c.requirements = %(requirements)s AND NOT c.outdated)
-         ORDER BY t.id
+        SELECT t.id,
+               CASE WHEN c.trial_id IS NULL THEN 'never'
+                    WHEN c.outdated THEN 'evidence'
+                    WHEN (%(rules)s::jsonb IS NOT NULL AND r.requirements_text::jsonb <> %(rules)s::jsonb)
+                      OR (%(prompt)s::bytea IS NOT NULL AND r.prompt_sha256 <> %(prompt)s::bytea)
+                    THEN CASE WHEN c.label = ANY(%(open)s) THEN 'rules_undecided' ELSE 'rules_decided' END
+               END AS why
+        FROM unnest(%(ids)s::bigint[]) AS t(id)
+        LEFT JOIN checks.judgement_current c ON c.trial_id = t.id AND c.requirements = %(requirements)s
+        LEFT JOIN checks.run r ON r.id = c.run_id
+        ORDER BY t.id
         """,
-        {"ids": trial_ids, "requirements": requirements},
+        {"ids": trial_ids, "requirements": requirements, "rules": requirements_text, "prompt": prompt_sha256,
+         "open": list(open_labels)},
     ).fetchall()
-    found = []
-    for row in rows:
-        found.append(row[0])
-    return found
+    needed = ChecksNeeded()
+    groups = {"never": needed.never_judged, "evidence": needed.evidence_changed,
+              "rules_undecided": needed.other_rules_undecided, "rules_decided": needed.other_rules_decided}
+    for trial_id, why in rows:
+        if why is not None:
+            groups[why].append(trial_id)
+    return needed
 
 
 def failed_on_unchanged_evidence(conn: psycopg.Connection, trial_ids: list[int], requirements: str) -> dict[int, str]:

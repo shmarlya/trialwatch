@@ -18,7 +18,7 @@ from trialwatch.jobs.steps import Context, Outcome
 @dataclass(frozen=True)
 class Task:
     label: str
-    # how many times a job is tried before it is left failed for a person (/admin/jobs)
+    # how many times a job is tried before it ends failed or partial, for a person (/admin/jobs)
     max_attempts: int
     # it calls a paid model: a job TrialWatch started is held by the monthly spending cap
     capped: bool
@@ -26,13 +26,19 @@ class Task:
     run: Callable[[Context, psycopg.Connection, dict], Outcome]
 
 
+# Every kind is tried twice: a second attempt, after a pause (retry.BACKOFF), gets past an outage or a busy
+# source; what fails twice is left for a person, who can try it again from its page
+ATTEMPTS = 2
+
 TASKS = {
-    "sync": Task("Sync a source's list (source sync)", 5, False, steps.run_sync),
-    "transfer": Task("Transfer evidence (source transfer)", 5, False, steps.run_transfer),
-    "check": Task("Evidence check (check evidence)", 3, True, steps.run_check),
-    "annotate": Task("AI tags for patient search (search annotate)", 3, True, steps.run_annotate),
+    "sync": Task("Sync a source's list (source sync)", ATTEMPTS, False, steps.run_sync),
+    "transfer": Task("Transfer evidence (source transfer)", ATTEMPTS, False, steps.run_transfer),
+    "check": Task("Evidence check (check evidence)", ATTEMPTS, True, steps.run_check),
+    "annotate": Task("AI tags for patient search (search annotate)", ATTEMPTS, True, steps.run_annotate),
     # its sync and transfer are free: the refresh watches the cap itself, before its paid steps
-    "refresh": Task("Refresh: sync, transfer what changed, tag and check what changed", 3, False, refresh.run_refresh),
+    "refresh": Task(
+        "Refresh: sync, transfer what changed, tag and check what changed", ATTEMPTS, False, refresh.run_refresh
+    ),
 }
 # kind -> label, for pages
 LABELS = {kind: task.label for kind, task in TASKS.items()}

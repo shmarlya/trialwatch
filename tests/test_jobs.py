@@ -20,7 +20,7 @@ from trialwatch import cli, db
 from trialwatch.db import SESSION_OPTIONS, core
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
-from trialwatch.jobs import retry, steps, tasks, worker
+from trialwatch.jobs import refresh, retry, steps, tasks, worker
 from trialwatch.sources import ctis
 
 
@@ -181,6 +181,57 @@ def test_a_failed_attempt_is_tried_later_then_left_failed(app_conn, monkeypatch)
     assert (job.status, job.max_attempts, job.finished_at) == ("queued", 3, None)
 
 
+def test_every_kind_is_tried_twice():
+    for task in tasks.TASKS.values():
+        assert task.max_attempts == 2
+
+
+def test_items_that_still_fail_on_the_last_attempt_make_the_job_partial(app_conn, monkeypatch):
+    job_id = queue(app_conn, "sync", {"source": "ctis"}, max_attempts=2)
+
+    def one_trial_fails(ctx, conn, params):
+        return steps.Outcome({"listed": 10}, {"2024-000001-01-00": "ConnectError: CTIS is down"})
+
+    monkeypatch.setitem(tasks.TASKS, "sync", dataclasses.replace(tasks.TASKS["sync"], run=one_trial_fails))
+    work(app_conn, monkeypatch)
+    assert (jobs_db.job(app_conn, job_id).status, jobs_db.job(app_conn, job_id).attempts) == ("queued", 1)
+    due_now(app_conn, job_id)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert (job.status, job.attempts) == ("partial", 2)
+    assert job.finished_at is not None and job.last_error.startswith("1 failed: 2024-000001-01-00")
+    # listed under Ended, not in the staff banner: what it left may be for good
+    assert jobs_db.needing_attention(app_conn) == 0
+    # an admin tries it once more
+    assert jobs_db.retry_now(app_conn, job_id)
+
+
+def test_a_step_that_failed_as_a_whole_fails_the_job(app_conn, monkeypatch):
+    job_id = queue(app_conn, "sync", {"source": "ctis"}, max_attempts=1)
+
+    def list_unread(ctx, conn, params):
+        return steps.Outcome({"listed": 0}, {"list": "ReadTimeout: no answer"}, broken="ReadTimeout: no answer")
+
+    monkeypatch.setitem(tasks.TASKS, "sync", dataclasses.replace(tasks.TASKS["sync"], run=list_unread))
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert (job.status, job.last_error) == ("failed", "ReadTimeout: no answer")
+
+
+def test_a_refresh_step_that_crashes_fails_the_refresh(app_conn, fake_world, monkeypatch):
+    def crashing(ctx, conn, params):
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(refresh, "_ocr", crashing)
+    job_id = refresh_job(app_conn, max_attempts=1)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "failed", line_texts(app_conn, job_id)
+    assert job.last_error == "ocr: OperationalError: server closed the connection unexpectedly"
+    # the steps after it still ran
+    assert "check" in job.result
+
+
 def test_a_permanent_error_fails_at_once(app_conn, monkeypatch):
     unknown = queue(app_conn, "sync", {"source": "nowhere"})
     bad_setup = queue(app_conn, "check", {"every": True, "config": "../default"})
@@ -328,8 +379,8 @@ def test_the_commands_run_the_same_steps_here_and_now(app_conn, fake_world, monk
 
 # --- the refresh ---------------------------------------------------------------------------------
 
-def refresh_job(conn):
-    return queue(conn, "refresh", {}, actor=db.SYSTEM_ACTOR, automatic=True)
+def refresh_job(conn, **options):
+    return queue(conn, "refresh", {}, actor=db.SYSTEM_ACTOR, automatic=True, **options)
 
 
 def checked_trials(model):
@@ -372,6 +423,108 @@ def test_the_refresh_syncs_transfers_and_checks_what_is_new(app_conn, fake_world
     assert checked_trials(model) == 3
 
 
+def test_the_refresh_checks_again_what_other_rules_or_another_prompt_judged(app_conn, fake_world, monkeypatch):
+    """A change to the requirement set or the prompt is checked again everywhere; reformatting the set's
+    file is not a change. A changed model or setup is not either (a person's experiment)."""
+    import json
+
+    from trialwatch.checks import prompts, requirements
+    from trialwatch.jobs import refresh
+
+    fake, model = fake_world
+    refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    assert checked_trials(model) == 2
+    current = requirements.load("eu-ctr-results")
+
+    def with_rules(text):
+        monkeypatch.setattr(refresh.requirement_sets, "load", lambda name: dataclasses.replace(current, text=text))
+        job_id = refresh_job(app_conn)
+        work(app_conn, monkeypatch)
+        return jobs_db.job(app_conn, job_id)
+
+    # the same rules, written differently: nothing to check
+    reformatted = json.dumps(json.loads(current.text), indent=4, sort_keys=True)
+    assert with_rules(reformatted).result["check"]["trials"] == 0
+    # other rules: both trials again
+    changed = json.loads(current.text)
+    changed["description"] = changed["description"] + " Changed."
+    job = with_rules(json.dumps(changed))
+    assert job.result["check"]["trials"] == 2 and checked_trials(model) == 4
+    assert "2 judged under other rules or prompt" in " ".join(line_texts(app_conn, job.id))
+    # judged under those rules now: nothing more to check
+    assert with_rules(json.dumps(changed)).result["check"]["trials"] == 0
+    # another prompt: both again
+    prompt = prompts.load_prompt("evidence")
+    monkeypatch.setattr(refresh, "load_prompt", lambda name: dataclasses.replace(prompt, sha256=b"\x00" * 32))
+    job_id = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    assert jobs_db.job(app_conn, job_id).result["check"]["trials"] == 2
+
+
+def test_the_refresh_runs_ocr_before_its_checks_and_rechecks_wait_for_it(app_conn, fake_world, monkeypatch):
+    """OCR is free and comes before the paid steps; without tesseract it says so and nothing waits. A trial
+    judged under other rules whose files OCR has yet to look at is not checked again until it has."""
+    import json
+
+    from trialwatch.checks import requirements
+    from trialwatch.jobs import refresh
+    from trialwatch.trials import pages
+
+    fake, model = fake_world
+    monkeypatch.setattr(refresh.ocr, "ocr_available", lambda: False)
+    first = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, first)
+    assert job.status == "succeeded" and job.result["ocr"]["skipped"] == "tesseract not installed"
+    assert checked_trials(model) == 2
+
+    current = requirements.load("eu-ctr-results")
+    changed = json.loads(current.text)
+    changed["description"] = changed["description"] + " Changed."
+    monkeypatch.setattr(refresh.requirement_sets, "load",
+                        lambda name: dataclasses.replace(current, text=json.dumps(changed)))
+    looked = []
+
+    def ocr_nothing(conn, trial_ids, kinds, progress=None, readers=None, seconds=None, should_stop=None):
+        looked.append(seconds)
+        return pages.OcrResult(left=3)
+
+    monkeypatch.setattr(refresh.ocr, "ocr_available", lambda: True)
+    monkeypatch.setattr(refresh.pages, "ocr_missing", ocr_nothing)
+    monkeypatch.setattr(refresh.core, "trials_waiting_for_ocr", lambda conn, ids, *rest: set(ids))
+    waiting = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, waiting)
+    assert job.status == "succeeded", job.last_error
+    assert looked == [240 * 60] and job.result["ocr"]["left"] == 3
+    assert job.result["check"]["trials"] == 0 and checked_trials(model) == 2
+    assert "2 judged under other rules wait for OCR" in " ".join(line_texts(app_conn, waiting))
+    # OCR done: they are checked
+    monkeypatch.setattr(refresh.core, "trials_waiting_for_ocr", lambda conn, ids, *rest: set())
+    done = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    assert jobs_db.job(app_conn, done).result["check"]["trials"] == 2
+
+
+def test_ocr_that_fails_in_the_refresh_makes_it_partial_and_is_not_tried_again_with_it(app_conn, fake_world,
+                                                                                    monkeypatch):
+    from trialwatch.jobs import refresh
+    from trialwatch.trials import pages
+
+    def ocr_failing(conn, trial_ids, kinds, progress=None, readers=None, seconds=None, should_stop=None):
+        return pages.OcrResult(failed={"aaa": "killed, most likely out of memory"},
+                               lasting={"bbb": "TimeoutExpired: tesseract"})
+
+    monkeypatch.setattr(refresh.ocr, "ocr_available", lambda: True)
+    monkeypatch.setattr(refresh.pages, "ocr_missing", ocr_failing)
+    job_id = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert (job.status, job.attempts) == ("partial", 1), job.last_error
+    assert set(job.failures) == {"ocr, aaa", "ocr, bbb"}
+
+
 def test_the_refresh_does_not_pay_again_for_a_check_that_failed_for_a_lasting_reason(app_conn, fake_world,
                                                                                     monkeypatch):
     fake, model = fake_world
@@ -390,6 +543,25 @@ def test_the_refresh_does_not_pay_again_for_a_check_that_failed_for_a_lasting_re
     assert checked_trials(model) == asked
 
 
+def test_a_file_that_cannot_be_read_makes_the_refresh_partial_without_a_retry(app_conn, fake_world, monkeypatch):
+    # 2022-501485-22-00 (2026-11-25): one PDF CTIS publishes cut short failed every refresh, and each
+    # failed refresh was tried again, though reading the same bytes can only fail the same way
+    def cut_short(content):
+        raise ValueError("Stream has ended unexpectedly")
+
+    monkeypatch.setattr("trialwatch.trials.pages.extract_pages", cut_short)
+    job_id = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert (job.status, job.attempts, job.last_error) == ("partial", 1, "2 left to a person"), line_texts(app_conn, job_id)
+    # its page still lists them, for a person to look at
+    assert len(job.failures) == 2
+    for name, why in job.failures.items():
+        assert name.startswith("transfer ctis, ") and "/file " in name and "Stream has ended" in why
+    assert len(job.result["transfer ctis"]["left_to_people"]) == 2
+    assert any("left to a person" in line for line in line_texts(app_conn, job_id))
+
+
 def test_a_failed_transfer_fails_the_attempt_and_the_next_carries_on(app_conn, fake_world, monkeypatch):
     fake, model = fake_world
     original = fake.retrieve
@@ -405,6 +577,15 @@ def test_a_failed_transfer_fails_the_attempt_and_the_next_carries_on(app_conn, f
     job = jobs_db.job(app_conn, job_id)
     assert (job.status, job.attempts) == ("queued", 1)
     assert job.last_error.startswith("1 failed: transfer ctis, ") and "CTIS is down" in job.last_error
+    # what failed, item by item, for its page: the trial, what went wrong, and a transfer to redo it
+    assert list(job.failures) == [f"transfer ctis, {CT_2}/record"]
+    from trialwatch.jobs import failures
+
+    [item] = failures.failed_items(app_conn, job)
+    assert (item.label, item.problems[0][0]) == (CT_2, "record") and "CTIS is down" in item.problems[0][1]
+    assert item.redo == {"step": "transfer", "source": "ctis", "key_text": CT_2, "recheck": "true"}
+    # the transfer counted its trials as it went
+    assert job.progress_total is not None and job.progress_done == job.progress_total
     # the trial that came in was still checked
     assert checked_trials(model) == 1
 
@@ -578,3 +759,207 @@ def test_a_refresh_shows_its_steps_on_its_page(app_conn, fake_world, monkeypatch
     assert "— sync ctis" in page.text and "— transfer ctis" in page.text and "— check" in page.text
     running = admin_client.get("/admin/jobs?tab=active")
     assert running.status_code == 200 and "Running" in running.text
+
+
+def test_a_transfer_asked_to_recheck_keeps_it_in_its_params():
+    from trialwatch.jobs.routes import JobRequest, job_params
+
+    kind, params = job_params(JobRequest(step="transfer", source="ctis", which="stale", recheck=True))
+    assert (kind, params) == ("transfer", {"source": "ctis", "which": "stale", "recheck": True})
+    _, plain = job_params(JobRequest(step="transfer", source="ctis", which="stale"))
+    assert "recheck" not in plain
+
+
+# The worker when a job hangs or the database goes away
+
+
+def test_a_job_that_stops_moving_is_stopped_by_its_heartbeat(database_url):
+    import threading
+    from datetime import timedelta
+
+    from trialwatch.jobs import worker as job_worker
+
+    stopped = threading.Event()
+    heartbeat = job_worker.Heartbeat(0, "test-worker", stuck=timedelta(seconds=0.3), on_stuck=stopped.set,
+                                     every=timedelta(seconds=0.05))
+    with heartbeat:
+        assert stopped.wait(5)
+
+
+def test_a_slow_job_that_keeps_moving_is_not_stopped(database_url):
+    import threading
+    import time
+    from datetime import timedelta
+
+    from trialwatch import progress
+    from trialwatch.jobs import worker as job_worker
+
+    stopped = threading.Event()
+    heartbeat = job_worker.Heartbeat(0, "test-worker", stuck=timedelta(seconds=0.5), on_stuck=stopped.set,
+                                     every=timedelta(seconds=0.05))
+    with heartbeat:
+        for number in range(15):
+            progress.beat(f"file {number}")
+            time.sleep(0.1)
+    assert not stopped.is_set()
+
+
+def test_a_heartbeat_whose_database_session_ended_connects_again(database_url):
+    import time
+    from datetime import timedelta
+
+    import psycopg
+
+    from trialwatch import progress
+    from trialwatch.jobs import worker as job_worker
+
+    heartbeat = job_worker.Heartbeat(0, "test-worker", stuck=timedelta(minutes=5), on_stuck=lambda: None,
+                                     every=timedelta(seconds=0.05))
+    with heartbeat:
+        progress.beat("working")
+        deadline = time.monotonic() + 5
+        while heartbeat.backend_pid is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        first = heartbeat.backend_pid
+        with psycopg.connect(database_url, autocommit=True) as admin:
+            admin.execute("SELECT pg_terminate_backend(%s)", (first,))
+        deadline = time.monotonic() + 10
+        while heartbeat.backend_pid == first and time.monotonic() < deadline:
+            progress.beat("working")
+            time.sleep(0.05)
+        assert heartbeat.backend_pid not in (None, first)
+
+
+def test_the_worker_connects_again_when_its_database_goes_away(monkeypatch, database_url):
+    import psycopg
+
+    from trialwatch.jobs import worker as job_worker
+
+    calls = []
+
+    def work(queue, worker, once, should_stop, ran):
+        calls.append(queue.info.backend_pid)
+        if len(calls) == 1:
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+        ran[0] += 2
+
+    slept = []
+    monkeypatch.setattr(job_worker, "_work", work)
+    assert job_worker.run(sleep=slept.append) == 2
+    assert len(calls) == 2 and slept == [2.0]
+
+
+def test_a_statement_of_a_job_that_runs_too_long_fails(database_url):
+    from datetime import timedelta
+
+    import psycopg
+    import pytest
+
+    from trialwatch import db
+    from trialwatch.db import jobs as jobs_db
+
+    with db.connect_system() as conn:
+        jobs_db.limit_statements(conn, timedelta(milliseconds=100))
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            conn.execute("SELECT pg_sleep(2)")
+
+
+def test_a_job_whose_queue_connection_went_away_keeps_working():
+    from types import SimpleNamespace
+
+    import psycopg
+
+    from trialwatch.jobs.steps import JobContext
+
+    class Gone:
+        def execute(self, *args, **kwargs):
+            raise psycopg.OperationalError("the connection is closed")
+
+    ctx = JobContext(Gone(), SimpleNamespace(id=7, attempts=1, automatic=False))
+    ctx.add("1/3 a trial: complete")  # not written, not raised
+    assert ctx.should_stop() is False
+
+
+
+# A job's page: how far it is, what failed, and its lines a page at a time
+
+
+def test_a_jobs_timing_says_how_far_it_is_and_how_long_is_left():
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from trialwatch.jobs.routes import duration, job_timing
+
+    now = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
+    running = SimpleNamespace(status="running", started_at=now - timedelta(hours=2), attempt_started_at=now - timedelta(minutes=30),
+                              finished_at=None, heartbeat_at=now, progress_done=100, progress_total=400)
+    timing = job_timing(running, now)
+    assert (timing.percent, timing.attempt_seconds, timing.left_seconds) == (25, 1800, 5400)
+    assert (duration(timing.total_seconds), duration(timing.left_seconds), duration(45)) == ("2 h 0 min", "1 h 30 min", "45 s")
+    not_counted = SimpleNamespace(**{**vars(running), "progress_done": None, "progress_total": None})
+    assert (job_timing(not_counted, now).percent, job_timing(not_counted, now).left_seconds) == (None, None)
+
+
+def test_a_check_and_a_refresh_name_their_failed_trials_to_look_at_and_redo(app_conn):
+    from types import SimpleNamespace
+
+    from trialwatch.jobs import failures
+
+    trial = seed(app_conn)
+    name = core.trial_names(app_conn, [trial])[trial]
+    check = SimpleNamespace(kind="check", params={"config": "default"}, failures={name: "RateLimitError: busy"})
+    [item] = failures.failed_items(app_conn, check)
+    assert (item.trial_id, item.redo) == (trial, {"step": "evidence", "trial_ids": str(trial), "config": "default"})
+    refresh = SimpleNamespace(kind="refresh", params={}, failures={
+        "transfer ctis, 2025-000001-01-00/document a": "too large", "transfer ctis, 2025-000001-01-00/file b": "broken",
+        "transfer ctis, 2025-000002-01-00/record": "down", "annotate": "OverloadedError",
+    })
+    items = failures.failed_items(app_conn, refresh)
+    assert [(i.label, len(i.problems)) for i in items] == [
+        ("2025-000001-01-00", 2), ("2025-000002-01-00", 1), ("annotate", 1)]
+    assert items[0].redo["step"] == "transfer" and items[2].redo is None
+    transfer = SimpleNamespace(kind="transfer", params={"source": "ctis"}, failures={
+        "2025-000001-01-00/record": "down", "2025-000002-01-00/record": "down", "run": "interrupted"})
+    assert failures.redo_all(transfer, failures.failed_items(app_conn, transfer))["key_text"] == (
+        "2025-000001-01-00 2025-000002-01-00")
+
+
+def test_a_jobs_page_shows_its_lines_a_page_at_a_time_and_only_problems_on_asking(app_conn, admin_client):
+    job_id = queue(app_conn, "sync", {"source": "ctis"}, actor="admin@test.example")
+    for number in range(1, 451):
+        text = f"line {number}"
+        if number % 100 == 0:
+            text = f"line {number}: failed: something broke"
+        jobs_db.add_line(app_conn, job_id, 1, text)
+    latest = admin_client.get(f"/jobs/{job_id}")
+    assert latest.status_code == 200
+    # the latest page: lines 401-450 of three pages of 200
+    assert "page 3 of 3" in latest.text and "line 401\n" in latest.text and "line 450\n" in latest.text
+    assert "line 400:" not in latest.text
+    first = admin_client.get(f"/jobs/{job_id}?page=1")
+    assert "line 1\n" in first.text and "line 201\n" not in first.text
+    problems = admin_client.get(f"/jobs/{job_id}?problems=true")
+    assert "(4 that say something went wrong)" in problems.text and "line 7\n" not in problems.text
+    polled = admin_client.get(f"/jobs/{job_id}/progress?after=0").json()
+    assert len(polled["lines"]) == 450 and polled["more"] is False
+
+
+def test_a_finished_jobs_page_offers_to_redo_what_failed(app_conn, admin_client):
+    job_id = queue(app_conn, "transfer", {"source": "ctis", "keys": ["2025-000001-01-00", "2025-000002-01-00"]},
+                   actor="admin@test.example")
+    jobs_db.record_attempt(app_conn, job_id, {"2025-000001-01-00/document a": "too large to download: 400 MB",
+                                              "2025-000002-01-00/record": "ReadTimeout"}, (2, 2))
+    page = admin_client.get(f"/jobs/{job_id}")
+    assert "What failed" in page.text and "too large to download: 400 MB" in page.text
+    assert page.text.count(">Transfer again<") == 2 and "Transfer all 2 again" in page.text
+    assert "<b>2</b> of 2 done · 100%" in page.text
+
+
+def test_a_partial_job_says_what_did_not_succeed_in_the_list(app_conn, admin_client):
+    job_id = queue(app_conn, "transfer", {"source": "ctis", "keys": ["2025-000001-01-00"]}, actor="admin@test.example")
+    jobs_db.record_attempt(app_conn, job_id, {"2025-000001-01-00/file 9626e32b175a": "the file is cut short"}, (1, 1))
+    jobs_db.finish(app_conn, job_id, "partial", {}, "1 left to a person")
+    page = admin_client.get("/admin/jobs?tab=ended").text
+    assert f'<a href="/jobs/{job_id}#failed">1 did not succeed</a>' in page
+    assert "needs attention" not in page
+    assert "What did not succeed" in admin_client.get(f"/jobs/{job_id}").text

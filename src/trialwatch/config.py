@@ -13,6 +13,13 @@ The settings (each read by a function below):
 - TRIALWATCH_GOLD_DIR: the gold datasets (default: the repository's data/gold/)
 - TRIALWATCH_COUNTRIES: whose places `trialwatch geo load` loads, ISO codes, comma-separated (default:
   the EU/EEA, where CTIS trials have sites)
+- TRIALWATCH_PDF_READERS / TRIALWATCH_PDF_MEMORY_MB: how many PDFs the worker reads at once, and the
+  memory their child processes may take together (trialwatch.trials.pages)
+- TRIALWATCH_OCR_MAX_PAGES / TRIALWATCH_OCR_LANGUAGES / TRIALWATCH_OCR_MINUTES_PER_REFRESH: which files
+  get OCR for their picture pages, in which languages, and how long a refresh spends on it
+  (trialwatch.trials.ocr)
+- TRIALWATCH_STUCK_MINUTES: how long a job may go without moving before the worker restarts
+  (trialwatch.jobs.worker)
 """
 
 import os
@@ -127,6 +134,61 @@ def gazetteer_countries() -> list[str]:
     from trialwatch.geo import geonames
 
     return geonames.eea_countries()
+
+
+def pdf_readers() -> int:
+    """How many PDFs the worker reads at once, each in a child process (TRIALWATCH_PDF_READERS,
+    default 2: one per CPU of the worker's limit)."""
+    return _positive_int("TRIALWATCH_PDF_READERS", 2)
+
+
+def pdf_memory_mb() -> int:
+    """The memory, in MB, the children reading PDFs may take together (TRIALWATCH_PDF_MEMORY_MB,
+    default 1400 of the worker's 2 GB): a file starts only when its estimate fits beside those being
+    read. A file larger than the whole budget is still read, alone."""
+    return _positive_int("TRIALWATCH_PDF_MEMORY_MB", 1400)
+
+
+def ocr_max_pages() -> int:
+    """Files with more pages than this get no OCR (TRIALWATCH_OCR_MAX_PAGES, default 1000): a study report
+    of thousands of pages with its listings and forms as pictures would take hours, and a check never
+    reads such a file whole anyway (checks/configs: max_text_chars)."""
+    return _positive_int("TRIALWATCH_OCR_MAX_PAGES", 1000)
+
+
+def ocr_minutes_per_refresh() -> int:
+    """How long the refresh's OCR step may take before it leaves the other files to the next refresh
+    (TRIALWATCH_OCR_MINUTES_PER_REFRESH, default 240: the backlog of files read before OCR, about 1,300
+    files, took about that on two readers)."""
+    return _positive_int("TRIALWATCH_OCR_MINUTES_PER_REFRESH", 240)
+
+
+def ocr_languages() -> str:
+    """Tesseract's languages for OCR, joined by + (TRIALWATCH_OCR_LANGUAGES, default "eng"; each must be
+    installed, see the Dockerfile). Each one more makes a page slower to read."""
+    configured = os.environ.get("TRIALWATCH_OCR_LANGUAGES", "").strip()
+    if not configured:
+        return "eng"
+    return configured
+
+
+def stuck_minutes() -> int:
+    """How long a job may go without moving before the worker stops itself to be started afresh
+    (TRIALWATCH_STUCK_MINUTES, default 45: longer than a PDF's 20 minutes and a download's deadline)."""
+    return _positive_int("TRIALWATCH_STUCK_MINUTES", 45)
+
+
+def _positive_int(name: str, default: int) -> int:
+    configured = os.environ.get(name, "").strip()
+    if not configured:
+        return default
+    try:
+        value = int(configured)
+    except ValueError:
+        raise ValueError(f"{name} must be a whole number, not {configured!r}") from None
+    if value < 1:
+        raise ValueError(f"{name} must be 1 or more, not {configured}")
+    return value
 
 
 def gold_dir() -> Path:

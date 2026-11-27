@@ -43,7 +43,7 @@ search_requests = meter.create_counter("trialwatch.search.requests", unit="{sear
 search_duration = meter.create_histogram("trialwatch.search.duration", unit="s", description="how long a search took")
 # Trial records fetched from a source, by source and outcome: ok, not_found, error
 source_fetches = meter.create_counter("trialwatch.source.fetches", unit="{fetch}", description="records fetched")
-# Job attempts that ended, by kind and status (succeeded, failed, queued again, held, cancelled)
+# Job attempts that ended, by kind and status (succeeded, partial, failed, queued again, held, cancelled)
 jobs_finished = meter.create_counter("trialwatch.jobs.finished", unit="{attempt}", description="job attempts ended")
 jobs_duration = meter.create_histogram("trialwatch.jobs.duration", unit="s", description="how long a job attempt took")
 

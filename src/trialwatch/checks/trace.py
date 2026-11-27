@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from trialwatch.checks.requirements import Question, RequirementSet
 from trialwatch.checks.settings import Settings
-from trialwatch.checks.verify import every_page_readable, has_readable_text
+from trialwatch.checks.verify import every_page_readable, was_read
 from trialwatch.db.core import Page
 
 if TYPE_CHECKING:
@@ -64,7 +64,7 @@ def pages_data(pages: list[Page], unread: list[str], readable: bool) -> dict:
                 "unreadable_pages": [],
             }
         documents[page.doc]["pages"] += 1
-        if not has_readable_text(page):
+        if not was_read(page):
             documents[page.doc]["unreadable_pages"].append(page.page_no)
     listed = []
     for document in documents.values():
@@ -130,6 +130,9 @@ def verification_data(evidence: "dict[str, Evidence]") -> dict:
                 "whole_document": item.whole,
             }
         )
+        if item.cited_page_no is not None:
+            # the quote was found on a page near the one the model cited
+            checked[-1]["cited_page"] = item.cited_page_no
     return {"evidence": checked}
 
 

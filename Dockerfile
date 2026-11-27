@@ -19,6 +19,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # --- runtime: just Python + the venv, no uv, non-root ---
 FROM python:3.13-slim
+# OCR for pages that are pictures (trials/ocr.py): tesseract and its English data (TRIALWATCH_OCR_LANGUAGES
+# names the languages used; add their tesseract-ocr-<lang> packages here to use others)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 1000 app
 COPY --from=build --chown=app:app /app/.venv /app/.venv
 # The gold datasets (agreement published with each judgement); compose's ./data mount may replace them

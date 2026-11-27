@@ -24,12 +24,12 @@
     <td>{{ steps[job.kind] }}{% if job.params.source %} · {{ job.params.source }}{% endif %}{% if job.params.get("keys") %} · {{ job.params.get("keys") | length }} trials{% endif %}{% if job.params.trial_ids %} · {{ job.params.trial_ids | length }} trials{% endif %}</td>
     <td class="small">{{ who(job.actor) }}</td>
     <td class="small">{{ when(job.created_at) }}</td>
-    <td>{{ run_status(job.status) }}</td>
+    <td>{{ run_status(job.status) }}{% set timing = timings[job.id] %}{% if timing.total %}<div class="small">{{ timing.done }}/{{ timing.total }} · {{ timing.percent }}%{% if timing.left_seconds is not none %} · ~{{ duration(timing.left_seconds) }} left{% endif %}</div>{% endif %}</td>
     <td class="num">{{ job.attempts }}/{{ job.max_attempts }}</td>
     <td class="small">{% if job.status == "queued" %}{{ when(job.run_after) }}{% endif %}</td>
     <td class="num">{{ dollars(costs.get(job.id)) }}</td>
-    <td class="small muted">{% if job.last_error %}{{ job.last_error[:200] }}{% endif %}</td>
-    <td>{% if job.status in ("failed", "cancelled", "held") and can("job.retry") %}<form method="post" action="/jobs/{{ job.id }}/retry"><button class="small">{% if job.status == "held" %}Release{% else %}Try again{% endif %}</button></form>{% endif %}</td>
+    <td class="small muted">{% if job.status in ("succeeded", "partial") and job.failures %}<a href="/jobs/{{ job.id }}#failed">{{ job.failures | length }} did not succeed</a>{% elif job.last_error %}{{ job.last_error[:200] }}{% endif %}</td>
+    <td>{% if job.status in ("failed", "partial", "cancelled", "held") and can("job.retry") %}<form method="post" action="/jobs/{{ job.id }}/retry"><button class="small">{% if job.status == "held" %}Release{% else %}Try again{% endif %}</button></form>{% endif %}</td>
   </tr>
   {% endfor %}
 </table></div>

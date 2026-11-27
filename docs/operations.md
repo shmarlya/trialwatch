@@ -8,7 +8,7 @@ flowchart TB
     you["Your machine<br>terminal: uv run trialwatch … · browser: 127.0.0.1:8010<br>psql · uv run pytest (its own &lt;db&gt;_test)"]
     people["People on the internet<br>https://TRIALWATCH_DOMAIN"]
     admins["Admins<br>/grafana/ (signed in through /auth/grafana)"]
-    actions["GitHub Actions: image.yml (by hand)<br>tests → build → push"]
+    actions["GitHub Actions: image.yml (each merge to main)<br>tests → build → push"]
     ghcr[("ghcr.io/shmarlya/trialwatch (+ -migrate, -proxy, -grafana, -dbtools)<br>:latest · :sha-&lt;commit&gt;")]
     subgraph compose["Docker Compose (compose.yaml)"]
         subgraph server["profile server"]
@@ -78,14 +78,31 @@ and `GRAFANA_DB_PASSWORD`; then `docker compose pull && docker compose --profile
 reference data once (`geo load`, `vocab load`), switch the refresh's schedule on at `/admin/jobs`, and set a
 spending cap at `/admin/spend`.
 
-To update: run the **Image** workflow on `main` (Actions → Image → Run workflow, or
-`gh workflow run image.yml --ref main`). It runs the tests, then pushes `ghcr.io/shmarlya/trialwatch` tagged
-`sha-<commit>` and `latest`. On the server: `git pull` (for compose and `db/migrations`), then
+To update: merge into `main`. The **Image** workflow runs on each push to `main` (not when only the docs site
+changed; by hand: Actions → Image → Run workflow, or `gh workflow run image.yml --ref main`). It runs the
+tests, then pushes `ghcr.io/shmarlya/trialwatch` tagged `sha-<commit>` and `latest`. On the server: `git pull` (for compose and `db/migrations`), then
 `docker compose pull && docker compose --profile server up -d` (migrations run first). To roll back, set
 `TRIALWATCH_TAG=sha-<commit>` in `.env` and run the same two commands. `up -d --build` builds from the checkout
 instead.
 
 One-off commands run in the same image: `docker compose run --rm web source list`.
+
+**OCR for files read before it**: transfers OCR each file they read, and the weekly refresh looks at the files
+stored before (its `ocr` step, before the checks: up to `TRIALWATCH_OCR_MINUTES_PER_REFRESH`, default 240,
+then the rest wait for the next refresh; about a second per picture page, `TRIALWATCH_PDF_READERS` files at
+once). The first refresh after the release that brought OCR had about 1,300 such files, some 3–4 hours. To do it
+sooner, by hand: `docker compose run --rm worker source ocr --all` (on Coolify, in the worker's terminal:
+`trialwatch source ocr --all`). A trial whose page text OCR changed has an outdated judgement, which the refresh
+checks again; a trial to be checked again only for other rules waits until OCR has looked at its files, so it
+is not paid for twice. A file whose OCR fails is listed on the refresh's page (the refresh ends partial, and is
+not tried again for it) with the reason in `core.file.ocr_error`: a failure of the file itself (tesseract can't
+read a page, or takes too long) is not tried again; another (the reader killed for memory) is, by the next
+refresh, after the files never tried. Either way no trial waits for that file before its check.
+
+**A release that changes the rules or the prompt** (`checks/requirement_sets/`, `checks/prompts/`) makes the
+refreshes after it check every judged trial again (about $0.015 a trial with Haiku): undecided ones first, held
+by the monthly spending cap, so a low cap spreads it over several refreshes. Its job page says how many are
+"judged under other rules or prompt".
 
 ## Coolify
 
@@ -94,12 +111,14 @@ for a host that has nothing of the repository, such as Coolify: the database, `w
 Coolify does the rest: its proxy holds the certificate and sends plain HTTP to `web` on port 8010, it shows each
 container's memory and CPU, and it backs the database up. `web` and `worker` run the app's image, which carries
 the migrations and dbmate: each runs `dbmate --wait up` before it starts (a lock makes the second wait, then find
-nothing to do). Every service has a memory and CPU limit (web 512 MB, worker 2 GB, db 768 MB; one CPU each;
-the worker reads each PDF in a short-lived child process inside its 2 GB, see
-[page text](sources-and-gold.md)),
-so the stack needs about 3.3 GB beside Coolify's own. No Grafana here: compose.yaml has it, for a server of our own.
+nothing to do). Every service has a memory and CPU limit (web 512 MB and one CPU, worker 2 GB and two CPUs, db
+768 MB and one CPU; the worker reads PDFs in short-lived child processes, two at once while their estimated
+memory fits in 1,400 MB of its 2 GB (`TRIALWATCH_PDF_READERS`, `TRIALWATCH_PDF_MEMORY_MB`, set in Coolify's
+Environment Variables), see [page text](sources-and-gold.md)),
+so the stack needs about 3.3 GB and at least two CPUs beside Coolify's own (on one CPU, Docker refuses the
+worker's `cpus: 2.0`: set it to 1.0 and `TRIALWATCH_PDF_READERS` to 1). No Grafana here: compose.yaml has it, for a server of our own.
 
-1. Run the **Image** workflow on `main`: it pushes the image.
+1. Have an image: the **Image** workflow pushes one on each merge into `main` (or run it by hand on `main`).
 2. In Coolify: **New resource → Docker Compose Empty**, and paste `compose.coolify.yaml`.
 3. **Environment variables** (Coolify lists the ones the file uses):
    - required: `TRIALWATCH_DOMAIN` (e.g. `trialwatch.app`), `POSTGRES_PASSWORD`;
@@ -114,7 +133,8 @@ so the stack needs about 3.3 GB beside Coolify's own. No Grafana here: compose.y
 6. Backups: the **db** service's **Backups** tab, a daily schedule to an S3 destination (Coolify's
    **S3 Storages**), so the copies leave the server.
 
-To update: run the Image workflow, then **Redeploy** in Coolify (it pulls `latest`). To roll back, set
+To update: merge into `main`; the Image workflow pushes the new `latest`. Then **Redeploy** in Coolify (it pulls
+`latest`) when you want it live. To roll back, set
 `TRIALWATCH_TAG=sha-<commit>` and redeploy (a migration is not undone: roll back only to an image whose migrations
 the database already has). One-off commands: Coolify's terminal on the `web` container, e.g. `trialwatch geo load`.
 
@@ -184,11 +204,25 @@ uv run trialwatch worker
 Every kind of job (sync, transfer, check, annotate, refresh) is one entry in `src/trialwatch/jobs/tasks.py`: its
 label, how many attempts it gets, whether the spending cap holds it, how its params are checked when it is queued,
 and the step that runs it. The commands `source sync`, `source transfer`, `search annotate` and `check evidence`
-run the same steps here and now, without the queue. Jobs survive restarts. A failed attempt is tried again after 1 min, 5 min, 30 min,
-2 h, 6 h (sync and transfer 5 attempts, the others 3); a retry redoes only what is left (the keys not transferred yet, the trials whose model call
+run the same steps here and now, without the queue. Jobs survive restarts. Every kind gets 2 attempts: a failed
+attempt is tried again after about a minute; a retry redoes only what is left (the keys not transferred yet, the trials whose model call
 failed for a passing reason such as an overload). An error that a retry can't fix (an unknown source, an invalid
-setup, a bad API key) fails the job at once. A job whose worker died (no heartbeat for 5 minutes) goes back to the
+setup, a bad API key) fails the job at once.
+
+How a job ends: **succeeded**, everything done; **partial**, it ran to its end but some items did not succeed (a
+trial whose transfer still failed on the last attempt, a check call that failed, or a file or answer left to a
+person, which is never tried again); **failed**, it could not run as a whole (a crash, the database or the network
+gone, a source whose list could not be read, a refresh step that broke, an error a retry can't fix); or
+**cancelled**. A partial or failed job's page lists what did not succeed, each with a button to do it again;
+partial jobs are listed under Ended, not in the staff banner (what they left is often for good: a file the source
+publishes broken). A job whose worker died (no heartbeat for 5 minutes) goes back to the
 queue. Jobs can be cancelled; a running one stops after the trial or page it is on, and what it did so far is kept.
+A long transfer says every 50 trials how long a trial takes and about how long is left. A job's page shows how
+far it is (trials done of trials to do, a percentage, how long it has run and about how long is left; transfers,
+checks and tagging count their trials, written with the heartbeat), its lines 200 at a time (the latest page
+follows a running job; "only what went wrong" keeps the lines about failures), and after an attempt what failed,
+trial by trial: each with its page (Inspect) and a button that does it again (a transfer of that trial, every
+document downloaded again, or a check with the same setup), and for a transfer one that redoes them all.
 `/admin/jobs` lists them by status, with the failed and held ones first (every staff page shows a banner while
 there are any), their errors and their progress per attempt; an admin can try one again.
 
@@ -199,8 +233,8 @@ running. The first is `weekly-refresh`, every Monday at 03:00 UTC by default (da
 list, transfers the trials that are new, changed at the source (stale) or failed last time, recruiting ones first,
 tags with AI the recruiting trials whose profile has no tags yet, then checks with the default setup the trials that
 were never judged or whose judgement is outdated (`src/trialwatch/jobs/refresh.py`). Nothing changed, nothing is
-checked and nothing is spent. A step that fails doesn't stop the others; the attempt fails and the next one carries
-on from what is stored (a source synced in an earlier attempt isn't listed again). The spending cap holds the
+checked and nothing is spent. A step that fails doesn't stop the others: a step that broke as a whole fails the
+refresh, items that failed inside a step make it partial; either way the next attempt carries on from what is stored (a source synced in an earlier attempt isn't listed again). The spending cap holds the
 refresh before its tagging and checking. While it runs, a job a person queues waits for it, unless a second worker
 runs. Everything it does, and what TrialWatch publishes by itself, is recorded as the actor `trialwatch`
 (`core.actor` 1), not as a person.
@@ -241,7 +275,14 @@ recording costs next to nothing (the tests, the command line). Either way their 
   addresses (`httpx`, `httpx2`) log warnings only. `tests/test_telemetry.py` searches with a marker word and checks
   it appears in no span, event, metric or log.
 - **The worker's heartbeat**: it touches `TRIALWATCH_HEARTBEAT_FILE` (default `/tmp/trialwatch-worker.alive`) every
-  loop and every 30 seconds while a job runs; compose's healthcheck reads its age.
+  loop and every 30 seconds while a job runs; compose's healthcheck reads its age. A job that has not moved (no
+  progress line, document, file read or download chunk) for `TRIALWATCH_STUCK_MINUTES` (45) is not kept alive by
+  it: the worker logs "has not moved for … (last: …)" and exits, the container's restart policy starts a new one,
+  and the job, queued again 5 minutes later, resumes where it was. Outside a container (`trialwatch web` with its
+  own worker) nothing restarts it: start it again.
+- **The database going away**: connections give up connecting after 10 s and notice a database that vanished
+  within about 90 s (TCP keepalives); a job's statements stop after 15 minutes. The worker connects again with a
+  growing pause; the job in hand fails its attempt and is tried again later, the trial it was on left failed.
 
 ## Grafana
 
@@ -271,7 +312,7 @@ Once a day, or when an alert fires.
 
 | Dashboard | Look at | Worry when |
 |---|---|---|
-| **Jobs** | Worker's last heartbeat; Failed, held, or queued over an hour | heartbeat over 5 minutes; any row in the table (retry or cancel it on `/admin/jobs`) |
+| **Jobs** | Worker's last heartbeat; Failed, partial, held, or queued over an hour | heartbeat over 5 minutes; any row in the table (retry or cancel it on `/admin/jobs`) |
 | **Spend** | This month; Of the monthly cap; Costliest check runs | the cap above 80% (at 100% automatic checks and tags stop); one run costing far more than the others |
 | **HTTP** | Requests by status; 95th percentile latency by route; Warnings and errors | any 5xx (over 1% for 10 minutes alerts); a route over about 1 s; new error lines (each opens its trace) |
 | **Checks** | Judgements per day by label; Measured agreement with gold labels; Model calls by outcome | agreement dropping after a prompt, model or requirement change; model calls failing; no judgements after a refresh |
@@ -360,7 +401,7 @@ erDiagram
 |---|---|
 | `auth.app_user` | a person who can sign in: email (unique, lower case), argon2id password hash (left out of the audit log), role (admin, moderator), their `core.actor`, disabled_at |
 | `auth.session` | a signed-in browser: the SHA-256 of the cookie's token (the token isn't kept), user, last seen, expiry |
-| `jobs.job` | one job: kind (sync, transfer, check, annotate, refresh), params, automatic (the cap applies), schedule, priority, status (queued, running, held, succeeded, failed, cancelled), attempts and retries, the worker on it and its heartbeat |
+| `jobs.job` | one job: kind (sync, transfer, check, annotate, refresh), params, automatic (the cap applies), schedule, priority, status (queued, running, held, succeeded, partial, failed, cancelled), attempts and retries, the worker on it and its heartbeat |
 | `jobs.job_line` | a job's progress lines, per attempt |
 | `jobs.schedule` | when a job starts by itself: name, kind and params, frequency (daily, weekly, monthly), weekday, hour UTC, enabled, next run |
 | `core.llm_call` | every model call, one row each, failed ones too: model asked and model that answered, operation (check, annotate), run, trial, call number, job, the request as sent (no system prompt; files by sha256), the answer, stop reason, latency, error, the provider's request id, and each billed attempt priced (more than one after a fallback) with their sums: tokens, cost, attempts on an unpriced model |
@@ -387,8 +428,8 @@ GitHub Actions:
   the whole test suite, against a Postgres service of its own.
 - `.github/workflows/docs.yml`, on every push and pull request: a strict build of this site; pushes to `main` also
   publish it to GitHub Pages.
-- `.github/workflows/image.yml`, started by hand: the tests, then the image to `ghcr.io/shmarlya/trialwatch`
-  (`sha-<commit>`, and `latest` from `main`).
+- `.github/workflows/image.yml`, on every push to `main` (each merged pull request) and by hand: the tests, then
+  the image to `ghcr.io/shmarlya/trialwatch` (`sha-<commit>`, and `latest` from `main`).
 - Started by hand, calling CTIS or the model: `eval-short.yml` and `eval-full.yml` (gold evaluations, sharing
   `eval-shared.yml`) and `gold-snapshot.yml` (records the frozen snapshot); see
   [gold evaluations](sources-and-gold.md#gold-evaluations-ci).

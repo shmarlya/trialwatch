@@ -42,6 +42,7 @@ from trialwatch.db import core
 from trialwatch.db.core import Page
 from trialwatch.llm import CallResult, MessagesClient
 from trialwatch.progress import Progress, report
+from trialwatch.progress import count as count_done
 from trialwatch.trials import readiness
 
 
@@ -73,6 +74,8 @@ class Evidence:
     # the model saw every page of the documents when it gave this answer, and every page had
     # readable text (a scanned page without a text layer counts as not seen)
     whole: bool
+    # the page the model cited, when the quote was found on a page near it instead (`page`)
+    cited_page_no: int | None = None
 
 
 @dataclass
@@ -150,6 +153,38 @@ def questions_to_widen(questions: list[Question], first_answers: dict[str, dict]
     return retry
 
 
+def budgeted_pages(conn: psycopg.Connection, pages: list[Page], questions: list[Question],
+                   settings: Settings) -> list[Page]:
+    """The pages to ask these questions with when every page is too long to send: each question's
+    settings.widen_top_k best pages with their neighbours, taken question by question, rank by rank, while
+    their text stays within settings.widen_max_chars; in the documents' order."""
+    chosen_by_question = []
+    for question in questions:
+        found = search(conn, pages, search_query_for(question), settings.widen_top_k)
+        chosen_by_question.append(found.chosen)
+    taken: set[tuple[bytes, int]] = set()
+    total = 0
+    depth = 0
+    while any(depth < len(chosen) for chosen in chosen_by_question):
+        for chosen in chosen_by_question:
+            if depth >= len(chosen):
+                continue
+            page = chosen[depth]
+            ref = (page.file, page.page_no)
+            if ref in taken:
+                continue
+            if total + len(page.text) > settings.widen_max_chars:
+                continue
+            taken.add(ref)
+            total += len(page.text)
+        depth += 1
+    kept = []
+    for page in pages:
+        if (page.file, page.page_no) in taken:
+            kept.append(page)
+    return kept
+
+
 def total_text_length(pages: list[Page]) -> int:
     total = 0
     for page in pages:
@@ -163,18 +198,32 @@ def text_or_empty(value: str | None) -> str:
     return value
 
 
+# How far from the cited page a quote may be found: the model is shown a page with its neighbours and
+# sometimes cites the page next to the one the passage is on (or a passage runs over a page break)
+NEARBY_PAGES = 2
+
+
 def evidence_from_answer(key: str, answer: dict, whole: bool, pages_by_ref: dict[tuple, Page]) -> Evidence:
-    """One model answer as Evidence, with its quote checked against the page it cites."""
+    """One model answer as Evidence, with its quote checked against the page it cites, or else the
+    nearest page of the same document within NEARBY_PAGES that has it (the evidence then names that page)."""
     found = found_value(answer.get("found"))
     quote = text_or_empty(answer.get("quote"))
     note = text_or_empty(answer.get("note"))
-    page = None
-    if found is True:
-        page = pages_by_ref.get((answer.get("document"), answer.get("page")))
-    verified = False
-    if found is True:
-        verified = verify(quote, page)
-    return Evidence(key, found, answer.get("kind"), quote, page, note, verified, whole)
+    kind = answer.get("kind")
+    if found is not True:
+        return Evidence(key, found, kind, quote, None, note, False, whole)
+    document = answer.get("document")
+    cited = answer.get("page")
+    page = pages_by_ref.get((document, cited))
+    if verify(quote, page):
+        return Evidence(key, found, kind, quote, page, note, True, whole)
+    if isinstance(cited, int):
+        for distance in range(1, NEARBY_PAGES + 1):
+            for page_no in (cited - distance, cited + distance):
+                nearby = pages_by_ref.get((document, page_no))
+                if verify(quote, nearby):
+                    return Evidence(key, found, kind, quote, nearby, note, True, whole, cited_page_no=cited)
+    return Evidence(key, found, kind, quote, page, note, False, whole)
 
 
 @dataclass(frozen=True)
@@ -274,13 +323,20 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
                                requirement_set.not_reported_kinds | requirement_set.open_kinds)
     widened_keys = set()
     fits = total_text_length(pages) <= settings.max_text_chars
+    widened_pages = pages
+    widened_whole = readable
     if retry and not fits:
-        trace.add("widening", {"skipped": "the text of every page is too long to send", "questions":
-                               question_keys(retry)})
-    if retry and fits:
-        second_request = build_request(settings, prompt, pages, retry, context)
+        # too long to send whole (a study report of thousands of pages): many more of the best pages per
+        # question instead, so a result retrieval missed may still be found; "not found" there is not the
+        # whole document
+        widened_pages = budgeted_pages(conn, pages, retry, settings)
+        widened_whole = False
+        trace.add("widening", {"budgeted": "the text of every page is too long to send", "questions":
+                               question_keys(retry), "pages": tracing.page_refs(widened_pages)})
+    if retry and widened_pages:
+        second_request = build_request(settings, prompt, widened_pages, retry, context)
         again, again_answers = ask(client, second_request)
-        trace.add("call", tracing.call_data(2, settings, pages, retry), again.duration_ms)
+        trace.add("call", tracing.call_data(2, settings, widened_pages, retry), again.duration_ms)
         count_call(result, 2, again, request_for_trace(second_request))
         if again.error:
             # recorded, not dropped: judging on the first answers alone would pass a failed call off as a
@@ -289,7 +345,12 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
             return None
         for question in retry:
             if question.key in again_answers:
-                answers[question.key] = (again_answers[question.key], readable)
+                answer = again_answers[question.key]
+                if not widened_whole and found_value(answer.get("found")) is not True \
+                        and found_value(answers.get(question.key, ({}, False))[0].get("found")) is True:
+                    # a budgeted widening that found nothing never overturns a first answer that did
+                    continue
+                answers[question.key] = (answer, widened_whole)
                 widened_keys.add(question.key)
         result.widened = len(widened_keys)
 
@@ -697,6 +758,7 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
                 report(progress, f"{number}/{len(wanted)} {name}: error: {trial_result.error}")
             else:
                 report(progress, f"{number}/{len(wanted)} {name}: {trial_result.label}")
+            count_done(number, len(wanted))
             summary.input_tokens += trial_result.input_tokens
             summary.output_tokens += trial_result.output_tokens
             summary.cache_write_tokens += trial_result.cache_write_tokens

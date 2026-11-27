@@ -1,11 +1,17 @@
 # Builds the TrialWatch image, ghcr.io/shmarlya/trialwatch (the app, with its migrations and dbmate), and pushes
-# it to GitHub's registry. Started by hand
-# (Actions → Image → Run workflow, or `gh workflow run image.yml --ref main`). The tests run first; a red commit
-# gets no image. Every run tags its image sha-<commit>; a run from main also moves `latest` to it, so `latest`
-# is always the newest deployment. A server runs it with `docker compose pull` (docs/operations.md).
+# it to GitHub's registry. Runs on every push to main, so on every merged pull request (not when it changed
+# only the docs site), and by hand (Actions → Image → Run workflow, or `gh workflow run image.yml --ref main`).
+# The tests run first; a red commit gets no image. Every run tags its image sha-<commit>; a run from main also
+# moves `latest` to it, so `latest` is always the newest deployment. A server runs it with `docker compose pull`
+# (docs/operations.md); on Coolify, Redeploy pulls it.
 name: Image
 
 on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "mkdocs.yml"
   workflow_dispatch:
     inputs:
       version:
@@ -15,6 +21,12 @@ on:
 
 permissions:
   contents: read
+
+# One run at a time from a branch, in order: two merges close together build one after the other (a third
+# waiting replaces the second), so `latest` never moves back to an older commit
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   tests:

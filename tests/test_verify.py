@@ -68,3 +68,16 @@ def test_text_is_compared_in_one_normal_form():
     assert verify.normalise("Efﬁcacy “primary” end–point ‘a’") == "efficacy \"primary\" end-point 'a'"
     assert verify.page_text_variants("no hyphen at a line end") == ["no hyphen at a line end"]
     assert verify.page_text_variants("cross-\nover") == ["cross-\nover", "cross-over", "crossover"]
+
+
+def test_a_quote_of_a_table_cell_broken_across_lines_verifies():
+    """A narrow table cell comes out of the PDF in pieces; the model quotes the number whole."""
+    page = a_page("Flu A1 Assay 1\n469.\n49 \n(300\n.51 \nto \n733.\n47) \n335.")
+    assert verify.verify("469.49 (300.51 to 733.47)", page)
+    # still whole words and numbers of the page as it is spaced
+    page = a_page("In total 112 participants were randomised")
+    assert not verify.verify("12 participants were", page)
+    assert verify.occurs_as_words_ignoring_spaces("112participants", "in total 112 participants")
+    assert not verify.occurs_as_words_ignoring_spaces("12participants", "in total 112 participants")
+    # without its spaces, a quote must still be long enough to prove something
+    assert not verify.verify("1 2 3 4 5 6", a_page("123456 and more"))

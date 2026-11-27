@@ -36,7 +36,20 @@ Trials come in in two stages:
    `core.evidence_transfer` records the transfer as `complete` (everything came in and was read) or `failed`
    (with what), and the document kinds it brought. While a trial is being transferred its row says failed, so an
    interrupted transfer never looks complete. Trials are chosen by key, or all `pending` (listed, never
-   transferred), `failed`, `stale`, `recruiting` or `listed` ones.
+   transferred), `failed`, `stuck`, `stale`, `recruiting` or `listed` ones.
+
+   A document already held at the version the source lists (CTIS: its uuid and `systemVersion`) is not downloaded
+   again: a stale trial, or a retry after one failed file, fetches only what is new or missing. A transfer with
+   **recheck** (`source transfer --recheck`, the checkbox on a source's page; a trial page's "Transfer again"
+   always) downloads every document and lets the bytes decide; each run records whether it did. While a trial's
+   files are read (child processes), the next trial is already being fetched; its page text is saved, and its
+   status recorded, once that next trial's documents are in.
+
+   Downloads are spooled to a temporary file and hashed as they arrive (a file is read into memory only to be
+   stored, once). A presigned link that expired, or a download past its deadline (10 minutes, plus a minute per
+   20 MB), gets a fresh link from CTIS (three in all); a body shorter than its `Content-Length` is tried again,
+   never kept; `Retry-After` is honoured up to 5 minutes; a PDF without `%%EOF` at its end is downloaded once
+   more, and kept with a warning if it still lacks it.
 
 Both stages are **ingest runs** (`core.ingest_run`, kind `list` or `transfer`) that log the config they used, their
 counts and errors; their audit entries carry the note "ingest run N". One process at a time syncs or transfers
@@ -47,8 +60,19 @@ from a source (an advisory lock).
 `core.evidence_status` says, per trial and source: not transferred, failed, stale (complete, but the source changed
 the trial since) or complete. The source's list gives the day of a trial's last change, not the time, so a trial
 counts as stale when that day is the transfer's day or later: a trial changed on the day of its transfer stays
-stale until a transfer on a later day. Every transfer also downloads each listed document again and compares its
-bytes, so a file replaced without a new version number is caught too.
+stale until a transfer on a later day. A transfer with recheck downloads each listed document again and compares
+its bytes, so a file replaced without a new version number is caught too (run one now and then, e.g. monthly).
+
+A trial whose transfer failed on three days in a row (`core.evidence_transfer.failures`; a day's retries count
+once) is **stuck**: the refresh leaves it out of `failed` until the source changes it, a transfer completes, or a
+person transfers it again (`--which stuck`, or its page). The source's and the trial's pages show it.
+
+Some failures can't be mended by trying again, and the job does not fail or retry for them: a file whose bytes
+pypdf can't read, and a PDF still cut short on its second download (the source publishes it so: CTIS holds
+2022-501485-22-00's 32.7 MB safety narratives as their first 17.8 MB). The trial's transfer is still failed, its
+evidence incomplete; the job lists them as left to a person (its lines, its result's `left_to_people`, and its
+page's "What failed"), and the message says when a file is cut short and by how much. A cut-short version is
+downloaded again by later transfers, in case the source mends it, until the trial is stuck.
 
 A check reads a trial only when every source that holds it is complete and current, and its transfer brought
 every document kind the check reads that the source can give (`not_ready` in `trials/readiness.py`). A trial entered
@@ -107,9 +131,19 @@ answer means the trial doesn't exist (`TrialNotFound`).
   `core.document_version` says which file it had from when, keeping replaced ones (CTIS serves only the current
   version, so every version we download is kept). `core.trial_document` links documents to trials with basis and
   confidence. Each file's page text is extracted once with pypdf (`core.page`, `trials/pages.py`); only PDFs are
-  read. Each file is read in a child process of its own: pypdf needs about ten times a file's size while it reads
+  read. Pages with under 200 letters are then looked at by OCR in the same child (`trials/ocr.py`, files of at
+  most `TRIALWATCH_OCR_MAX_PAGES`, default 1,000): a page that is a picture (an image over 30% of it, or 50 or more drawn shapes: a chart, text drawn as
+  outlines) is drawn with pypdfium2 at 200
+  dpi and read with tesseract (`TRIALWATCH_OCR_LANGUAGES`, default `eng`; about a second a page, at most 400
+  such pages a file), and `core.page_ocr` keeps what it read, beside the text layer, which never changes; checks
+  read `core.page_text`, the OCR text where there is one. Files read before OCR: the weekly refresh's `ocr` step, or `trialwatch source ocr --all`. Each file is read in a child process of its own: pypdf needs about ten times a file's size while it reads
   (a 38 MB, 3,000-page CTIS study report: 420 MB), and the child gives that memory back when it ends. A child that
-  runs out of memory or takes over 20 minutes fails only its file, like a broken PDF. A CTIS document over 300 MB
+  runs out of memory or takes over 20 minutes fails only its file, like a broken PDF. A trial's files are read
+  two at a time in the worker (pypdf is pure Python: one process uses one CPU), and a file starts only when
+  its estimate (150 MB plus ten times its size, at least 600 MB) fits beside those being read in 1,400 MB;
+  one over that is read alone. When the memory runs out anyway, the kernel kills the larger child, so a
+  file can fail because of the one read beside it; it is read again on the next transfer. Uploads in the
+  web server are read one at a time (its container has 512 MB). A CTIS document over 300 MB
   is not downloaded (failed as too large), and a file already stored is not sent to the database again. pypdf's
   budget for parsing one page's content stream is raised from 2 to 10 million: pages of dense tables in CTIS
   study reports went over the default and failed their whole file.
@@ -213,7 +247,9 @@ erDiagram
 | `core.evidence_status` (view) | each trial's state at each source: not transferred, failed, stale, complete |
 | `core.trial_location` | where a trial runs: country, city, postcode, site, status there; no people |
 | `core.file` | the bytes, once per sha256 (never changed), with a text fingerprint |
-| `core.page` | text of each page of a file (never changed), with a full-text index |
+| `core.page` | text of each page of a file as its text layer has it (never changed), with a full-text index |
+| `core.page_ocr` | what OCR made of a page under 200 letters: a picture or not (`is_picture`), the text read from it (never changed) |
+| `core.page_text` (view) | each page's text as checks read it: OCR's where it read a picture, else the text layer |
 | `core.document_kind` | our document kinds: results-summary, lay-summary, study-report, publication, protocol, other (`has_results`) |
 | `core.document` | a document as its source identifies it (CTIS uuid, DOI, upload id), with its kind |
 | `core.document_version` | which file a document had from when; `replaced_at` NULL = current |

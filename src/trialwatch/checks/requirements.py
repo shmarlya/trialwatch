@@ -13,7 +13,8 @@ vocabulary is generic:
   ("Subjects enrolled 168") or in words ("Three patients") (dates, years, ages,
   doses and numbered labels such as "Table 2" are not counts);
 - statement_present: a verified quote;
-- numeric_result: a verified quote of kind numeric_result; a verified quote of a "not reported" kind
+- numeric_result: a verified quote of kind numeric_result, or of a kind the set counts as reported
+  (reported_kinds, e.g. a partial result: data for some of an endpoint's components); a verified quote of a "not reported" kind
   (the set's not_reported_kinds) seen in the whole document means not reported; one of an "open" kind
   (open_kinds, e.g. a result of a stage of the trial that never started) leaves it to a person.
 
@@ -31,7 +32,8 @@ from typing import Any
 
 RULE_TYPES = ("count_stated", "statement_present", "numeric_result")
 # What a quote is evidence of (the model's answer, checks/ask.py). Requirement sets say which of these
-# mean "not reported" (not_reported_kinds) and which leave a question open for a person (open_kinds):
+# besides numeric_result count as reported (reported_kinds), which mean "not reported"
+# (not_reported_kinds) and which leave a question open for a person (open_kinds):
 # not_conducted is a result that could not exist, e.g. of a stage of the trial that never started;
 # partial_result gives data for some of an endpoint's components only.
 KINDS = ("numeric_result", "narrative_only", "chart_only", "redacted", "not_analysed", "not_conducted",
@@ -88,6 +90,8 @@ class RequirementSet:
     description: str
     document_kinds: tuple[str, ...]
     not_reported_kinds: frozenset[str]
+    # kinds besides numeric_result that settle a numeric_result question as reported
+    reported_kinds: frozenset[str]
     # kinds that leave a numeric_result question undecided, for a person: neither reported nor missing
     open_kinds: frozenset[str]
     requirements: tuple[Requirement, ...]
@@ -166,6 +170,7 @@ def load(name: str) -> RequirementSet:
     return RequirementSet(
         name=data["name"], title=data["title"], description=data["description"], document_kinds=tuple(kinds),
         not_reported_kinds=frozenset(data["not_reported_kinds"]), open_kinds=frozenset(data.get("open_kinds", [])),
+        reported_kinds=frozenset(data.get("reported_kinds", [])),
         requirements=tuple(requirements),
         parts=data["parts"], inferences=tuple(inferences), labels=tuple(labels), text=text,
         sha256=hashlib.sha256(text.encode()).digest(),
@@ -184,13 +189,18 @@ def _check_set(name: str, data: dict, requirements: list[Requirement]) -> None:
         if combine != "all":
             raise ValueError(f"{name}: part {part!r} combines its questions by {combine!r}; only 'all' is supported")
     _check_labels(name, data)
-    for field_name in ("not_reported_kinds", "open_kinds"):
+    meanings = {"reported_kinds": "reported", "not_reported_kinds": "not reported", "open_kinds": "open"}
+    for field_name in meanings:
         for kind in data.get(field_name, []):
             if kind not in KINDS:
                 raise ValueError(f"{name}: {field_name} names an unknown kind {kind!r} (known: {', '.join(KINDS)})")
-    both = set(data.get("not_reported_kinds", [])) & set(data.get("open_kinds", []))
-    if both:
-        raise ValueError(f"{name}: {', '.join(sorted(both))} can't mean both not reported and open")
+    fields = list(meanings)
+    for index, first in enumerate(fields):
+        for second in fields[index + 1:]:
+            both = set(data.get(first, [])) & set(data.get(second, []))
+            if both:
+                raise ValueError(f"{name}: {', '.join(sorted(both))} can't mean both {meanings[first]} and "
+                                 f"{meanings[second]}")
     fixed_keys = []
     for requirement in requirements:
         if requirement.for_each is None:
@@ -290,20 +300,25 @@ IDENTIFIERS = (
 # the languages of the EU: English, and the words for participants, patients and subjects in the most
 # common others (French, Spanish, Portuguese, Italian, German, Dutch, Danish, Swedish, Polish)
 PEOPLE = (r"(?:participants?|subjects?|patients?|people|persons?|volunteers?|children|adults?|women|men|infants?|"
-          r"individuals|enrolled|enrol(?:l)?ment|randomi[sz]ed|"
+          r"individuals|enrolled|enrol(?:l)?ment|randomi[sz]ed|personnes|volontaires|vrijwilligers|"
           r"participantes?|pacientes?|sujetos?|sujets?|patientes?|partecipanti|pazienti|soggetti|"
           r"teilnehmer(?:innen)?|patienten|probanden|deelnemers|pati[eë]nten|proefpersonen|deltagere|deltagare|"
           r"patienter|fors[oø]gspersoner|uczestnik[oó]w|pacjent[oó]w)")
 NUMBER = r"(\d{1,3}(?:,\d{3})+|\d+)"
-# "168 patients", "12 healthy adult volunteers", "0 subjects"
-COUNT_BEFORE_PEOPLE = re.compile(rf"(?<![\w.,]){NUMBER}\)?\s+(?:[^\W\d_]+[\s-]+){{0,3}}?{PEOPLE}\b",
+# "168 patients", "12 healthy adult volunteers", "20 healthy female and male participants", "0 subjects"
+COUNT_BEFORE_PEOPLE = re.compile(rf"(?<![\w.,]){NUMBER}\)?\s+(?:[^\W\d_]+[\s-]+){{0,4}}?{PEOPLE}\b",
                                  re.IGNORECASE)
-# "n = 168", "(N=12)"
-COUNT_AFTER_N = re.compile(rf"\b[nN]\s*=\s*{NUMBER}")
+# "n = 168", "(N=12)", and a table's "n (%) 92 (100%)"
+COUNT_AFTER_N = re.compile(rf"\b[nN]\s*(?:=|\(\s*%\s*\))\s*{NUMBER}")
+# What a results table writes before a count of people, without naming them: "Analysed: 40", "Exposed in
+# phase 1a: 21", "Actual number included worldwide 517", "Full Analysis Set 14", "Total: worldwide 31", and
+# participant flow tables ("Started 149 148", "Entered: 15")
+COUNT_LABEL = (r"(?:analy[sz]ed|treated|exposed|included|recruited|dosed|started|entered|analysis\s+set|"
+               r"safety\s+set|worldwide)")
 # A count after the people it counts, as tables in results summaries give it, with or without a colon:
 # "Number of subjects enrolled: 168", "Subjects enrolled 168", "Actual enrolment: 166", "Patients
 # treated, n 23". Not a number that ends in a unit, a decimal or a percentage.
-COUNT_AFTER_LABEL = re.compile(rf"\b{PEOPLE}\b(?P<gap>[^.\d:;]{{0,60}}?):?\s*{NUMBER}(?![.,]\d|\s*(?:%|mg|kg))",
+COUNT_AFTER_LABEL = re.compile(rf"\b(?:{PEOPLE}|{COUNT_LABEL})\b(?P<gap>[^.\d:;]{{0,60}}?):?\s*{NUMBER}(?![.,]\d|\s*(?:%|mg|kg))",
                                re.IGNORECASE)
 # Words between the people and a number that make the number something else than how many they are:
 # an age, a threshold, a group or place, a measurement ("patients aged 18", "participants with 2 prior
@@ -313,9 +328,12 @@ NOT_A_LABEL = re.compile(r"\b(?:aged?|older|younger|over|under|above|below|than|
 NUMBER_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
                 "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
                 "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
+TENS = NUMBER_WORDS[20:]
+UNITS = NUMBER_WORDS[1:10]
 # A number written as a word, right before the people it counts ("Three patients", "twenty healthy
-# volunteers"), not "no one" and not "one of the patients"
-NUMBER_WORD = re.compile(rf"(?<!\bno\s)\b({'|'.join(NUMBER_WORDS)})\b(?=\s+(?:(?!of\b)[^\W\d_]+[\s-]+){{0,3}}?"
+# volunteers", "Seventy-seven subjects"), not "no one" and not "one of the patients"
+NUMBER_WORD = re.compile(rf"(?<!\bno\s)\b(?:({'|'.join(TENS)})[-\s]({'|'.join(UNITS)})|({'|'.join(NUMBER_WORDS)}))\b"
+                         rf"(?=\s+(?:(?!of\b)[^\W\d_]+[\s-]+){{0,3}}?"
                          rf"{PEOPLE}\b)", re.IGNORECASE)
 
 
@@ -326,8 +344,15 @@ def _number_of(word: str) -> int:
     return (index - 18) * 10
 
 
+def _number_for_words(found: re.Match) -> str:
+    """The digits of "three", "twenty" or "seventy-seven"."""
+    if found.group(1):
+        return str(_number_of(found.group(1)) + _number_of(found.group(2)))
+    return str(_number_of(found.group(3)))
+
+
 def _digits_for_words(text: str) -> str:
-    return NUMBER_WORD.sub(lambda found: str(_number_of(found.group(1))), text)
+    return NUMBER_WORD.sub(_number_for_words, text)
 
 
 def participant_numbers(text: str) -> list[int]:
@@ -384,6 +409,9 @@ def settle_question(requirement_set: RequirementSet, question: Question, item: A
             return settle(trace, key, True, "verified quote")
         if item.kind == "numeric_result":
             return settle(trace, key, True, "verified numeric result")
+        if item.kind in requirement_set.reported_kinds:
+            # e.g. a partial result: some of the endpoint's components have data, as reviewers count it
+            return settle(trace, key, True, f"verified {item.kind}: counted as reported")
         if item.kind in requirement_set.open_kinds:
             # e.g. a result that could not exist: neither reported nor missing, for a person
             return settle(trace, key, None, f"verified {item.kind}: left for a person")

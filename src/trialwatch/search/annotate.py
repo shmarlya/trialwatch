@@ -27,6 +27,7 @@ from trialwatch.db import geo as geo_db
 from trialwatch.db import search as search_db
 from trialwatch.db import vocab as vocab_db
 from trialwatch.llm import MessagesClient, total_cost
+from trialwatch.progress import count as count_done
 from trialwatch.search import categories, index
 from trialwatch.sources import profile
 
@@ -429,6 +430,7 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: list[int], 
                 if problem is not None:
                     line = f"{line}, {problem}"
                 progress(line)
+            count_done(number, len(trial_ids))
     except BaseException as exc:
         status = "failed"
         error = f"{type(exc).__name__}: {exc}"

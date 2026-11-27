@@ -10,7 +10,7 @@
   <summary><b>{{ set.name }}</b>{% if set.name == default_set %} <span class="badge full">default</span>{% endif %} · {{ set.title }}
     <span class="small muted">sha256 {{ set.sha256.hex()[:12] }}</span></summary>
   <p class="small">{{ set.description }}</p>
-  <p class="small">Reads documents of kinds: {% for kind in set.document_kinds %}<code>{{ kind }}</code> {% endfor %}· evidence kinds meaning "not reported": {% for kind in set.not_reported_kinds | sort %}<code>{{ kind }}</code> {% endfor %}</p>
+  <p class="small">Reads documents of kinds: {% for kind in set.document_kinds %}<code>{{ kind }}</code> {% endfor %}· evidence kinds meaning "not reported": {% for kind in set.not_reported_kinds | sort %}<code>{{ kind }}</code> {% endfor %}{% if set.reported_kinds %}· also counted as reported: {% for kind in set.reported_kinds | sort %}<code>{{ kind }}</code> {% endfor %}{% endif %}{% if set.open_kinds %}· left for a person: {% for kind in set.open_kinds | sort %}<code>{{ kind }}</code> {% endfor %}{% endif %}</p>
   <div class="table-wrap"><table class="inner">
     <tr><th>Key</th><th>Question</th><th>Rule</th><th>Part</th><th>Searched with</th></tr>
     {% for requirement in set.requirements %}

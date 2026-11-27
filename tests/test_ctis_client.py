@@ -160,3 +160,160 @@ def test_download_retries_a_busy_file_storage():
     with client(LinkThen(storage)) as c:
         assert c.download_document(CT, UUID).content == b"%PDF-1.7 ."
     assert storage.calls == 2
+
+
+# Edge cases of a download: the network, the storage, the file
+
+
+class Storage:
+    """CTIS hands out numbered links; the storage answers each request with the next of `answers`
+    (a callable taking the request), and remembers which link each request used."""
+
+    def __init__(self, *answers) -> None:
+        self.answers = list(answers)
+        self.links_given = 0
+        self.used: list[str] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.host == "euclinicaltrials.eu":
+            self.links_given += 1
+            return httpx.Response(200, json={"url": f"{LINK}&n={self.links_given}"})
+        self.used.append(request.url.params["n"])
+        return self.answers.pop(0)(request)
+
+
+def whole_file(request=None):
+    return httpx.Response(200, content=b"%PDF-1.7 whole\n%%EOF")
+
+
+def drops_mid_body(request):
+    def body():
+        yield b"%PDF-1.7 wh"
+        raise httpx.ReadError("connection reset by peer", request=request)
+
+    return httpx.Response(200, content=body())
+
+
+def cut_short(request):
+    # the storage says 21 bytes and sends 11: a body cut short
+    return httpx.Response(200, headers={"Content-Length": "21"}, content=iter([b"%PDF-1.7 wh"]))
+
+
+def expired(request):
+    return httpx.Response(403, content=b"<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>")
+
+
+def times_out(request):
+    raise httpx.ReadTimeout("timed out", request=request)
+
+
+def test_a_download_is_spooled_and_hashed_on_the_way(monkeypatch):
+    import hashlib
+
+    monkeypatch.setattr(ctis_client, "SPOOL_IN_MEMORY_BYTES", 4)  # past it, the spool is a file on disk
+    with client(Storage(whole_file)) as c, c.download_document(CT, UUID) as file:
+        assert file.content == b"%PDF-1.7 whole\n%%EOF"
+        assert file.sha256() == hashlib.sha256(b"%PDF-1.7 whole\n%%EOF").digest()
+        assert (file.size, file.head(4), file.tail(5)) == (20, b"%PDF", b"%%EOF")
+
+
+def test_a_connection_dropped_mid_body_is_tried_again():
+    storage = Storage(drops_mid_body, whole_file)
+    with client(storage) as c:
+        assert c.download_document(CT, UUID).content == b"%PDF-1.7 whole\n%%EOF"
+    assert storage.used == ["1", "1"]
+
+
+def test_a_body_shorter_than_its_content_length_is_tried_again_never_kept():
+    storage = Storage(cut_short, whole_file)
+    with client(storage) as c:
+        assert c.download_document(CT, UUID).content == b"%PDF-1.7 whole\n%%EOF"
+
+
+def test_a_body_cut_short_every_time_fails():
+    with client(Storage(*[cut_short] * 5)) as c, pytest.raises(ctis_client.IncompleteDownload, match="11 of 21"):
+        c.download_document(CT, UUID)
+
+
+def test_an_expired_link_is_replaced_by_a_fresh_one():
+    storage = Storage(expired, whole_file)
+    with client(storage) as c:
+        assert c.download_document(CT, UUID).content == b"%PDF-1.7 whole\n%%EOF"
+    assert (storage.links_given, storage.used) == (2, ["1", "2"])
+
+
+def test_links_that_keep_expiring_fail_after_max_links():
+    storage = Storage(*[expired] * ctis_client.MAX_LINKS)
+    with client(storage) as c, pytest.raises(ctis_client.LinkUnusable):
+        c.download_document(CT, UUID)
+    assert storage.links_given == ctis_client.MAX_LINKS
+
+
+def gone(request):
+    return httpx.Response(404, content=b"<Error><Code>NoSuchKey</Code></Error>")
+
+
+def test_a_file_the_storage_no_longer_holds_fails_at_once():
+    # a fresh link to a file that isn't there would get the same 404
+    storage = Storage(gone, whole_file)
+    with client(storage) as c, pytest.raises(httpx.HTTPStatusError, match="404"):
+        c.download_document(CT, UUID)
+    assert (storage.links_given, storage.used) == (1, ["1"])
+
+
+def test_timeouts_on_every_attempt_fail_the_download_with_the_error():
+    with client(Storage(*[times_out] * 5)) as c, pytest.raises(httpx.ReadTimeout):
+        c.download_document(CT, UUID)
+
+
+class Clock:
+    """A clock that moves `step` seconds each time it is read."""
+
+    def __init__(self, step: float) -> None:
+        self.now = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        self.now += self.step
+        return self.now
+
+
+def test_a_download_past_its_deadline_is_given_up_and_retried_with_a_fresh_link():
+    def trickles(request):
+        return httpx.Response(200, content=iter([b"%PDF"] * 5))
+
+    storage = Storage(trickles, whole_file)
+    # each read of the clock is 4 minutes: the first download passes its 10 minutes after a few chunks
+    clock = Clock(step=4 * 60)
+    c = CtisClient(min_interval=0, backoff=0, transport=httpx.MockTransport(storage), clock=clock, sleep=lambda s: None)
+    with c:
+        assert c.download_document(CT, UUID).content == b"%PDF-1.7 whole\n%%EOF"
+    assert storage.used == ["1", "2"]
+
+
+def test_a_rate_limit_waits_as_long_as_retry_after_asks():
+    slept = []
+
+    def busy(request):
+        return httpx.Response(429, headers={"Retry-After": "7"})
+
+    c = CtisClient(min_interval=0, backoff=0, transport=httpx.MockTransport(Storage(busy, whole_file)),
+                   sleep=slept.append)
+    with c:
+        c.download_document(CT, UUID)
+    assert 7 in slept
+
+
+def test_a_retry_after_longer_than_the_cap_waits_only_the_cap():
+    assert ctis_client._retry_after("7") == 7
+    assert ctis_client._retry_after("soon") is None
+    slept = []
+
+    def far(request):
+        return httpx.Response(503, headers={"Retry-After": "86400"})
+
+    c = CtisClient(min_interval=0, backoff=0, transport=httpx.MockTransport(Storage(far, whole_file)),
+                   sleep=slept.append)
+    with c:
+        c.download_document(CT, UUID)
+    assert max(slept) == ctis_client.LONGEST_RETRY_AFTER

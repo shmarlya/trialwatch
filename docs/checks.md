@@ -39,7 +39,7 @@ flowchart TB
     pages -- "files" --> whole["Each PDF sent whole"]
     retrieval --> model_call["Model call (Claude)<br>finds and quotes evidence,<br>or answers don't know"]
     whole --> model_call
-    model_call --> verify["Verify quotes<br>on the cited page, as whole words"]
+    model_call --> verify["Verify quotes<br>on or near the cited page, as whole words"]
     verify --> widen{"answered from<br>retrieved pages only?"}
     widen -- "unanswered, or not reported" --> again["Ask again with every page"] --> verify
     widen -- "settled" --> rules["Rules of the requirement set<br>count_stated · statement_present · numeric_result"]
@@ -62,32 +62,47 @@ flowchart TB
   document kinds to read, the requirements (a question, or one per registered item such as each primary endpoint,
   with search hints and a rule type), the parts they count towards, and its labels: tried in order, the first
   whose condition on the parts holds (`when_any`, `when_all`; the last has none), each saying what it means next
-  to a gold label (`accusation`, `clears` or `open`). Answer kinds mean "not reported" (`not_reported_kinds`) or
-  leave the question to a person (`open_kinds`: `not_conducted`, a result of a stage of the trial that never
-  started or enrolled nobody, is neither reported nor missing; `partial_result`, data for only some of an
-  endpoint's components). Both are asked again with every page when first seen on retrieved pages. Gold scoring reads those meanings, so a set with other
+  to a gold label (`accusation`, `clears` or `open`). Answer kinds besides `numeric_result` count as reported
+  (`reported_kinds`: `partial_result`, data for some of an endpoint's components, as the gold reviewers count
+  it), mean "not reported" (`not_reported_kinds`) or leave the question to a person (`open_kinds`:
+  `not_conducted`, a result of a stage of the trial that never started or enrolled nobody, is neither reported
+  nor missing). The last two are asked again with every page when first seen on retrieved pages. Gold scoring reads those meanings, so a set with other
   labels is scored the same way. The web interface's Requirements page shows every set.
 - **System prompt.** `src/trialwatch/checks/prompts/evidence.md`. It names no registry, document type or
   regulation; the trial, its documents and the questions are given per call from data, each fenced in tags. Text
   in a PDF that looks like one of those tags (`<page`, `</document`) has its `<` replaced, so a document can't end
   its page early and speak to the model as if it were our instructions.
 - **No versions before production.** One current text of each prompt, setup and requirement set; every run
-  stores the exact texts it used with their sha256, so an earlier run always shows its own.
+  stores the exact texts it used with their sha256, so an earlier run always shows its own. The refresh checks
+  again every trial judged under other rules (the requirement set, compared as JSON: reformatting it changes
+  nothing) or another prompt than the current ones, undecided judgements first, within the monthly spending
+  cap; a changed model or setup is not checked again by itself (`check evidence --config` is a person's
+  experiment).
 - **Method.** `text`: the documents' extracted page text, searched per question with the words of the
   requirement's hints and of the registered item (Postgres full-text search, `checks/retrieval.py`). `files`:
   each document's file sent whole, so the model also reads scanned pages and charts. Both use the same
   requirement set, prompt, answer format, quote verification (against the page text), rules, tables and trace.
 - **Verified quotes only.** A quote counts only if it is at least 10 characters long and found on the page it
   cites as whole words, ignoring case, spacing, dash and quote-mark variants and line-end hyphens
-  (`checks/verify.py`). A page counts as read only if its text layer holds at least 200 letters: on a scanned
-  page "not found" can't mean "not reported". A cover, signature, legend or contents page also falls under that
-  line, so the setup allows a few (`unreadable_pages_allowed`, 1 by default): with at most that many such pages,
-  and at least one readable one, answers from every page still count as the whole document. The trial page
-  shows which pages had no text.
+  (`checks/verify.py`). Spacing inside words and numbers is ignored too (a table cell's text comes out of the PDF
+  broken across lines), as long as the quote starts and ends on the page's word edges. A quote found not on the
+  cited page but up to 2 pages from it in the same document counts, and the evidence names the page it is on (the
+  verification trace keeps the cited one as `cited_page`). A page counts as read only if its text holds at least 200 letters: on a scanned
+  page "not found" can't mean "not reported". Pages under that are looked at by OCR when their file is read
+  (`trials/ocr.py`): a page that is a picture (a scan, a results table saved as an image, or a page drawn with
+  many shapes: a chart, text drawn as outlines) gets its text read from the picture, and checks read that text (`core.page_text`); a page that is no picture (a cover,
+  contents or signature page) has no other text than its own, so it counts as read. A page OCR has not looked
+  at (a file of over 1,000 pages, or one read before OCR and not looked at since: the refresh's `ocr` step) or a picture it could not
+  read still counts as unread; the setup allows a few (`unreadable_pages_allowed`, 1 by default): with at most
+  that many such pages, and at least one readable one, answers from every page still count as the whole
+  document. The trial page shows which pages had no text.
 - **Don't know, and widening.** The model may answer `dont_know` (stored as `checks.answer.found` NULL) when it
   can't tell. A question not answered from retrieved pages, or an endpoint found there only as not reported, is
-  asked again with every page, so a retrieval miss never becomes "not reported". What the rules still can't
-  settle is **undecided**, never a guess.
+  asked again with every page, so a retrieval miss never becomes "not reported". When every page is too long to
+  send (`max_text_chars`, e.g. a study report of thousands of pages), it is asked again with the `widen_top_k`
+  best pages per question and their neighbours, up to `widen_max_chars` of text: a result found there counts,
+  "not found" there is still not the whole document. What the rules still can't settle is **undecided**, never
+  a guess.
 - **Refusal fallback.** If the model's safety checks decline a request, the API may re-run it on another model
   Anthropic recommends; the answer records which model served it.
 - **Trace.** Every step of judging one trial in one run is stored in order (`checks.step`): the questions, the

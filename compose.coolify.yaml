@@ -8,7 +8,7 @@
 # Paste it as a Docker Compose resource; give the `web` service the domain with its port
 # (https://trialwatch.app:8010). Set the variables below in Coolify's Environment Variables (`:?` marks
 # the required ones). docs/operations.md ("Coolify") says how. The image comes from
-# .github/workflows/image.yml: run it on main first.
+# .github/workflows/image.yml, on each merge into main.
 
 # What web and worker share: the app's image, its limits, the database and the settings. Each applies
 # the migrations baked into the image before it starts (`dbmate --wait up`; a lock makes the second wait
@@ -60,6 +60,18 @@ services:
     # takes about ten times the file's size (a 47 MB report: 550 MB); one that runs out fails only
     # its file (src/trialwatch/trials/pages.py)
     mem_limit: 2g
+    # two PDFs read at once, a child process each (TRIALWATCH_PDF_READERS, default 2), within a memory
+    # budget for the children together (TRIALWATCH_PDF_MEMORY_MB, default 1400). Two CPUs: the server
+    # needs at least two (on one, set cpus: 1.0 and TRIALWATCH_PDF_READERS=1). The web server reads
+    # uploads one at a time whatever these say.
+    cpus: 2.0
+    environment:
+      <<: *trialwatch-environment
+      TRIALWATCH_PDF_READERS: ${TRIALWATCH_PDF_READERS:-2}
+      TRIALWATCH_PDF_MEMORY_MB: ${TRIALWATCH_PDF_MEMORY_MB:-1400}
+      # a job that has not moved for this long makes the worker exit; restart: unless-stopped starts
+      # a fresh one and the job resumes (src/trialwatch/jobs/worker.py)
+      TRIALWATCH_STUCK_MINUTES: ${TRIALWATCH_STUCK_MINUTES:-45}
     healthcheck:
       # touched every loop and every 30 s while a job runs: older than 2 minutes means stuck
       test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/trialwatch-worker.alive') > 120)"]

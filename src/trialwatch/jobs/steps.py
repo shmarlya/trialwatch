@@ -9,12 +9,13 @@ created, a check the trials not judged in the job's runs or whose call failed fo
 tagging the trials still untagged.
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import psycopg
 
-from trialwatch import llm
+from trialwatch import llm, progress
 from trialwatch.checks import evidence
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
@@ -29,6 +30,7 @@ from trialwatch.search import annotate
 from trialwatch.sources import profile, registry
 from trialwatch.trials import ingest, readiness
 
+log = logging.getLogger("trialwatch.jobs")
 CAP_REACHED = "held: this month's spend reached the monthly cap (/admin/spend)"
 
 
@@ -71,9 +73,20 @@ class JobContext(Context):
         self.watch_cap = job.automatic and capped
 
     def add(self, line: str) -> None:
-        jobs_db.add_line(self.queue, self.job.id, self.job.attempts, line)
+        progress.beat(line)
+        try:
+            jobs_db.add_line(self.queue, self.job.id, self.job.attempts, line)
+        except psycopg.OperationalError as exc:  # the queue's database went away: the work goes on
+            log.warning("job %s: progress line not written (%s): %s", self.job.id, exc, line)
 
     def should_stop(self) -> bool:
+        try:
+            return self._should_stop()
+        except psycopg.OperationalError as exc:  # can't ask now: carry on, and ask again after the next item
+            log.warning("job %s: could not ask whether to stop (%s)", self.job.id, exc)
+            return False
+
+    def _should_stop(self) -> bool:
         if jobs_db.cancel_requested(self.queue, self.job.id):
             if not self.cancelled:
                 self.add("cancel asked: stopping after the current item")
@@ -89,11 +102,16 @@ class JobContext(Context):
 
 @dataclass
 class Outcome:
-    """How a step ended: what it did (jobs.job.result), and what failed that is worth another attempt
-    (item -> error). What a retry can't fix is in the result (a check's left_to_people)."""
+    """How a step ended: what it did (jobs.job.result), what failed that is worth another attempt
+    (item -> error), and what failed that another attempt can't fix, left to people (a check refused, a
+    file the source publishes broken); the result names those too (left_to_people). A job whose items
+    failed or were left ends `partial` (jobs/worker.py). `broken` says why the step failed as a whole
+    (the source's list could not be read): the job ends `failed`, as if it had raised."""
 
     result: dict = field(default_factory=dict)
     failed: dict[str, str] = field(default_factory=dict)
+    left: dict[str, str] = field(default_factory=dict)
+    broken: str | None = None
 
 
 def _source(conn: psycopg.Connection, code: str) -> core.RegisteredSource:
@@ -116,8 +134,10 @@ def run_sync(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
             # switched off, or its config is not valid: the same next time
             raise PermanentError(str(exc)) from exc
     ctx.add(result.summary())
+    # the list itself, not one of its trials: the sync failed as a whole
+    broken = result.failed.get("list")
     return Outcome({"ingest_run": result.run_id, "summary": result.summary(), "listed": result.listed,
-                    "new_trials": result.new_trials}, dict(result.failed))
+                    "new_trials": result.new_trials}, dict(result.failed), broken=broken)
 
 
 # --- transfer ------------------------------------------------------------------------------------
@@ -165,17 +185,20 @@ def run_transfer(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcom
     with registry.open_adapter(source.adapter) as adapter:
         try:
             result = ingest.transfer(conn, source, adapter, keys, why=why, progress=ctx.add,
-                                     should_stop=ctx.should_stop)
+                                     should_stop=ctx.should_stop, recheck=bool(params.get("recheck")))
         except ingest.SourceBusy:
             raise
         except ValueError as exc:
             raise PermanentError(str(exc)) from exc
     ctx.add(result.summary())
+    for name, error in result.left.items():
+        ctx.add(f"  left to a person, {name}: {error}")
     outcome = {"ingest_run": result.run_id, "summary": result.summary(), "trials": result.trials,
-               "complete": result.complete, "new_versions": result.new_versions}
+               "complete": result.complete, "new_versions": result.new_versions,
+               "left_to_people": dict(result.left)}
     if params.get("which"):
         outcome["chosen"] = _chosen_keys(ctx, keys)
-    return Outcome(outcome, dict(result.failed))
+    return Outcome(outcome, dict(result.failed), dict(result.left))
 
 
 def _chosen_keys(ctx: Context, keys: list[str]) -> list[str]:
@@ -269,7 +292,7 @@ def run_check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
     result = {"check_run": summary.run_id, "summary": summary.summary(), "trials": len(trial_ids),
               "labels": summary.labels, "left_to_people": left_to_people, "published": len(summary.published),
               "cost_usd": str(summary.cost_usd), "cost": llm.dollars(summary.cost_usd)}
-    return Outcome(result, passing)
+    return Outcome(result, passing, left_to_people)
 
 
 # --- annotate (patient search, ADR-008) ----------------------------------------------------------

@@ -10,7 +10,7 @@ merged automatically: the record goes to the oldest of them and the pair is reco
 core.possible_duplicate for a person to decide.
 """
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -415,7 +415,8 @@ class SavedVersion:
 
 def save_document_version(
     conn: psycopg.Connection, *, source: str, source_key: str, kind: str, title: str | None, language: str | None,
-    version: str, content: bytes, media_type: str | None, sha256: bytes, published_at: datetime | None = None,
+    version: str, content: bytes | Callable[[], bytes], media_type: str | None, sha256: bytes,
+    published_at: datetime | None = None, suspect: str | None = None,
 ) -> SavedVersion:
     """Store what a source gives as a document's current version, in one transaction: the file once by
     its hash, the document by its source key, and a new version (with when the source says it was
@@ -429,6 +430,9 @@ def save_document_version(
         stored_row = conn.execute("SELECT 1 FROM core.file WHERE sha256 = %s", (sha256,)).fetchone()
         new_file = False
         if stored_row is None:
+            if callable(content):
+                # a downloaded file's bytes, read from its spool only now that they are needed
+                content = content()
             file_cursor = conn.execute(
                 "INSERT INTO core.file (sha256, size_bytes, media_type, content, created_by) "
                 "VALUES (%s, %s, %s, %s, current_setting('trialwatch.actor')::bigint) ON CONFLICT (sha256) DO NOTHING",
@@ -448,10 +452,13 @@ def save_document_version(
         ).fetchone()
         the_document = row[0]
         current = conn.execute(
-            "SELECT version, file_sha256 FROM core.document_version WHERE document_id = %s AND replaced_at IS NULL",
+            "SELECT id, version, file_sha256 FROM core.document_version WHERE document_id = %s AND replaced_at IS NULL",
             (the_document,),
         ).fetchone()
-        if current is not None and current[0] == version and bytes(current[1]) == sha256:
+        if current is not None and current[1] == version and bytes(current[2]) == sha256:
+            # the same file again: still suspect if it looks incomplete now, no longer if it doesn't
+            conn.execute("UPDATE core.document_version SET suspect = %s WHERE id = %s AND suspect IS DISTINCT FROM %s",
+                         (suspect, current[0], suspect))
             return SavedVersion(the_document, new_file, False)
         conn.execute(
             "UPDATE core.document_version SET replaced_at = clock_timestamp() "
@@ -459,11 +466,38 @@ def save_document_version(
             (the_document,),
         )
         conn.execute(
-            "INSERT INTO core.document_version (document_id, version, file_sha256, published_at, created_by) "
-            "VALUES (%s, %s, %s, %s, current_setting('trialwatch.actor')::bigint)",
-            (the_document, version, sha256, published_at),
+            "INSERT INTO core.document_version (document_id, version, file_sha256, published_at, suspect, created_by) "
+            "VALUES (%s, %s, %s, %s, %s, current_setting('trialwatch.actor')::bigint)",
+            (the_document, version, sha256, published_at, suspect),
         )
     return SavedVersion(the_document, new_file, True)
+
+
+def known_document(
+    conn: psycopg.Connection, *, source: str, source_key: str, kind: str, title: str | None, language: str | None,
+    version: str,
+) -> int | None:
+    """The document's id when its current version has this label, after taking the kind, title and
+    language the source gives now (as save_document_version would); None when it is new or its label
+    changed, or its file is suspect (it looked cut short), so it must be downloaded. Trusts the label:
+    a file replaced under the same label is only found by downloading it (a transfer with recheck)."""
+    with conn.transaction():
+        row = conn.execute(
+            """
+            SELECT d.id FROM core.document d
+            JOIN core.document_version v ON v.document_id = d.id AND v.replaced_at IS NULL
+            WHERE d.source_id = %s AND d.source_key = %s AND v.version = %s AND v.suspect IS NULL
+            """,
+            (source_id(conn, source), source_key, version),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE core.document SET kind = %s, title = %s, language = %s WHERE id = %s "
+            "AND (kind, title, language) IS DISTINCT FROM (%s, %s, %s)",
+            (kind, title, language, row[0], kind, title, language),
+        )
+    return row[0]
 
 
 def link_document(conn: psycopg.Connection, *, trial_id: int, document_id: int, basis: str, source: str,
@@ -993,7 +1027,8 @@ def save_transfer(conn: psycopg.Connection, *, source: str, source_key: str, run
                   pages: int, errors: dict[str, str], document_kinds: Sequence[str] | None) -> str:
     """Record how a trial's evidence transfer from a source ended: 'complete' without errors, else
     'failed', with the document kinds it brought in (None: every kind). Replaces the previous
-    transfer's row (its history is in the audit log)."""
+    transfer's row (its history is in the audit log). A failure counts the days in a row its transfer
+    failed (once per day); a complete transfer starts them again (core.evidence_status.stuck)."""
     status = "complete"
     if errors:
         status = "failed"
@@ -1003,15 +1038,23 @@ def save_transfer(conn: psycopg.Connection, *, source: str, source_key: str, run
     conn.execute(
         """
         INSERT INTO core.evidence_transfer (source_id, source_key, status, transferred_by, ingest_run_id, document_kinds,
-                                            source_updated_on, documents, pages, errors)
+                                            source_updated_on, documents, pages, errors, failures, failed_on)
         VALUES (%(source)s, %(key)s, %(status)s, current_setting('trialwatch.actor')::bigint, %(run)s, %(kinds)s,
                 (SELECT source_updated_on FROM core.source_listing WHERE source_id = %(source)s AND source_key = %(key)s),
-                %(documents)s, %(pages)s, %(errors)s)
+                %(documents)s, %(pages)s, %(errors)s,
+                CASE WHEN %(status)s = 'failed' THEN 1 ELSE 0 END,
+                CASE WHEN %(status)s = 'failed' THEN current_date END)
         ON CONFLICT (source_id, source_key) DO UPDATE SET
             status = EXCLUDED.status, transferred_at = clock_timestamp(), transferred_by = EXCLUDED.transferred_by,
             ingest_run_id = EXCLUDED.ingest_run_id, document_kinds = EXCLUDED.document_kinds,
             source_updated_on = EXCLUDED.source_updated_on, documents = EXCLUDED.documents, pages = EXCLUDED.pages,
-            errors = EXCLUDED.errors
+            errors = EXCLUDED.errors,
+            failures = CASE
+                WHEN EXCLUDED.status <> 'failed' THEN 0
+                WHEN core.evidence_transfer.failed_on = current_date THEN core.evidence_transfer.failures
+                ELSE core.evidence_transfer.failures + 1
+            END,
+            failed_on = EXCLUDED.failed_on
         """,
         {"source": source_id(conn, source), "key": source_key, "status": status, "run": run_id, "kinds": kinds,
          "documents": documents, "pages": pages, "errors": Jsonb(errors)},
@@ -1022,7 +1065,8 @@ def save_transfer(conn: psycopg.Connection, *, source: str, source_key: str, run
 # Which of a source's trials a transfer takes, by their state in core.evidence_status
 TRANSFER_CHOICES = {
     "pending": "listed, evidence not transferred yet",
-    "failed": "the last transfer failed (and the source has not delisted it)",
+    "failed": "the last transfer failed (and the source has not delisted it), unless it is stuck",
+    "stuck": "failed on 3 days in a row and unchanged since: left for a person, not taken by a refresh",
     "stale": "transferred, but the source changed the trial since (and has not delisted it)",
     "recruiting": "listed as recruiting now, and not transferred since it last changed",
     "listed": "every trial the source lists",
@@ -1030,7 +1074,8 @@ TRANSFER_CHOICES = {
 _TRANSFER_CONDITIONS = {
     "pending": "e.listed AND e.delisted_at IS NULL AND e.status = 'not transferred'",
     # a trial the source no longer lists is not asked for again: it would fail at every refresh
-    "failed": "e.delisted_at IS NULL AND e.status = 'failed'",
+    "failed": "e.delisted_at IS NULL AND e.status = 'failed' AND NOT e.stuck",
+    "stuck": "e.delisted_at IS NULL AND e.stuck",
     "stale": "e.delisted_at IS NULL AND e.status = 'stale'",
     "recruiting": "e.listed AND e.delisted_at IS NULL AND e.recruiting AND e.status <> 'complete'",
     "listed": "e.listed AND e.delisted_at IS NULL",
@@ -1099,6 +1144,18 @@ def evidence_rows(conn: psycopg.Connection, trial_ids: Sequence[int]) -> list[Ev
         ).fetchall()
 
 
+def trial_of_key(conn: psycopg.Connection, source: str, source_key: str) -> int | None:
+    """The trial (after merges) a source key belongs to, if we hold it."""
+    row = conn.execute(
+        "SELECT ts.trial_id FROM core.trial_source ts JOIN core.source s ON s.id = ts.source_id "
+        "WHERE s.code = %s AND ts.source_key = %s",
+        (source, source_key),
+    ).fetchone()
+    if row is None:
+        return None
+    return resolved_trial(conn, row[0])
+
+
 def mark_transfer_started(conn: psycopg.Connection, *, source: str, source_key: str, run_id: int) -> None:
     """Before a transfer changes a trial's record or documents, its earlier transfer stops counting:
     if the transfer is interrupted (Ctrl-C, a crash), the trial is left 'failed' instead of looking
@@ -1164,24 +1221,51 @@ def files_without_pages(conn: psycopg.Connection, trial_ids: Sequence[int] | Non
     return files
 
 
+def file_sizes(conn: psycopg.Connection, sha256s: Sequence[bytes]) -> dict[bytes, int]:
+    """The size in bytes of each of these stored files."""
+    rows = conn.execute(
+        "SELECT sha256, size_bytes FROM core.file WHERE sha256 = ANY(%s)", (list(sha256s),)
+    ).fetchall()
+    sizes = {}
+    for row in rows:
+        sizes[bytes(row[0])] = row[1]
+    return sizes
+
+
 def file_content(conn: psycopg.Connection, sha256: bytes) -> bytes:
-    row = conn.execute("SELECT content FROM core.file WHERE sha256 = %s", (sha256,)).fetchone()
+    # binary: in text format the database writes the content out as hex, twice its size, in its own
+    # memory and in ours (two PDF readers fetching large files at once took the db container near its limit)
+    row = conn.execute("SELECT content FROM core.file WHERE sha256 = %s", (sha256,), binary=True).fetchone()
     return bytes(row[0])
 
 
+@dataclass(frozen=True)
+class PageLook:
+    """What OCR made of a page under the readable letters (trials/ocr.py): whether it is an image page,
+    and its text read from the picture with the engine that read it, when that replaces the text layer."""
+
+    is_picture: bool
+    text: str | None = None
+    extractor: str | None = None
+
+
 def save_pages(conn: psycopg.Connection, sha256: bytes, texts: Sequence[str], extractor: str,
-               fingerprint: bytes | None) -> list[bytes]:
-    """Store a file's page text and text fingerprint (None for a file without text, e.g. scanned);
-    returns other files with the same text."""
+               fingerprint: bytes | None, looks: Mapping[int, PageLook] | None = None) -> list[bytes]:
+    """Store a file's page text and text fingerprint (None for a file without text, e.g. scanned), with
+    what OCR made of its pages with too few letters when it ran (`looks`, by page number; the file is then
+    marked as looked at, core.file.ocr_at); returns other files with the same text."""
     with conn.transaction():
         with conn.cursor() as cur, cur.copy(
             "COPY core.page (file_sha256, page_no, text, extractor) FROM STDIN"
         ) as copy:
             for page_no, text in enumerate(texts, start=1):
                 copy.write_row((sha256, page_no, text, extractor))
+        if looks:
+            _save_looks(conn, sha256, looks)
         conn.execute(
-            "UPDATE core.file SET text_fingerprint = %s, pages_extracted_at = clock_timestamp() WHERE sha256 = %s",
-            (fingerprint, sha256),
+            "UPDATE core.file SET text_fingerprint = %s, pages_extracted_at = clock_timestamp(),"
+            " ocr_at = CASE WHEN %s THEN clock_timestamp() END WHERE sha256 = %s",
+            (fingerprint, looks is not None, sha256),
         )
         if fingerprint is None:
             return []
@@ -1192,6 +1276,104 @@ def save_pages(conn: psycopg.Connection, sha256: bytes, texts: Sequence[str], ex
     for row in rows:
         same.append(bytes(row[0]))
     return same
+
+
+def files_for_ocr(conn: psycopg.Connection, trial_ids: Sequence[int] | None, kinds: Sequence[str] | None,
+                  max_pages: int, min_letters: int) -> list[bytes]:
+    """Files of the current document versions (of these trials, or all; of these kinds, or all) whose text
+    is read but not looked at by OCR yet, with at most `max_pages` pages, some under `min_letters` letters."""
+    wanted_trials = None if trial_ids is None else list(trial_ids)
+    wanted_kinds = None if kinds is None else list(kinds)
+    rows = conn.execute(
+        """
+        SELECT f.sha256
+        FROM core.file f
+        WHERE f.pages_extracted_at IS NOT NULL AND f.ocr_at IS NULL
+          AND EXISTS (SELECT 1 FROM core.document_current d
+                      JOIN core.trial_document l ON l.document_id = d.id AND l.removed_at IS NULL
+                      WHERE d.file_sha256 = f.sha256
+                        AND (%(kinds)s::text[] IS NULL OR d.kind = ANY(%(kinds)s))
+                        AND (%(trials)s::bigint[] IS NULL OR l.trial_id = ANY(%(trials)s)))
+          AND (SELECT count(*) FROM core.page p WHERE p.file_sha256 = f.sha256) <= %(max_pages)s
+          AND EXISTS (SELECT 1 FROM core.page p WHERE p.file_sha256 = f.sha256 AND p.letters < %(min_letters)s)
+        -- a file whose OCR failed before goes after those never tried
+        ORDER BY f.ocr_error IS NOT NULL, f.sha256
+        """,
+        {"trials": wanted_trials, "kinds": wanted_kinds, "max_pages": max_pages, "min_letters": min_letters},
+    ).fetchall()
+    return [bytes(row[0]) for row in rows]
+
+
+def trials_waiting_for_ocr(conn: psycopg.Connection, trial_ids: Sequence[int], kinds: Sequence[str],
+                           max_pages: int, min_letters: int) -> set[int]:
+    """The trials among these with a current file of these kinds that OCR has yet to look at
+    (files_for_ocr's files), not counting a file whose OCR failed before: a trial never waits for it."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT l.trial_id
+        FROM core.trial_document l
+        JOIN core.document_current d ON d.id = l.document_id AND d.kind = ANY(%(kinds)s)
+        JOIN core.file f ON f.sha256 = d.file_sha256 AND f.pages_extracted_at IS NOT NULL AND f.ocr_at IS NULL
+                        AND f.ocr_error IS NULL
+        WHERE l.removed_at IS NULL AND l.trial_id = ANY(%(trials)s)
+          AND (SELECT count(*) FROM core.page p WHERE p.file_sha256 = f.sha256) <= %(max_pages)s
+          AND EXISTS (SELECT 1 FROM core.page p WHERE p.file_sha256 = f.sha256 AND p.letters < %(min_letters)s)
+        """,
+        {"trials": list(trial_ids), "kinds": list(kinds), "max_pages": max_pages, "min_letters": min_letters},
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+def pages_under_letters(conn: psycopg.Connection, sha256: bytes, min_letters: int) -> dict[int, str]:
+    """The text layer of a file's pages with fewer than `min_letters` letters, by page number."""
+    rows = conn.execute(
+        "SELECT page_no, text FROM core.page WHERE file_sha256 = %s AND letters < %s ORDER BY page_no",
+        (sha256, min_letters),
+    ).fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
+def _save_looks(conn: psycopg.Connection, sha256: bytes, looks: Mapping[int, PageLook]) -> None:
+    with conn.cursor() as cur, cur.copy(
+        "COPY core.page_ocr (file_sha256, page_no, is_picture, text, extractor) FROM STDIN"
+    ) as copy:
+        for page_no in sorted(looks):
+            look = looks[page_no]
+            extractor = None
+            if look.text is not None:
+                extractor = look.extractor
+            copy.write_row((sha256, page_no, look.is_picture, look.text, extractor))
+
+
+def save_ocr_error(conn: psycopg.Connection, sha256: bytes, error: str, lasting: bool) -> None:
+    """Why OCR of a file failed (core.file.ocr_error); a `lasting` failure (the file's own) also marks it as
+    looked at, so no pass takes it again by itself."""
+    conn.execute(
+        "UPDATE core.file SET ocr_error = %s, ocr_at = CASE WHEN %s THEN clock_timestamp() ELSE ocr_at END "
+        "WHERE sha256 = %s",
+        (error, lasting, sha256),
+    )
+
+
+def save_page_looks(conn: psycopg.Connection, sha256: bytes, looks: Mapping[int, PageLook]) -> list[int]:
+    """Store what OCR made of a file's pages read before it ran (core.page_ocr), and mark the file as looked
+    at; returns the trials linked to the file whose page text changed (a picture's text was read), to
+    check again."""
+    with conn.transaction():
+        if looks:
+            _save_looks(conn, sha256, looks)
+        conn.execute("UPDATE core.file SET ocr_at = clock_timestamp(), ocr_error = NULL WHERE sha256 = %s", (sha256,))
+        if not any(look.text is not None for look in looks.values()):
+            return []
+        rows = conn.execute(
+            """
+            SELECT DISTINCT l.trial_id FROM core.document_current d
+            JOIN core.trial_document l ON l.document_id = d.id AND l.removed_at IS NULL
+            WHERE d.file_sha256 = %s ORDER BY 1
+            """,
+            (sha256,),
+        ).fetchall()
+    return [row[0] for row in rows]
 
 
 # --- what checks read --------------------------------------------------------------------------
@@ -1246,6 +1428,9 @@ class Page:
     text: str
     document_version_id: int
     kind: str
+    # a page under the readable letters that is a picture (True), one that is not (False: its text layer
+    # is all it has), or not looked at by OCR (None); see core.page_ocr
+    is_picture: bool | None = None
 
 
 # The current version of each document of some kinds linked to a trial, numbered 1, 2, ... in a fixed
@@ -1267,8 +1452,8 @@ def trial_pages(conn: psycopg.Connection, trial_id: int, kinds: Sequence[str]) -
             f"""
             WITH docs AS ({_TRIAL_DOCUMENTS})
             SELECT p.file_sha256 AS file, docs.doc, docs.title, p.page_no, p.text,
-                   docs.version_id AS document_version_id, docs.kind
-            FROM docs JOIN core.page p ON p.file_sha256 = docs.file_sha256
+                   docs.version_id AS document_version_id, docs.kind, p.is_picture
+            FROM docs JOIN core.page_text p ON p.file_sha256 = docs.file_sha256
             ORDER BY docs.doc, p.page_no
             """,
             {"trial": trial_id, "kinds": list(kinds)},
@@ -1332,7 +1517,7 @@ def rank_pages(conn: psycopg.Connection, files: Sequence[bytes], terms: Sequence
     rows = conn.execute(
         """
         SELECT file_sha256, page_no, ts_rank(tsv, q)
-        FROM core.page, to_tsquery('simple', %s) q
+        FROM core.page_text, to_tsquery('simple', %s) q
         WHERE file_sha256 = ANY(%s) AND tsv @@ q
         ORDER BY ts_rank(tsv, q) DESC, file_sha256, page_no
         LIMIT %s

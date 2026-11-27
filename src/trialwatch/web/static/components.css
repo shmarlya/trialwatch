@@ -278,3 +278,8 @@ details.criteria summary { cursor: pointer; color: var(--link); }
 details.criteria h4 { font-size: var(--fs-sm); margin: var(--sp-2) 0 var(--sp-1); }
 .disclaimer { border-top: 1px solid var(--line); margin-top: var(--sp-5); padding-top: var(--sp-3); }
 .app-footer { max-width: 1200px; margin: 0 auto; padding: 0 var(--sp-4) var(--sp-5); }
+
+/* A job's progress (job.html): a bar of the items done */
+.job-bar { height: 10px; border-radius: 5px; background: var(--code); overflow: hidden; max-width: 40rem; }
+.job-bar span { display: block; height: 100%; background: var(--full); transition: width .4s; }
+table.failed td { vertical-align: top; }

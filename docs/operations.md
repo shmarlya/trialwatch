@@ -8,7 +8,7 @@ flowchart TB
     you["Your machine<br>terminal: uv run trialwatch … · browser: 127.0.0.1:8010<br>psql · uv run pytest (its own &lt;db&gt;_test)"]
     people["People on the internet<br>https://TRIALWATCH_DOMAIN"]
     admins["Admins<br>/grafana/ (signed in through /auth/grafana)"]
-    actions["GitHub Actions: image.yml (by hand)<br>tests → build → push"]
+    actions["GitHub Actions: image.yml (each merge to main)<br>tests → build → push"]
     ghcr[("ghcr.io/shmarlya/trialwatch (+ -migrate, -proxy, -grafana, -dbtools)<br>:latest · :sha-&lt;commit&gt;")]
     subgraph compose["Docker Compose (compose.yaml)"]
         subgraph server["profile server"]
@@ -78,9 +78,9 @@ and `GRAFANA_DB_PASSWORD`; then `docker compose pull && docker compose --profile
 reference data once (`geo load`, `vocab load`), switch the refresh's schedule on at `/admin/jobs`, and set a
 spending cap at `/admin/spend`.
 
-To update: run the **Image** workflow on `main` (Actions → Image → Run workflow, or
-`gh workflow run image.yml --ref main`). It runs the tests, then pushes `ghcr.io/shmarlya/trialwatch` tagged
-`sha-<commit>` and `latest`. On the server: `git pull` (for compose and `db/migrations`), then
+To update: merge into `main`. The **Image** workflow runs on each push to `main` (not when only the docs site
+changed; by hand: Actions → Image → Run workflow, or `gh workflow run image.yml --ref main`). It runs the
+tests, then pushes `ghcr.io/shmarlya/trialwatch` tagged `sha-<commit>` and `latest`. On the server: `git pull` (for compose and `db/migrations`), then
 `docker compose pull && docker compose --profile server up -d` (migrations run first). To roll back, set
 `TRIALWATCH_TAG=sha-<commit>` in `.env` and run the same two commands. `up -d --build` builds from the checkout
 instead.
@@ -115,7 +115,7 @@ Environment Variables), see [page text](sources-and-gold.md)),
 so the stack needs about 3.3 GB and at least two CPUs beside Coolify's own (on one CPU, Docker refuses the
 worker's `cpus: 2.0`: set it to 1.0 and `TRIALWATCH_PDF_READERS` to 1). No Grafana here: compose.yaml has it, for a server of our own.
 
-1. Run the **Image** workflow on `main`: it pushes the image.
+1. Have an image: the **Image** workflow pushes one on each merge into `main` (or run it by hand on `main`).
 2. In Coolify: **New resource → Docker Compose Empty**, and paste `compose.coolify.yaml`.
 3. **Environment variables** (Coolify lists the ones the file uses):
    - required: `TRIALWATCH_DOMAIN` (e.g. `trialwatch.app`), `POSTGRES_PASSWORD`;
@@ -130,7 +130,10 @@ worker's `cpus: 2.0`: set it to 1.0 and `TRIALWATCH_PDF_READERS` to 1). No Grafa
 6. Backups: the **db** service's **Backups** tab, a daily schedule to an S3 destination (Coolify's
    **S3 Storages**), so the copies leave the server.
 
-To update: run the Image workflow, then **Redeploy** in Coolify (it pulls `latest`). To roll back, set
+To update: merge into `main`; the Image workflow pushes the new `latest`. Then **Redeploy** in Coolify (it pulls
+`latest`), or let the workflow do it: put the resource's **Webhooks → Deploy Webhook URL** in the repository secret
+`COOLIFY_WEBHOOK` and a Coolify API token with the deploy permission (**Keys & Tokens**) in `COOLIFY_TOKEN`, and
+each new image is deployed when it is pushed (a pinned `TRIALWATCH_TAG` stays pinned). To roll back, set
 `TRIALWATCH_TAG=sha-<commit>` and redeploy (a migration is not undone: roll back only to an image whose migrations
 the database already has). One-off commands: Coolify's terminal on the `web` container, e.g. `trialwatch geo load`.
 
@@ -416,8 +419,9 @@ GitHub Actions:
   the whole test suite, against a Postgres service of its own.
 - `.github/workflows/docs.yml`, on every push and pull request: a strict build of this site; pushes to `main` also
   publish it to GitHub Pages.
-- `.github/workflows/image.yml`, started by hand: the tests, then the image to `ghcr.io/shmarlya/trialwatch`
-  (`sha-<commit>`, and `latest` from `main`).
+- `.github/workflows/image.yml`, on every push to `main` (each merged pull request) and by hand: the tests, then
+  the image to `ghcr.io/shmarlya/trialwatch` (`sha-<commit>`, and `latest` from `main`), then Coolify's deploy
+  webhook when its secrets are set.
 - Started by hand, calling CTIS or the model: `eval-short.yml` and `eval-full.yml` (gold evaluations, sharing
   `eval-shared.yml`) and `gold-snapshot.yml` (records the frozen snapshot); see
   [gold evaluations](sources-and-gold.md#gold-evaluations-ci).

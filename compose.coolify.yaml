@@ -8,7 +8,7 @@
 # Paste it as a Docker Compose resource; give the `web` service the domain with its port
 # (https://trialwatch.app:8010). Set the variables below in Coolify's Environment Variables (`:?` marks
 # the required ones). docs/operations.md ("Coolify") says how. The image comes from
-# .github/workflows/image.yml: run it on main first.
+# .github/workflows/image.yml, on each merge into main.
 
 # What web and worker share: the app's image, its limits, the database and the settings. Each applies
 # the migrations baked into the image before it starts (`dbmate --wait up`; a lock makes the second wait

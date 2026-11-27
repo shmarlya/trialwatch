@@ -92,7 +92,7 @@ flowchart TB
   (`trials/ocr.py`): a page that is a picture (a scan, a results table saved as an image, or a page drawn with
   many shapes: a chart, text drawn as outlines) gets its text read from the picture, and checks read that text (`core.page_text`); a page that is no picture (a cover,
   contents or signature page) has no other text than its own, so it counts as read. A page OCR has not looked
-  at (a file of over 1,000 pages, or one read before OCR: `trialwatch source ocr`) or a picture it could not
+  at (a file of over 1,000 pages, or one read before OCR and not looked at since: the refresh's `ocr` step) or a picture it could not
   read still counts as unread; the setup allows a few (`unreadable_pages_allowed`, 1 by default): with at most
   that many such pages, and at least one readable one, answers from every page still count as the whole
   document. The trial page shows which pages had no text.

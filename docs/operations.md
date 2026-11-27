@@ -87,11 +87,14 @@ instead.
 
 One-off commands run in the same image: `docker compose run --rm web source list`.
 
-**OCR for files read before it** (once, after the release that brought OCR): transfers OCR each file they
-read, but files already stored keep only their text layer until `docker compose run --rm worker source ocr --all`
-looks at them (about a second per picture page, `TRIALWATCH_PDF_READERS` files at once; on Coolify, in the
-worker's terminal: `trialwatch source ocr --all`). A trial whose page text it changed has an outdated judgement,
-which the next refresh checks again.
+**OCR for files read before it**: transfers OCR each file they read, and the weekly refresh looks at the files
+stored before (its `ocr` step, before the checks: up to `TRIALWATCH_OCR_MINUTES_PER_REFRESH`, default 240,
+then the rest wait for the next refresh; about a second per picture page, `TRIALWATCH_PDF_READERS` files at
+once). The first refresh after the release that brought OCR had about 1,300 such files, some 3–4 hours. To do it
+sooner, by hand: `docker compose run --rm worker source ocr --all` (on Coolify, in the worker's terminal:
+`trialwatch source ocr --all`). A trial whose page text OCR changed has an outdated judgement, which the refresh
+checks again; a trial to be checked again only for other rules waits until OCR has looked at its files, so it
+is not paid for twice.
 
 **A release that changes the rules or the prompt** (`checks/requirement_sets/`, `checks/prompts/`) makes the
 refreshes after it check every judged trial again (about $0.015 a trial with Haiku): undecided ones first, held

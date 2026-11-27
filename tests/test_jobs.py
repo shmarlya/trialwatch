@@ -411,6 +411,51 @@ def test_the_refresh_checks_again_what_other_rules_or_another_prompt_judged(app_
     assert jobs_db.job(app_conn, job_id).result["check"]["trials"] == 2
 
 
+def test_the_refresh_runs_ocr_before_its_checks_and_rechecks_wait_for_it(app_conn, fake_world, monkeypatch):
+    """OCR is free and comes before the paid steps; without tesseract it says so and nothing waits. A trial
+    judged under other rules whose files OCR has yet to look at is not checked again until it has."""
+    import json
+
+    from trialwatch.checks import requirements
+    from trialwatch.jobs import refresh
+    from trialwatch.trials import pages
+
+    fake, model = fake_world
+    monkeypatch.setattr(refresh.ocr, "ocr_available", lambda: False)
+    first = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, first)
+    assert job.status == "succeeded" and job.result["ocr"]["skipped"] == "tesseract not installed"
+    assert checked_trials(model) == 2
+
+    current = requirements.load("eu-ctr-results")
+    changed = json.loads(current.text)
+    changed["description"] = changed["description"] + " Changed."
+    monkeypatch.setattr(refresh.requirement_sets, "load",
+                        lambda name: dataclasses.replace(current, text=json.dumps(changed)))
+    looked = []
+
+    def ocr_nothing(conn, trial_ids, kinds, progress=None, readers=None, seconds=None, should_stop=None):
+        looked.append(seconds)
+        return pages.OcrResult(left=3)
+
+    monkeypatch.setattr(refresh.ocr, "ocr_available", lambda: True)
+    monkeypatch.setattr(refresh.pages, "ocr_missing", ocr_nothing)
+    monkeypatch.setattr(refresh.core, "trials_waiting_for_ocr", lambda conn, ids, *rest: set(ids))
+    waiting = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, waiting)
+    assert job.status == "succeeded", job.last_error
+    assert looked == [240 * 60] and job.result["ocr"]["left"] == 3
+    assert job.result["check"]["trials"] == 0 and checked_trials(model) == 2
+    assert "2 judged under other rules wait for OCR" in " ".join(line_texts(app_conn, waiting))
+    # OCR done: they are checked
+    monkeypatch.setattr(refresh.core, "trials_waiting_for_ocr", lambda conn, ids, *rest: set())
+    done = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    assert jobs_db.job(app_conn, done).result["check"]["trials"] == 2
+
+
 def test_the_refresh_does_not_pay_again_for_a_check_that_failed_for_a_lasting_reason(app_conn, fake_world,
                                                                                     monkeypatch):
     fake, model = fake_world

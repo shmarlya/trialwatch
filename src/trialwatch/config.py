@@ -15,8 +15,9 @@ The settings (each read by a function below):
   the EU/EEA, where CTIS trials have sites)
 - TRIALWATCH_PDF_READERS / TRIALWATCH_PDF_MEMORY_MB: how many PDFs the worker reads at once, and the
   memory their child processes may take together (trialwatch.trials.pages)
-- TRIALWATCH_OCR_MAX_PAGES / TRIALWATCH_OCR_LANGUAGES: which files get OCR for their image pages, and
-  in which languages (trialwatch.trials.ocr)
+- TRIALWATCH_OCR_MAX_PAGES / TRIALWATCH_OCR_LANGUAGES / TRIALWATCH_OCR_MINUTES_PER_REFRESH: which files
+  get OCR for their picture pages, in which languages, and how long a refresh spends on it
+  (trialwatch.trials.ocr)
 - TRIALWATCH_STUCK_MINUTES: how long a job may go without moving before the worker restarts
   (trialwatch.jobs.worker)
 """
@@ -153,6 +154,13 @@ def ocr_max_pages() -> int:
     of thousands of pages with its listings and forms as pictures would take hours, and a check never
     reads such a file whole anyway (checks/configs: max_text_chars)."""
     return _positive_int("TRIALWATCH_OCR_MAX_PAGES", 1000)
+
+
+def ocr_minutes_per_refresh() -> int:
+    """How long the refresh's OCR step may take before it leaves the other files to the next refresh
+    (TRIALWATCH_OCR_MINUTES_PER_REFRESH, default 240: the backlog of files read before OCR, about 1,300
+    files, took about that on two readers)."""
+    return _positive_int("TRIALWATCH_OCR_MINUTES_PER_REFRESH", 240)
 
 
 def ocr_languages() -> str:

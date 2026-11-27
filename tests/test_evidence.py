@@ -719,6 +719,26 @@ def test_trials_needing_a_check_come_by_why_undecided_under_other_rules_before_d
     assert checks_db.trials_needing_check(conn, [judged], SET.name).ordered() == []
 
 
+def test_a_trial_waits_for_ocr_until_its_files_are_looked_at(conn):
+    trial = seed(conn, pages_with(["", ""]))
+    assert core.trials_waiting_for_ocr(conn, [trial], ["results-summary"], 1000, 200) == {trial}
+    assert core.trials_waiting_for_ocr(conn, [trial], ["protocol"], 1000, 200) == set()
+    cover, last = len(PAGES) + 1, len(PAGES) + 2
+    core.save_page_looks(conn, trial_file(conn, trial), {cover: core.PageLook(False), last: core.PageLook(False)})
+    assert core.trials_waiting_for_ocr(conn, [trial], ["results-summary"], 1000, 200) == set()
+
+
+def test_ocr_past_its_time_leaves_the_files_for_another_pass(conn, monkeypatch):
+    from trialwatch.trials import ocr, pages
+
+    trial = seed(conn, pages_with(["", ""]))
+    monkeypatch.setattr(ocr, "ocr_available", lambda: True)
+    result = pages.ocr_missing(conn, [trial], seconds=0)
+    assert (result.files, result.left) == (0, 1)
+    stopped = pages.ocr_missing(conn, [trial], should_stop=lambda: True)
+    assert (stopped.files, stopped.left) == (0, 1)
+
+
 def test_negative_in_retrieved_pages_is_asked_again_and_a_failed_widening_is_an_error(conn):
     trial = seed(conn, pages_with(APPENDIX))
     client = FakeClient(GOOD, api_error(anthropic.InternalServerError, "overloaded"))

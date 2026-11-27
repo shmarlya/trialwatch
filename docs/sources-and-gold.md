@@ -136,7 +136,7 @@ answer means the trial doesn't exist (`TrialNotFound`).
   outlines) is drawn with pypdfium2 at 200
   dpi and read with tesseract (`TRIALWATCH_OCR_LANGUAGES`, default `eng`; about a second a page, at most 400
   such pages a file), and `core.page_ocr` keeps what it read, beside the text layer, which never changes; checks
-  read `core.page_text`, the OCR text where there is one. Files read before OCR: `trialwatch source ocr --all`. Each file is read in a child process of its own: pypdf needs about ten times a file's size while it reads
+  read `core.page_text`, the OCR text where there is one. Files read before OCR: the weekly refresh's `ocr` step, or `trialwatch source ocr --all`. Each file is read in a child process of its own: pypdf needs about ten times a file's size while it reads
   (a 38 MB, 3,000-page CTIS study report: 420 MB), and the child gives that memory back when it ends. A child that
   runs out of memory or takes over 20 minutes fails only its file, like a broken PDF. A trial's files are read
   two at a time in the worker (pypdf is pure Python: one process uses one CPU), and a file starts only when

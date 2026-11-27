@@ -518,6 +518,8 @@ class OcrResult:
     read_pages: int = 0
     trial_ids: set[int] = field(default_factory=set)
     failed: dict[str, str] = field(default_factory=dict)
+    # files left for another pass (a deadline, or a stop)
+    left: int = 0
 
 
 def ocr_missing(
@@ -526,10 +528,14 @@ def ocr_missing(
     kinds: Sequence[str] | None = None,
     progress: Progress = None,
     readers: int | None = None,
+    seconds: float | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> OcrResult:
     """OCR for the files read before OCR ran (or without it): their pages under ocr.MIN_LETTERS letters,
     of these trials or all, of these document kinds or all, files of at most config.ocr_max_pages() pages.
-    Child processes do it, `readers` at once; returns the trials whose page text changed (to check again)."""
+    Child processes do it, `readers` at once; returns the trials whose page text changed (to check again).
+    With `seconds`, or once `should_stop()` is true, no file starts after that: the rest are left for
+    another pass (OcrResult.left)."""
     result = OcrResult()
     if not ocr.ocr_available():
         raise RuntimeError("tesseract is not installed here: OCR can't run (the Docker image has it)")
@@ -538,24 +544,37 @@ def ocr_missing(
         return result
     if readers is None:
         readers = config.pdf_readers()
+    deadline = None
+    if seconds is not None:
+        deadline = time.monotonic() + seconds
     sizes = core.file_sizes(conn, files)
     read = functools.partial(read_in_child, child_reads=_child_looks)
-    for outcome in read_in_children(files, sizes, readers, config.pdf_memory_mb(), read=read):
-        short_sha = outcome.sha256.hex()[:12]
-        if outcome.error is not None:
-            result.failed[short_sha] = str(outcome.error)
-            report(progress, f"{short_sha}: failed: {result.failed[short_sha]}")
-            continue
-        stored = outcome.looks or {}
-        changed = core.save_page_looks(conn, outcome.sha256, stored)
-        result.files += 1
-        images = [look for look in stored.values() if look.is_picture]
-        read_here = [look for look in images if look.text is not None]
-        result.image_pages += len(images)
-        result.read_pages += len(read_here)
-        result.trial_ids.update(changed)
-        report(progress, f"{short_sha}: {len(images)} image pages, {len(read_here)} read by OCR")
+    # a few files at a time, so a deadline or a stop is seen between them without killing a file half read
+    for start in range(0, len(files), readers):
+        if (deadline is not None and time.monotonic() >= deadline) or (should_stop is not None and should_stop()):
+            result.left = len(files) - start
+            break
+        batch = files[start : start + readers]
+        for outcome in read_in_children(batch, sizes, readers, config.pdf_memory_mb(), read=read):
+            _save_ocr(conn, result, outcome, progress)
     return result
+
+
+def _save_ocr(conn: psycopg.Connection, result: OcrResult, outcome: Read, progress: Progress) -> None:
+    short_sha = outcome.sha256.hex()[:12]
+    if outcome.error is not None:
+        result.failed[short_sha] = str(outcome.error)
+        report(progress, f"{short_sha}: failed: {result.failed[short_sha]}")
+        return
+    stored = outcome.looks or {}
+    changed = core.save_page_looks(conn, outcome.sha256, stored)
+    result.files += 1
+    pictures = [look for look in stored.values() if look.is_picture]
+    read_here = [look for look in pictures if look.text is not None]
+    result.image_pages += len(pictures)
+    result.read_pages += len(read_here)
+    result.trial_ids.update(changed)
+    report(progress, f"{short_sha}: {len(pictures)} picture pages, {len(read_here)} read by OCR")
 
 
 def _read_here(conn: psycopg.Connection, sha256: bytes, extract: Callable[[bytes], list[str]] | None) -> list[str]:

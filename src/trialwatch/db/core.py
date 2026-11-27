@@ -1303,6 +1303,25 @@ def files_for_ocr(conn: psycopg.Connection, trial_ids: Sequence[int] | None, kin
     return [bytes(row[0]) for row in rows]
 
 
+def trials_waiting_for_ocr(conn: psycopg.Connection, trial_ids: Sequence[int], kinds: Sequence[str],
+                           max_pages: int, min_letters: int) -> set[int]:
+    """The trials among these with a current file of these kinds that OCR has yet to look at
+    (files_for_ocr's files)."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT l.trial_id
+        FROM core.trial_document l
+        JOIN core.document_current d ON d.id = l.document_id AND d.kind = ANY(%(kinds)s)
+        JOIN core.file f ON f.sha256 = d.file_sha256 AND f.pages_extracted_at IS NOT NULL AND f.ocr_at IS NULL
+        WHERE l.removed_at IS NULL AND l.trial_id = ANY(%(trials)s)
+          AND (SELECT count(*) FROM core.page p WHERE p.file_sha256 = f.sha256) <= %(max_pages)s
+          AND EXISTS (SELECT 1 FROM core.page p WHERE p.file_sha256 = f.sha256 AND p.letters < %(min_letters)s)
+        """,
+        {"trials": list(trial_ids), "kinds": list(kinds), "max_pages": max_pages, "min_letters": min_letters},
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
 def pages_under_letters(conn: psycopg.Connection, sha256: bytes, min_letters: int) -> dict[int, str]:
     """The text layer of a file's pages with fewer than `min_letters` letters, by page number."""
     rows = conn.execute(

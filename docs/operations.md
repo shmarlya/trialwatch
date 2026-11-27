@@ -201,10 +201,16 @@ uv run trialwatch worker
 Every kind of job (sync, transfer, check, annotate, refresh) is one entry in `src/trialwatch/jobs/tasks.py`: its
 label, how many attempts it gets, whether the spending cap holds it, how its params are checked when it is queued,
 and the step that runs it. The commands `source sync`, `source transfer`, `search annotate` and `check evidence`
-run the same steps here and now, without the queue. Jobs survive restarts. A failed attempt is tried again after 1 min, 5 min, 30 min,
-2 h, 6 h (sync and transfer 5 attempts, the others 3); a retry redoes only what is left (the keys not transferred yet, the trials whose model call
+run the same steps here and now, without the queue. Jobs survive restarts. Every kind gets 2 attempts: a failed
+attempt is tried again after about a minute; a retry redoes only what is left (the keys not transferred yet, the trials whose model call
 failed for a passing reason such as an overload). An error that a retry can't fix (an unknown source, an invalid
-setup, a bad API key) fails the job at once. A job whose worker died (no heartbeat for 5 minutes) goes back to the
+setup, a bad API key) fails the job at once.
+
+How a job ends: **succeeded**, everything done; **partial**, it ran to its end but some items did not succeed (a
+trial whose transfer still failed on the last attempt, a check call that failed, or a file or answer left to a
+person, which is never tried again); **failed**, it could not run as a whole (a crash, the database or the network
+gone, a source whose list could not be read, a refresh step that broke, an error a retry can't fix); or
+**cancelled**. A partial or failed job's page lists what did not succeed, each with a button to do it again. A job whose worker died (no heartbeat for 5 minutes) goes back to the
 queue. Jobs can be cancelled; a running one stops after the trial or page it is on, and what it did so far is kept.
 A long transfer says every 50 trials how long a trial takes and about how long is left. A job's page shows how
 far it is (trials done of trials to do, a percentage, how long it has run and about how long is left; transfers,
@@ -212,7 +218,7 @@ checks and tagging count their trials, written with the heartbeat), its lines 20
 follows a running job; "only what went wrong" keeps the lines about failures), and after an attempt what failed,
 trial by trial: each with its page (Inspect) and a button that does it again (a transfer of that trial, every
 document downloaded again, or a check with the same setup), and for a transfer one that redoes them all.
-`/admin/jobs` lists them by status, with the failed and held ones first (every staff page shows a banner while
+`/admin/jobs` lists them by status, with the failed, partial and held ones first (every staff page shows a banner while
 there are any), their errors and their progress per attempt; an admin can try one again.
 
 **Schedules** (`jobs.schedule`) start switched off: an admin starts or stops one and sets how often it runs (daily,
@@ -222,8 +228,8 @@ running. The first is `weekly-refresh`, every Monday at 03:00 UTC by default (da
 list, transfers the trials that are new, changed at the source (stale) or failed last time, recruiting ones first,
 tags with AI the recruiting trials whose profile has no tags yet, then checks with the default setup the trials that
 were never judged or whose judgement is outdated (`src/trialwatch/jobs/refresh.py`). Nothing changed, nothing is
-checked and nothing is spent. A step that fails doesn't stop the others; the attempt fails and the next one carries
-on from what is stored (a source synced in an earlier attempt isn't listed again). The spending cap holds the
+checked and nothing is spent. A step that fails doesn't stop the others: a step that broke as a whole fails the
+refresh, items that failed inside a step make it partial; either way the next attempt carries on from what is stored (a source synced in an earlier attempt isn't listed again). The spending cap holds the
 refresh before its tagging and checking. While it runs, a job a person queues waits for it, unless a second worker
 runs. Everything it does, and what TrialWatch publishes by itself, is recorded as the actor `trialwatch`
 (`core.actor` 1), not as a person.
@@ -301,7 +307,7 @@ Once a day, or when an alert fires.
 
 | Dashboard | Look at | Worry when |
 |---|---|---|
-| **Jobs** | Worker's last heartbeat; Failed, held, or queued over an hour | heartbeat over 5 minutes; any row in the table (retry or cancel it on `/admin/jobs`) |
+| **Jobs** | Worker's last heartbeat; Failed, partial, held, or queued over an hour | heartbeat over 5 minutes; any row in the table (retry or cancel it on `/admin/jobs`) |
 | **Spend** | This month; Of the monthly cap; Costliest check runs | the cap above 80% (at 100% automatic checks and tags stop); one run costing far more than the others |
 | **HTTP** | Requests by status; 95th percentile latency by route; Warnings and errors | any 5xx (over 1% for 10 minutes alerts); a route over about 1 s; new error lines (each opens its trace) |
 | **Checks** | Judgements per day by label; Measured agreement with gold labels; Model calls by outcome | agreement dropping after a prompt, model or requirement change; model calls failing; no judgements after a refresh |
@@ -390,7 +396,7 @@ erDiagram
 |---|---|
 | `auth.app_user` | a person who can sign in: email (unique, lower case), argon2id password hash (left out of the audit log), role (admin, moderator), their `core.actor`, disabled_at |
 | `auth.session` | a signed-in browser: the SHA-256 of the cookie's token (the token isn't kept), user, last seen, expiry |
-| `jobs.job` | one job: kind (sync, transfer, check, annotate, refresh), params, automatic (the cap applies), schedule, priority, status (queued, running, held, succeeded, failed, cancelled), attempts and retries, the worker on it and its heartbeat |
+| `jobs.job` | one job: kind (sync, transfer, check, annotate, refresh), params, automatic (the cap applies), schedule, priority, status (queued, running, held, succeeded, partial, failed, cancelled), attempts and retries, the worker on it and its heartbeat |
 | `jobs.job_line` | a job's progress lines, per attempt |
 | `jobs.schedule` | when a job starts by itself: name, kind and params, frequency (daily, weekly, monthly), weekday, hour UTC, enabled, next run |
 | `core.llm_call` | every model call, one row each, failed ones too: model asked and model that answered, operation (check, annotate), run, trial, call number, job, the request as sent (no system prompt; files by sha256), the answer, stop reason, latency, error, the provider's request id, and each billed attempt priced (more than one after a fallback) with their sums: tokens, cost, attempts on an unpriced model |

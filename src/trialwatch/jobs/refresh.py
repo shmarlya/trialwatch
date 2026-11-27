@@ -140,10 +140,28 @@ def _run(ctx: Context, conn: psycopg.Connection, name: str, step: Step, params: 
         if left is not None:
             for item, item_error in outcome.left.items():
                 left[f"{name}, {item}"] = item_error
-        return not outcome.failed
+        if outcome.broken is not None:
+            ctx.add(f"{name} failed: {outcome.broken}")
+            failed[name] = outcome.broken
+        return not outcome.failed and outcome.broken is None
     ctx.add(f"{name} failed: {error}")
+    # the step as a whole, by its bare name (its items are "<step>, <item>"): the refresh fails
     failed[name] = error
     return False
+
+
+def _ended(result: dict, failed: dict[str, str], left: dict[str, str]) -> Outcome:
+    """The refresh's outcome: a step that failed as a whole (it raised: a crash, a database or network
+    error; or the source's list could not be read) fails the refresh; items that failed or were left in
+    steps that ran make it partial (jobs/worker.py)."""
+    broken = []
+    for name, error in failed.items():
+        if ", " not in name:
+            broken.append(f"{name}: {error}")
+    whole = None
+    if broken:
+        whole = "; ".join(broken)
+    return Outcome(result, failed, left, broken=whole)
 
 
 def run_refresh(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
@@ -158,7 +176,7 @@ def run_refresh(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome
     result["synced"] = synced
     for source in _sources(conn, "lists"):
         if ctx.should_stop():
-            return Outcome(result, failed, left)
+            return _ended(result, failed, left)
         name = f"sync {source.code}"
         if source.code in synced:
             ctx.add(f"— {name}: synced in an earlier attempt")
@@ -167,19 +185,19 @@ def run_refresh(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome
             synced.append(source.code)
     for source in _sources(conn, "transfers"):
         if ctx.should_stop():
-            return Outcome(result, failed, left)
+            return _ended(result, failed, left)
         _run(ctx, conn, f"transfer {source.code}", _transfer, {"source": source.code}, result, failed, left)
     # OCR before the checks, so they read what it finds (free: no model is called)
     if ctx.should_stop():
-        return Outcome(result, failed, left)
+        return _ended(result, failed, left)
     config_name = params.get("config", check_settings.DEFAULT)
     _run(ctx, conn, "ocr", _ocr, {"config": config_name}, result, failed, left)
     # the steps that call a paid model: an automatic refresh is held by the spending cap from here on
     ctx.watch_cap = ctx.automatic
     if ctx.should_stop():
-        return Outcome(result, failed, left)
+        return _ended(result, failed, left)
     _run(ctx, conn, "annotate", steps.run_annotate, {"every": True}, result, failed, left)
     if ctx.should_stop():
-        return Outcome(result, failed, left)
+        return _ended(result, failed, left)
     _run(ctx, conn, "check", _check, {"config": config_name}, result, failed, left)
-    return Outcome(result, failed, left)
+    return _ended(result, failed, left)

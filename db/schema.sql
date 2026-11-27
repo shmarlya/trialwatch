@@ -1563,12 +1563,12 @@ CREATE TABLE jobs.job (
     progress_total integer,
     attempt_started_at timestamp with time zone,
     failures jsonb DEFAULT '{}'::jsonb NOT NULL,
-    CONSTRAINT job_check CHECK (((status = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text])) = (finished_at IS NOT NULL))),
+    CONSTRAINT job_check CHECK (((status = ANY (ARRAY['succeeded'::text, 'partial'::text, 'failed'::text, 'cancelled'::text])) = (finished_at IS NOT NULL))),
     CONSTRAINT job_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text, 'annotate'::text]))),
     CONSTRAINT job_max_attempts_check CHECK ((max_attempts >= 1)),
     CONSTRAINT job_progress_done_check CHECK ((progress_done >= 0)),
     CONSTRAINT job_progress_total_check CHECK ((progress_total >= 0)),
-    CONSTRAINT job_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'held'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
+    CONSTRAINT job_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'held'::text, 'succeeded'::text, 'partial'::text, 'failed'::text, 'cancelled'::text])))
 );
 
 
@@ -3844,4 +3844,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261125100000'),
     ('20261125110000'),
     ('20261125120000'),
-    ('20261126100000');
+    ('20261126100000'),
+    ('20261127100000');

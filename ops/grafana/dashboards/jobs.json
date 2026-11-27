@@ -148,7 +148,7 @@
     },
     {
       "type": "table",
-      "title": "Failed, held, or queued over an hour",
+      "title": "Failed, partial, held, or queued over an hour",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "trialwatch-db"
@@ -165,7 +165,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "trialwatch-db"
           },
-          "rawSql": "SELECT id, kind, status, attempts, run_after, finished_at, left(last_error, 200) AS last_error, trace_id FROM report.jobs WHERE status IN ('failed', 'held') OR (status = 'queued' AND run_after < now() - interval '1 hour') ORDER BY id DESC LIMIT 50",
+          "rawSql": "SELECT id, kind, status, attempts, run_after, finished_at, left(last_error, 200) AS last_error, trace_id FROM report.jobs WHERE status IN ('failed', 'partial', 'held') OR (status = 'queued' AND run_after < now() - interval '1 hour') ORDER BY id DESC LIMIT 50",
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",

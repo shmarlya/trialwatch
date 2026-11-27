@@ -20,7 +20,7 @@ from trialwatch import cli, db
 from trialwatch.db import SESSION_OPTIONS, core
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
-from trialwatch.jobs import retry, steps, tasks, worker
+from trialwatch.jobs import refresh, retry, steps, tasks, worker
 from trialwatch.sources import ctis
 
 
@@ -181,6 +181,56 @@ def test_a_failed_attempt_is_tried_later_then_left_failed(app_conn, monkeypatch)
     assert (job.status, job.max_attempts, job.finished_at) == ("queued", 3, None)
 
 
+def test_every_kind_is_tried_twice():
+    for task in tasks.TASKS.values():
+        assert task.max_attempts == 2
+
+
+def test_items_that_still_fail_on_the_last_attempt_make_the_job_partial(app_conn, monkeypatch):
+    job_id = queue(app_conn, "sync", {"source": "ctis"}, max_attempts=2)
+
+    def one_trial_fails(ctx, conn, params):
+        return steps.Outcome({"listed": 10}, {"2024-000001-01-00": "ConnectError: CTIS is down"})
+
+    monkeypatch.setitem(tasks.TASKS, "sync", dataclasses.replace(tasks.TASKS["sync"], run=one_trial_fails))
+    work(app_conn, monkeypatch)
+    assert (jobs_db.job(app_conn, job_id).status, jobs_db.job(app_conn, job_id).attempts) == ("queued", 1)
+    due_now(app_conn, job_id)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert (job.status, job.attempts) == ("partial", 2)
+    assert job.finished_at is not None and job.last_error.startswith("1 failed: 2024-000001-01-00")
+    assert jobs_db.needing_attention(app_conn) == 1
+    # an admin tries it once more
+    assert jobs_db.retry_now(app_conn, job_id)
+
+
+def test_a_step_that_failed_as_a_whole_fails_the_job(app_conn, monkeypatch):
+    job_id = queue(app_conn, "sync", {"source": "ctis"}, max_attempts=1)
+
+    def list_unread(ctx, conn, params):
+        return steps.Outcome({"listed": 0}, {"list": "ReadTimeout: no answer"}, broken="ReadTimeout: no answer")
+
+    monkeypatch.setitem(tasks.TASKS, "sync", dataclasses.replace(tasks.TASKS["sync"], run=list_unread))
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert (job.status, job.last_error) == ("failed", "ReadTimeout: no answer")
+
+
+def test_a_refresh_step_that_crashes_fails_the_refresh(app_conn, fake_world, monkeypatch):
+    def crashing(ctx, conn, params):
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(refresh, "_ocr", crashing)
+    job_id = refresh_job(app_conn, max_attempts=1)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "failed", line_texts(app_conn, job_id)
+    assert job.last_error == "ocr: OperationalError: server closed the connection unexpectedly"
+    # the steps after it still ran
+    assert "check" in job.result
+
+
 def test_a_permanent_error_fails_at_once(app_conn, monkeypatch):
     unknown = queue(app_conn, "sync", {"source": "nowhere"})
     bad_setup = queue(app_conn, "check", {"every": True, "config": "../default"})
@@ -328,8 +378,8 @@ def test_the_commands_run_the_same_steps_here_and_now(app_conn, fake_world, monk
 
 # --- the refresh ---------------------------------------------------------------------------------
 
-def refresh_job(conn):
-    return queue(conn, "refresh", {}, actor=db.SYSTEM_ACTOR, automatic=True)
+def refresh_job(conn, **options):
+    return queue(conn, "refresh", {}, actor=db.SYSTEM_ACTOR, automatic=True, **options)
 
 
 def checked_trials(model):
@@ -474,7 +524,7 @@ def test_the_refresh_does_not_pay_again_for_a_check_that_failed_for_a_lasting_re
     assert checked_trials(model) == asked
 
 
-def test_a_file_that_cannot_be_read_is_shown_but_does_not_fail_the_refresh(app_conn, fake_world, monkeypatch):
+def test_a_file_that_cannot_be_read_makes_the_refresh_partial_without_a_retry(app_conn, fake_world, monkeypatch):
     # 2022-501485-22-00 (2026-11-25): one PDF CTIS publishes cut short failed every refresh, and each
     # failed refresh was tried again, though reading the same bytes can only fail the same way
     def cut_short(content):
@@ -484,7 +534,7 @@ def test_a_file_that_cannot_be_read_is_shown_but_does_not_fail_the_refresh(app_c
     job_id = refresh_job(app_conn)
     work(app_conn, monkeypatch)
     job = jobs_db.job(app_conn, job_id)
-    assert (job.status, job.attempts) == ("succeeded", 1), line_texts(app_conn, job_id)
+    assert (job.status, job.attempts, job.last_error) == ("partial", 1, "2 left to a person"), line_texts(app_conn, job_id)
     # its page still lists them, for a person to look at
     assert len(job.failures) == 2
     for name, why in job.failures.items():
@@ -886,9 +936,11 @@ def test_a_finished_jobs_page_offers_to_redo_what_failed(app_conn, admin_client)
     assert "<b>2</b> of 2 done · 100%" in page.text
 
 
-def test_a_job_that_succeeded_with_items_left_to_a_person_says_so_in_the_list(app_conn, admin_client):
+def test_a_partial_job_says_what_did_not_succeed_in_the_list(app_conn, admin_client):
     job_id = queue(app_conn, "transfer", {"source": "ctis", "keys": ["2025-000001-01-00"]}, actor="admin@test.example")
     jobs_db.record_attempt(app_conn, job_id, {"2025-000001-01-00/file 9626e32b175a": "the file is cut short"}, (1, 1))
-    jobs_db.finish(app_conn, job_id, "succeeded", {})
-    assert f'<a href="/jobs/{job_id}#failed">1 left to a person</a>' in admin_client.get("/admin/jobs?tab=ended").text
-    assert "Left to a person" in admin_client.get(f"/jobs/{job_id}").text
+    jobs_db.finish(app_conn, job_id, "partial", {}, "1 left to a person")
+    for tab in ("ended", "attention"):
+        page = admin_client.get(f"/admin/jobs?tab={tab}").text
+        assert f'<a href="/jobs/{job_id}#failed">1 did not succeed</a>' in page
+    assert "What did not succeed" in admin_client.get(f"/jobs/{job_id}").text

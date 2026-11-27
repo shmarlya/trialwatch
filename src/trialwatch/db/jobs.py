@@ -11,9 +11,9 @@ from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
 # A job in one of these has ended
-ENDED = ("succeeded", "failed", "cancelled")
+ENDED = ("succeeded", "partial", "failed", "cancelled")
 # ... and in one of these someone should look at it
-NEEDS_ATTENTION = ("failed", "held")
+NEEDS_ATTENTION = ("failed", "partial", "held")
 
 
 @dataclass(frozen=True)
@@ -232,7 +232,7 @@ def cancel_requested(conn: psycopg.Connection, job_id: int) -> bool:
 
 
 def finish(conn: psycopg.Connection, job_id: int, status: str, result: dict, error: str | None = None) -> None:
-    """End the job: succeeded, failed or cancelled."""
+    """End the job: succeeded, partial, failed or cancelled."""
     conn.execute(
         "UPDATE jobs.job SET status = %s, result = %s, last_error = %s, finished_at = clock_timestamp(), "
         "locked_by = NULL WHERE id = %s",
@@ -307,12 +307,12 @@ def request_cancel(conn: psycopg.Connection, job_id: int) -> str | None:
 
 
 def retry_now(conn: psycopg.Connection, job_id: int) -> bool:
-    """Queue a failed, cancelled or held job again now, with one more attempt. False when it is not one."""
+    """Queue a failed, partial, cancelled or held job again now, with one more attempt. False when it is not one."""
     cursor = conn.execute(
         """
         UPDATE jobs.job SET status = 'queued', run_after = clock_timestamp(), finished_at = NULL,
                cancel_requested = false, max_attempts = greatest(max_attempts, attempts + 1)
-         WHERE id = %s AND status IN ('failed', 'cancelled', 'held')
+         WHERE id = %s AND status IN ('failed', 'partial', 'cancelled', 'held')
         """,
         (job_id,),
     )

@@ -179,7 +179,7 @@ def run_one(queue: psycopg.Connection, job: Job, worker: str) -> str:
             jobs_db.set_trace_id(queue, job.id, trace_id)
         status = _attempt(queue, job, worker)
         span.set_attribute("trialwatch.job.status", status)
-        if status in ("failed", "queued"):
+        if status in ("failed", "partial", "queued"):
             span.set_status(StatusCode.ERROR, f"the attempt failed; the job is {status}")
     labels = {"kind": job.kind, "status": status}
     telemetry.jobs_finished.add(1, labels)
@@ -226,16 +226,31 @@ def _record(
     if ctx.hold_reason is not None and error is None:
         jobs_db.hold(queue, job.id, result, ctx.hold_reason)
         return "held"
+    # the step failed as a whole (it raised, or said so: Outcome.broken): failed once no attempt is left.
+    # It ran, but items failed (worth another attempt) or were left to people: partial at the end.
+    whole = error is not None or (outcome is not None and outcome.broken is not None)
+    if error is None and outcome is not None and outcome.broken is not None:
+        error = outcome.broken
     if error is None and outcome is not None and outcome.failed:
         error = failures_text(outcome.failed)
     if error is None:
+        if outcome is not None and outcome.left:
+            text = f"{len(outcome.left)} left to a person"
+            jobs_db.finish(queue, job.id, "partial", result, text)
+            ctx.add(f"partial: {text}")
+            return "partial"
         jobs_db.finish(queue, job.id, "succeeded", result)
         ctx.add("succeeded")
         return "succeeded"
     ctx.add(f"failed: {error}")
     if permanent or job.attempts >= job.max_attempts:
-        jobs_db.finish(queue, job.id, "failed", result, error)
-        return "failed"
+        status = "partial"
+        if whole:
+            status = "failed"
+        jobs_db.finish(queue, job.id, status, result, error)
+        if status == "partial":
+            ctx.add(f"partial: {len(failures)} items did not succeed")
+        return status
     delay = backoff(job.attempts)
     jobs_db.try_later(queue, job.id, delay, result, error)
     ctx.add(f"tried again in {_minutes(delay)}")

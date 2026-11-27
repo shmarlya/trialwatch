@@ -104,12 +104,14 @@ class JobContext(Context):
 class Outcome:
     """How a step ended: what it did (jobs.job.result), what failed that is worth another attempt
     (item -> error), and what failed that another attempt can't fix, left to people (a check refused, a
-    file the source publishes broken): shown with the job's failures, but the job does not fail for it.
-    The result names those too (left_to_people)."""
+    file the source publishes broken); the result names those too (left_to_people). A job whose items
+    failed or were left ends `partial` (jobs/worker.py). `broken` says why the step failed as a whole
+    (the source's list could not be read): the job ends `failed`, as if it had raised."""
 
     result: dict = field(default_factory=dict)
     failed: dict[str, str] = field(default_factory=dict)
     left: dict[str, str] = field(default_factory=dict)
+    broken: str | None = None
 
 
 def _source(conn: psycopg.Connection, code: str) -> core.RegisteredSource:
@@ -132,8 +134,10 @@ def run_sync(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
             # switched off, or its config is not valid: the same next time
             raise PermanentError(str(exc)) from exc
     ctx.add(result.summary())
+    # the list itself, not one of its trials: the sync failed as a whole
+    broken = result.failed.get("list")
     return Outcome({"ingest_run": result.run_id, "summary": result.summary(), "listed": result.listed,
-                    "new_trials": result.new_trials}, dict(result.failed))
+                    "new_trials": result.new_trials}, dict(result.failed), broken=broken)
 
 
 # --- transfer ------------------------------------------------------------------------------------

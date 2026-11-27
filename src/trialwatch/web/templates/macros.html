@@ -20,7 +20,7 @@
 
 {% macro run_status(status) -%}
   {%- if status == "succeeded" -%}<span class="badge full">succeeded</span>
-  {%- elif status in ("running", "held") -%}<span class="badge undecided">{{ status }}</span>
+  {%- elif status in ("running", "held", "partial") -%}<span class="badge undecided">{{ status }}</span>
   {%- elif status in ("failed", "stopped") -%}<span class="badge not-full">{{ status }}</span>
   {%- else -%}<span class="badge none">{{ status }}</span>
   {%- endif -%}

@@ -54,12 +54,54 @@ def finish_run(conn: psycopg.Connection, run_id: int, *, status: str, error: str
     unlock(conn, LOCK_CHECK_RUN, run_id)
 
 
+def wait_run(conn: psycopg.Connection, run_id: int) -> None:
+    """The run waits on a Message Batch (ADR-009): its job lets the worker go, so this session lets go of
+    the run's lock; a waiting run is not abandoned (close_abandoned_runs)."""
+    conn.execute("UPDATE checks.run SET status = 'waiting' WHERE id = %s AND status = 'running'", (run_id,))
+    unlock(conn, LOCK_CHECK_RUN, run_id)
+
+
+def resume_run(conn: psycopg.Connection, run_id: int) -> str | None:
+    """Take a waiting (or running) run back in this session: running again, its lock held. Returns its
+    status before, None when it is not open (closed meanwhile)."""
+    with conn.transaction():
+        row = conn.execute("SELECT status FROM checks.run WHERE id = %s FOR UPDATE", (run_id,)).fetchone()
+        if row is None or row[0] not in ("running", "waiting"):
+            return None
+        conn.execute("UPDATE checks.run SET status = 'running' WHERE id = %s", (run_id,))
+        lock(conn, LOCK_CHECK_RUN, run_id)
+    return row[0]
+
+
+def judged_trials(conn: psycopg.Connection, run_id: int) -> set[int]:
+    """The trials the run has a judgement for (judged, or failed)."""
+    rows = conn.execute("SELECT trial_id FROM checks.judgement WHERE run_id = %s", (run_id,)).fetchall()
+    judged = set()
+    for row in rows:
+        judged.add(row[0])
+    return judged
+
+
 def close_abandoned_runs(conn: psycopg.Connection) -> list[int]:
     """Close as failed the check runs still marked running whose process is gone (nobody holds their
     lock). The trials they judged keep their judgements. Call it before this session starts a run of
     its own. Returns the closed runs."""
-    rows = conn.execute("SELECT id FROM checks.run WHERE status = 'running' ORDER BY id").fetchall()
     closed = []
+    # a run waiting on a batch belongs to its job; once that job has ended, nobody will take it back
+    waiting = conn.execute(
+        """
+        UPDATE checks.run r SET status = 'failed', error = %s, finished_at = clock_timestamp(),
+            trials = (SELECT count(*) FROM checks.judgement j WHERE j.run_id = r.id),
+            errors = (SELECT count(*) FROM checks.judgement j WHERE j.run_id = r.id AND j.error IS NOT NULL)
+        WHERE r.status = 'waiting'
+          AND EXISTS (SELECT FROM jobs.job b WHERE b.id = r.job_id AND b.finished_at IS NOT NULL)
+        RETURNING r.id
+        """,
+        (ABANDONED,),
+    ).fetchall()
+    for row in waiting:
+        closed.append(row[0])
+    rows = conn.execute("SELECT id FROM checks.run WHERE status = 'running' ORDER BY id").fetchall()
     for row in rows:
         run_id = row[0]
         if not try_lock(conn, LOCK_CHECK_RUN, run_id):

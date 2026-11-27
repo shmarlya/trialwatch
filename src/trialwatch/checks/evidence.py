@@ -27,7 +27,7 @@ from decimal import Decimal
 import psycopg
 from opentelemetry.trace import StatusCode
 
-from trialwatch import llm, telemetry
+from trialwatch import batching, llm, telemetry
 from trialwatch.checks import publishing, requirements
 from trialwatch.checks import trace as tracing
 from trialwatch.checks.ask import (MAX_FILES_BYTES, OPERATION, ask, build_files_request, build_request,
@@ -37,6 +37,7 @@ from trialwatch.checks.requirements import Question, RequirementSet
 from trialwatch.checks.retrieval import pages_to_send_first, search, search_query_for
 from trialwatch.checks.settings import Settings
 from trialwatch.checks.verify import has_readable_text, read_enough, some_page_readable, verify
+from trialwatch.db import batches as batches_db
 from trialwatch.db import checks as checks_db
 from trialwatch.db import core
 from trialwatch.db.core import Page
@@ -754,27 +755,9 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
                 break
             name = names[trial_id]
             trial_result = check_trial(conn, client, run_id, trial_id, settings, prompt, requirement_set)
-            if trial_result.error:
-                report(progress, f"{number}/{len(wanted)} {name}: error: {trial_result.error}")
-            else:
-                report(progress, f"{number}/{len(wanted)} {name}: {trial_result.label}")
+            _report_trial(progress, f"{number}/{len(wanted)}", name, trial_result)
             count_done(number, len(wanted))
-            summary.input_tokens += trial_result.input_tokens
-            summary.output_tokens += trial_result.output_tokens
-            summary.cache_write_tokens += trial_result.cache_write_tokens
-            summary.cache_read_tokens += trial_result.cache_read_tokens
-            billed = trial_costs(trial_result)
-            summary.cost_usd += llm.total_cost(billed)
-            summary.unpriced_calls += llm.unpriced_count(billed)
-            summary.evidence += trial_result.evidence
-            summary.verified += trial_result.verified
-            summary.widened += trial_result.widened
-            if trial_result.error:
-                summary.failed[name] = trial_result.error
-            else:
-                if trial_result.label not in summary.labels:
-                    summary.labels[trial_result.label] = 0
-                summary.labels[trial_result.label] += 1
+            _add_trial(summary, name, trial_result)
         if stopped:
             status = "stopped"
         elif summary.failed:
@@ -800,4 +783,205 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[in
             # the run is already failing: its own error is the one to raise
     report(progress, f"published {len(summary.published)} of {judged} judgements, each with how judgements "
                      f"of its kind agreed with the gold datasets")
+    return summary
+
+
+def _report_trial(progress: Progress, position: str, name: str, trial_result: TrialResult) -> None:
+    if trial_result.error:
+        report(progress, f"{position} {name}: error: {trial_result.error}")
+    else:
+        report(progress, f"{position} {name}: {trial_result.label}")
+
+
+def _add_trial(summary: RunSummary, name: str, trial_result: TrialResult) -> None:
+    """A trial's outcome, tokens and cost added to the run's summary."""
+    summary.input_tokens += trial_result.input_tokens
+    summary.output_tokens += trial_result.output_tokens
+    summary.cache_write_tokens += trial_result.cache_write_tokens
+    summary.cache_read_tokens += trial_result.cache_read_tokens
+    billed = trial_costs(trial_result)
+    summary.cost_usd += llm.total_cost(billed)
+    summary.unpriced_calls += llm.unpriced_count(billed)
+    summary.evidence += trial_result.evidence
+    summary.verified += trial_result.verified
+    summary.widened += trial_result.widened
+    if trial_result.error:
+        summary.failed[name] = trial_result.error
+    else:
+        if trial_result.label not in summary.labels:
+            summary.labels[trial_result.label] = 0
+        summary.labels[trial_result.label] += 1
+
+
+# --- a run in Message Batches (ADR-009) ------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Held:
+    """A batched run did not send its next batch: it may cost more than the spending cap leaves."""
+
+    estimated_usd: Decimal
+
+
+def run_batched(conn: psycopg.Connection, client: MessagesClient, trial_ids: Iterable[int], settings: Settings,
+                state: dict, prompt: Prompt | None = None, progress: Progress = None,
+                requirement_set: RequirementSet | None = None, should_stop: Callable[[], bool] | None = None,
+                unready: str = REFUSE, capped: bool = False,
+                foreground: bool = False) -> "RunSummary | batching.Waiting | Held":
+    """run() with the model's calls sent in Message Batches, at batch prices: the same judgements, saved
+    the same way, in rounds (batching.py). `state` is what earlier rounds kept (its run and its trials);
+    it is filled in here and the caller keeps it until the run ends. Returns the run's summary once every
+    trial is judged; else the batch the run waits on (Waiting: the run waits too, and its job comes back
+    when Anthropic has answered), or Held when the next batch may take this month's spend over the cap
+    (`capped`). In the `foreground` (the command line) it waits here instead, until the run ends."""
+    if prompt is None:
+        prompt = load_prompt(settings.prompt)
+    if requirement_set is None:
+        requirement_set = requirements.load(settings.requirements)
+    if "run_id" in state:
+        if checks_db.resume_run(conn, state["run_id"]) is None:
+            # closed while it waited (its job ended, a later run closed it): start again
+            report(progress, f"run {state['run_id']} was closed while it waited: a new run starts")
+            state.clear()
+    if "run_id" not in state:
+        summary = RunSummary(None)
+        wanted = _checkable(conn, trial_ids, requirement_set, unready, summary, progress)
+        if not wanted:
+            report(progress, summary.summary())
+            return summary
+        _start_batched_run(conn, settings, prompt, requirement_set, wanted, state, progress)
+    run_id = state["run_id"]
+    try:
+        outcome = _batched_rounds(conn, client, run_id, settings, prompt, requirement_set, state, progress,
+                                  should_stop, capped, foreground)
+    except BaseException as exc:
+        if foreground:
+            checks_db.finish_run(conn, run_id, status="stopped", error=f"{type(exc).__name__}: {exc}",
+                                 trials=len(checks_db.judged_trials(conn, run_id)), errors=0)
+        else:
+            # the job tries again later and takes the run back where it was
+            checks_db.wait_run(conn, run_id)
+        raise
+    if not isinstance(outcome, bool):
+        checks_db.wait_run(conn, run_id)
+        return outcome
+    return _finish_batched_run(conn, run_id, state, progress, stopped=outcome)
+
+
+def _start_batched_run(conn: psycopg.Connection, settings: Settings, prompt: Prompt, requirement_set: RequirementSet,
+                       wanted: list[int], state: dict, progress: Progress) -> None:
+    checks_db.close_abandoned_runs(conn)
+    for earlier_run in checks_db.runs_without_agreement(conn):
+        publishing.publish_run(conn, earlier_run)
+    run_id = checks_db.start_run(
+        conn, model=settings.model, effort=settings.effort, prompt=prompt.name,
+        prompt_sha256=prompt.sha256, prompt_text=prompt.text, requirements=requirement_set.name,
+        requirements_sha256=requirement_set.sha256, requirements_text=requirement_set.text, params=settings.params(),
+    )
+    state["run_id"] = run_id
+    state["trials"] = wanted
+    state["evidence"] = 0
+    state["verified"] = 0
+    state["widened"] = 0
+    report(progress, f"run {run_id} started: {len(wanted)} trials, the model's calls in batches")
+
+
+def _batched_rounds(conn: psycopg.Connection, client: MessagesClient, run_id: int, settings: Settings,
+                    prompt: Prompt, requirement_set: RequirementSet, state: dict, progress: Progress,
+                    should_stop: Callable[[], bool] | None, capped: bool,
+                    foreground: bool) -> "bool | batching.Waiting | Held":
+    """Rounds until every trial is judged (returns whether it stopped first), or until the run must wait
+    on a batch (Waiting) or the cap (Held). In the foreground it waits for each batch here."""
+    while True:
+        outcome = _batched_round(conn, client, run_id, settings, prompt, requirement_set, state, progress,
+                                 should_stop, capped)
+        if foreground and isinstance(outcome, batching.Waiting):
+            batching.wait_here(conn, client, outcome, progress)
+            continue
+        return outcome
+
+
+def _batched_round(conn: psycopg.Connection, client: MessagesClient, run_id: int, settings: Settings,
+                   prompt: Prompt, requirement_set: RequirementSet, state: dict, progress: Progress,
+                   should_stop: Callable[[], bool] | None, capped: bool) -> "bool | batching.Waiting | Held":
+    """One round: the trials not judged yet, from the answers of the run's batches; the requests still
+    unanswered go into the next batch."""
+    batches = batches_db.batches_of_run(conn, check_run_id=run_id)
+    answers, sends, items, running = batching.answers(conn, client, batches, OPERATION)
+    if running is not None:
+        return batching.Waiting(running.id, running.provider_batch_id, running.round, running.request_count)
+    replay = llm.BatchReplay(answers, sends, client)
+    wanted = state["trials"]
+    names = core.trial_names(conn, wanted)
+    judged = checks_db.judged_trials(conn, run_id)
+    stopped = False
+    for number, trial_id in enumerate(wanted, start=1):
+        if trial_id in judged:
+            continue
+        if should_stop is not None and should_stop():
+            stopped = True
+            report(progress, "stopped: the trials judged so far are kept")
+            break
+        replay.begin(trial_id)
+        try:
+            trial_result = check_trial(conn, replay, run_id, trial_id, settings, prompt, requirement_set)
+        except llm.Pending:
+            # its next call goes into the next batch
+            continue
+        _report_trial(progress, f"{number}/{len(wanted)}", names[trial_id], trial_result)
+        state["evidence"] += trial_result.evidence
+        state["verified"] += trial_result.verified
+        state["widened"] += trial_result.widened
+    count_done(len(checks_db.judged_trials(conn, run_id)), len(wanted))
+    unused = batching.record_unused(conn, replay, items, OPERATION, check_run_id=run_id)
+    if unused:
+        report(progress, f"{unused} answers no trial used were recorded (billed all the same)")
+    if stopped or not replay.pending:
+        return stopped
+    pending = list(replay.pending.values())
+    estimated = batching.estimate(pending)
+    if capped and batching.over_cap(conn, estimated):
+        return Held(estimated)
+    waiting = batching.submit(conn, client, pending, OPERATION, batching.next_round(batches), estimated,
+                              check_run_id=run_id)
+    report(progress, f"round {waiting.round}: {len(pending)} requests sent in batch {waiting.provider_batch_id} "
+                     f"(about {llm.dollars(estimated)}); the run waits for its answers")
+    return waiting
+
+
+def _finish_batched_run(conn: psycopg.Connection, run_id: int, state: dict, progress: Progress,
+                        stopped: bool) -> RunSummary:
+    """Close the run and publish its judgements, as run() does; its summary is read from what it saved."""
+    summary = RunSummary(run_id)
+    wanted = state["trials"]
+    names = core.trial_names(conn, wanted)
+    judgements = checks_db.judgements(conn, run_id)
+    for trial_id, judgement in judgements.items():
+        name = names.get(trial_id, str(trial_id))
+        if judgement.error:
+            summary.failed[name] = judgement.error
+        else:
+            if judgement.label not in summary.labels:
+                summary.labels[judgement.label] = 0
+            summary.labels[judgement.label] += 1
+    totals = batches_db.call_totals(conn, check_run_id=run_id)
+    summary.input_tokens = totals.input_tokens
+    summary.output_tokens = totals.output_tokens
+    summary.cache_write_tokens = totals.cache_write_tokens
+    summary.cache_read_tokens = totals.cache_read_tokens
+    summary.cost_usd = totals.cost_usd
+    summary.unpriced_calls = totals.unpriced_attempts
+    summary.evidence = state.get("evidence", 0)
+    summary.verified = state.get("verified", 0)
+    summary.widened = state.get("widened", 0)
+    status = "succeeded"
+    if stopped:
+        status = "stopped"
+    elif summary.failed:
+        status = "failed"
+    checks_db.finish_run(conn, run_id, status=status, error=None, trials=len(judgements),
+                         errors=len(summary.failed))
+    summary.published = publishing.publish_run(conn, run_id)
+    report(progress, summary.summary())
+    report(progress, f"published {len(summary.published)} of {len(judgements)} judgements, each with how "
+                     f"judgements of its kind agreed with the gold datasets")
     return summary

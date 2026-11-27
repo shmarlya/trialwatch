@@ -29,6 +29,9 @@ def record_call(
     trial_id: int | None = None,
     call_number: int | None = None,
     annotation_run_id: int | None = None,
+    tier: str = "direct",
+    llm_batch_id: int | None = None,
+    custom_id: str | None = None,
 ) -> int:
     """Add one model call, made for the session's actor (for a check run, or an AI tagging run); returns
     its id. Its totals are summed here from its billed attempts, each cost as stored (numeric(14, 6))."""
@@ -37,11 +40,12 @@ def record_call(
         INSERT INTO core.llm_call (actor_id, operation, model, served_by, check_run_id, trial_id, call_number,
                                    annotation_run_id, request, response, stop_reason, latency_ms, error, request_id,
                                    attempts, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-                                   cost_usd, unpriced_attempts)
+                                   cost_usd, unpriced_attempts, tier, llm_batch_id, custom_id)
         SELECT current_setting('trialwatch.actor')::bigint, %(operation)s, %(model)s, %(served_by)s, %(run)s,
                %(trial)s, %(number)s, %(annotation_run)s, %(request)s, %(response)s, %(stop_reason)s, %(latency)s,
                %(error)s, %(request_id)s, b.attempts, coalesce(t.input_tokens, 0), coalesce(t.output_tokens, 0),
-               coalesce(t.cache_write_tokens, 0), coalesce(t.cache_read_tokens, 0), t.cost_usd, t.unpriced
+               coalesce(t.cache_write_tokens, 0), coalesce(t.cache_read_tokens, 0), t.cost_usd, t.unpriced,
+               %(tier)s, %(llm_batch)s, %(custom_id)s
         FROM (SELECT %(attempts)s::jsonb AS attempts) b
         CROSS JOIN LATERAL (
             SELECT sum((a->>'input_tokens')::bigint) AS input_tokens, sum((a->>'output_tokens')::bigint) AS output_tokens,
@@ -68,6 +72,9 @@ def record_call(
             "error": error,
             "request_id": request_id,
             "attempts": Jsonb(attempts),
+            "tier": tier,
+            "llm_batch": llm_batch_id,
+            "custom_id": custom_id,
         },
     ).fetchone()
     return row[0]

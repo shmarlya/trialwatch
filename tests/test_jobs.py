@@ -33,8 +33,18 @@ def queue(conn, kind, params, actor="test-person", **options):
 
 
 def work(app_conn, monkeypatch):
-    """Run the worker until nothing is due; returns the jobs it ran."""
-    return worker.run(once=True)
+    """Run the worker until nothing is due, a job waiting on a batch going on as soon as its batch has
+    ended (the fake model answers at once); returns the jobs it ran."""
+    ran = worker.run(once=True)
+    while answer_batches(app_conn):
+        ran += worker.run(once=True)
+    return ran
+
+
+def answer_batches(conn):
+    """Ask now about the batches waiting jobs wait on; returns the jobs queued again."""
+    conn.execute("UPDATE jobs.job SET wait_until = now() WHERE status = 'waiting'")
+    return worker.wake_answered(conn)
 
 
 def due_now(conn, job_id):
@@ -287,10 +297,27 @@ def test_a_check_job_judges_its_trials_as_its_creator_and_records_the_job(app_co
     assert job.status == "succeeded", job.last_error
     run_id = job.result["check_run"]
     assert jobs_db.runs_of(app_conn, job_id).check_runs == [run_id]
-    calls = app_conn.execute("SELECT job_id, cost_usd FROM core.llm_call WHERE check_run_id = %s", (run_id,)).fetchall()
-    assert calls == [(job_id, Decimal("0.000075"))]
-    assert jobs_db.job_cost(app_conn, job_id) == Decimal("0.000075")
-    assert job.result["cost"] == "$0.0001"
+    # its calls in a batch, at half price (ADR-009)
+    calls = app_conn.execute("SELECT job_id, cost_usd, tier FROM core.llm_call WHERE check_run_id = %s",
+                             (run_id,)).fetchall()
+    assert calls == [(job_id, Decimal("0.000038"), "batch")]
+    assert jobs_db.job_cost(app_conn, job_id) == Decimal("0.000038")
+    assert job.result["cost"] == "$0.0000"
+    # it waited on its batch without counting an attempt
+    assert job.attempts == 1
+    assert any(line.startswith("waiting: Anthropic answers 1 requests") for line in line_texts(app_conn, job_id))
+
+
+def test_a_check_job_asked_for_now_calls_the_model_directly(app_conn, fake_world, monkeypatch):
+    trial = seed(app_conn)
+    job_id = queue(app_conn, "check", {"trial_ids": [trial], "config": "default", "mode": "direct"})
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "succeeded", job.last_error
+    calls = app_conn.execute("SELECT cost_usd, tier FROM core.llm_call WHERE check_run_id = %s",
+                             (job.result["check_run"],)).fetchall()
+    assert calls == [(Decimal("0.000075"), "direct")]
+    assert tasks.problem("check", {"trial_ids": [trial], "mode": "later"}) == "mode must be one of batch, direct"
 
 
 def test_a_check_retry_judges_only_trials_whose_call_failed_for_a_passing_reason(app_conn, fake_world, monkeypatch):
@@ -302,7 +329,7 @@ def test_a_check_retry_judges_only_trials_whose_call_failed_for_a_passing_reason
 
     replies = [GOOD, anthropic.InternalServerError("overloaded", response=overloaded, body=None)]
     model.client.replies = replies
-    job_id = queue(app_conn, "check", {"trial_ids": [first, second], "config": "default"})
+    job_id = queue(app_conn, "check", {"trial_ids": [first, second], "config": "default", "mode": "direct"})
     work(app_conn, monkeypatch)
     job = jobs_db.job(app_conn, job_id)
     assert (job.status, job.attempts) == ("queued", 1)
@@ -397,11 +424,16 @@ def test_the_refresh_syncs_transfers_and_checks_what_is_new(app_conn, fake_world
     assert job.result["transfer ctis"]["trials"] == 2
     assert (job.result["check"]["ready"], job.result["check"]["trials"]) == (2, 2)
     assert checked_trials(model) == 2
-    # one job: its runs name it, and the check run is TrialWatch's own
+    # its check is a job of its own, its calls in batches: the refresh's runs name the refresh, the check
+    # run names that job, and both are TrialWatch's own
+    check_job = job.result["check"]["queued_job"]
+    assert jobs_db.job(app_conn, check_job).status == "succeeded"
+    assert jobs_db.job(app_conn, check_job).automatic
     runs = jobs_db.runs_of(app_conn, job_id)
-    assert len(runs.check_runs) == 1 and len(runs.ingest_runs) == 2
+    assert len(runs.check_runs) == 0 and len(runs.ingest_runs) == 2
+    assert len(jobs_db.runs_of(app_conn, check_job).check_runs) == 1
     actors = app_conn.execute("SELECT DISTINCT a.name FROM checks.run r JOIN core.actor a ON a.id = r.actor_id "
-                              "WHERE r.job_id = %s", (job_id,)).fetchall()
+                              "WHERE r.job_id = %s", (check_job,)).fetchall()
     assert actors == [(db.SYSTEM_ACTOR,)]
 
     # a week later nothing changed: nothing is transferred or checked, nothing spent
@@ -655,7 +687,8 @@ def test_staff_see_jobs_spend_and_costs_and_the_public_does_not(app_conn, fake_w
     from trialwatch.web import app as web
 
     trial = seed(app_conn)
-    done = queue(app_conn, "check", {"trial_ids": [trial], "config": "default"}, actor="admin@test.example")
+    done = queue(app_conn, "check", {"trial_ids": [trial], "config": "default", "mode": "direct"},
+                 actor="admin@test.example")
     failed = queue(app_conn, "sync", {"source": "nowhere"}, actor="admin@test.example")
     work(app_conn, monkeypatch)
     assert jobs_db.job(app_conn, failed).status == "failed"

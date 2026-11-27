@@ -15,7 +15,9 @@ step, each the same step a job of its own kind runs (jobs/steps.py):
    a person runs (`check evidence --config`). Nothing changed: no check, no money spent.
 
 Steps 3 and 4 call a paid model: the monthly spending cap holds the refresh before them, and it carries
-on when the cap allows. A step that fails does not stop the others: its failure fails the attempt, and
+on when the cap allows. When their setup sends the calls in Message Batches (ADR-009), the refresh does
+not run them itself: it queues a check (or tagging) job for what needs one, which waits on its batches
+while the worker goes on; while such a job is open, the next refresh queues no other. A step that fails does not stop the others: its failure fails the attempt, and
 the refresh is tried again later. Each step picks its work from what is stored now, so a new attempt
 carries on where the last one stopped (a transferred trial is no longer stale, a tagged or judged one
 no longer waits), and a source synced in an earlier attempt is not listed again.
@@ -33,6 +35,8 @@ from trialwatch.checks import settings as check_settings
 from trialwatch.checks.prompts import load_prompt
 from trialwatch.db import checks as checks_db
 from trialwatch.db import core
+from trialwatch.db import jobs as jobs_db
+from trialwatch.jobs import PRIORITY_AUTOMATIC
 from trialwatch.jobs import steps
 from trialwatch.jobs.retry import PermanentError, is_transient
 from trialwatch.jobs.steps import Context, Outcome
@@ -117,9 +121,29 @@ def _check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
     left = len(needing) - len(changed)
     ctx.add(f"{len(changed)} of {len(ready)} trials ready for a check need one"
             f" ({left} left to a person: their last check failed on the same evidence)")
-    outcome = steps.run_check(ctx, conn, {"trial_ids": changed, "config": config_name})
+    params = {"trial_ids": changed, "config": config_name}
+    if settings.mode == "batch" and not ctx.foreground:
+        outcome = queue_step(ctx, conn, "check", params, len(changed))
+    else:
+        outcome = steps.run_check(ctx, conn, params)
     outcome.result["ready"] = len(ready)
     return outcome
+
+
+def queue_step(ctx: Context, conn: psycopg.Connection, kind: str, params: dict, count: int) -> Outcome:
+    """A paid step whose calls go in batches, queued as a job of its own (automatic, held by the cap
+    like the refresh): it waits on its batches without keeping the worker. None is queued while one of
+    that kind is still open: what it does not cover waits for the next refresh."""
+    if count == 0:
+        return Outcome({"trials": 0})
+    open_job = jobs_db.open_automatic_job(conn, kind)
+    if open_job is not None:
+        ctx.add(f"job {open_job} ({kind}) is still open: these {count} trials wait for the next refresh")
+        return Outcome({"trials": count, "open_job": open_job})
+    job_id = jobs_db.enqueue(conn, kind, params, max_attempts=ctx.job.max_attempts, automatic=True,
+                             priority=PRIORITY_AUTOMATIC)
+    ctx.add(f"job {job_id} queued: {kind} of {count} trials, its model calls in batches")
+    return Outcome({"trials": count, "queued_job": job_id})
 
 
 def _run(ctx: Context, conn: psycopg.Connection, name: str, step: Step, params: dict, result: dict,

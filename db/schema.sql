@@ -456,10 +456,10 @@ CREATE TABLE checks.run (
     trials integer DEFAULT 0 NOT NULL,
     errors integer DEFAULT 0 NOT NULL,
     job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint,
-    CONSTRAINT run_check CHECK (((status = 'running'::text) = (finished_at IS NULL))),
+    CONSTRAINT run_check CHECK (((status = ANY (ARRAY['running'::text, 'waiting'::text])) = (finished_at IS NULL))),
     CONSTRAINT run_prompt_sha256_check CHECK ((length(prompt_sha256) = 32)),
     CONSTRAINT run_requirements_sha256_check CHECK ((length(requirements_sha256) = 32)),
-    CONSTRAINT run_status_check CHECK ((status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'stopped'::text])))
+    CONSTRAINT run_status_check CHECK ((status = ANY (ARRAY['running'::text, 'waiting'::text, 'succeeded'::text, 'failed'::text, 'stopped'::text])))
 );
 
 
@@ -998,6 +998,77 @@ ALTER TABLE core.ingest_run ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
 
 
 --
+-- Name: llm_batch; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.llm_batch (
+    id bigint NOT NULL,
+    provider_batch_id text,
+    provider text DEFAULT 'anthropic'::text NOT NULL,
+    operation text NOT NULL,
+    job_id bigint DEFAULT (NULLIF(current_setting('trialwatch.job'::text, true), ''::text))::bigint,
+    check_run_id bigint,
+    annotation_run_id bigint,
+    round integer NOT NULL,
+    status text DEFAULT 'submitting'::text NOT NULL,
+    request_count integer NOT NULL,
+    estimated_usd numeric(14,6),
+    counts jsonb DEFAULT '{}'::jsonb NOT NULL,
+    error text,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    submitted_at timestamp with time zone,
+    ended_at timestamp with time zone,
+    collected_at timestamp with time zone,
+    CONSTRAINT llm_batch_check CHECK (((status = ANY (ARRAY['submitting'::text, 'failed'::text])) OR (provider_batch_id IS NOT NULL))),
+    CONSTRAINT llm_batch_request_count_check CHECK ((request_count >= 0)),
+    CONSTRAINT llm_batch_round_check CHECK ((round >= 1)),
+    CONSTRAINT llm_batch_status_check CHECK ((status = ANY (ARRAY['submitting'::text, 'submitted'::text, 'collected'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: TABLE llm_batch; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.llm_batch IS 'a Message Batch: one round of a run''s model requests, sent together at batch prices';
+
+
+--
+-- Name: llm_batch_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+ALTER TABLE core.llm_batch ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME core.llm_batch_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: llm_batch_item; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.llm_batch_item (
+    llm_batch_id bigint NOT NULL,
+    custom_id text NOT NULL,
+    trial_id bigint NOT NULL,
+    call_number integer NOT NULL,
+    model text NOT NULL,
+    llm_call_id bigint
+);
+
+
+--
+-- Name: TABLE llm_batch_item; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON TABLE core.llm_batch_item IS 'one request of a Message Batch, and its call once answered';
+
+
+--
 -- Name: llm_call; Type: TABLE; Schema: core; Owner: -
 --
 
@@ -1026,7 +1097,11 @@ CREATE TABLE core.llm_call (
     cache_write_tokens bigint DEFAULT 0 NOT NULL,
     cache_read_tokens bigint DEFAULT 0 NOT NULL,
     cost_usd numeric(14,6),
-    unpriced_attempts integer DEFAULT 0 NOT NULL
+    unpriced_attempts integer DEFAULT 0 NOT NULL,
+    tier text DEFAULT 'direct'::text NOT NULL,
+    llm_batch_id bigint,
+    custom_id text,
+    CONSTRAINT llm_call_tier_check CHECK ((tier = ANY (ARRAY['direct'::text, 'batch'::text])))
 );
 
 
@@ -1035,6 +1110,13 @@ CREATE TABLE core.llm_call (
 --
 
 COMMENT ON TABLE core.llm_call IS 'every model call: the request as sent, the answer, how it ended, its billed attempts priced; the source of all spend totals';
+
+
+--
+-- Name: COLUMN llm_call.tier; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core.llm_call.tier IS 'direct: sent alone, at list prices; batch: answered in a Message Batch, at batch prices';
 
 
 --
@@ -1564,12 +1646,15 @@ CREATE TABLE jobs.job (
     progress_total integer,
     attempt_started_at timestamp with time zone,
     failures jsonb DEFAULT '{}'::jsonb NOT NULL,
+    waiting_on bigint,
+    wait_until timestamp with time zone,
     CONSTRAINT job_check CHECK (((status = ANY (ARRAY['succeeded'::text, 'partial'::text, 'failed'::text, 'cancelled'::text])) = (finished_at IS NOT NULL))),
     CONSTRAINT job_kind_check CHECK ((kind = ANY (ARRAY['sync'::text, 'transfer'::text, 'check'::text, 'refresh'::text, 'annotate'::text]))),
     CONSTRAINT job_max_attempts_check CHECK ((max_attempts >= 1)),
     CONSTRAINT job_progress_done_check CHECK ((progress_done >= 0)),
     CONSTRAINT job_progress_total_check CHECK ((progress_total >= 0)),
-    CONSTRAINT job_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'held'::text, 'succeeded'::text, 'partial'::text, 'failed'::text, 'cancelled'::text])))
+    CONSTRAINT job_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'waiting'::text, 'held'::text, 'succeeded'::text, 'partial'::text, 'failed'::text, 'cancelled'::text]))),
+    CONSTRAINT job_waiting_check CHECK (((status = 'waiting'::text) = (waiting_on IS NOT NULL)))
 );
 
 
@@ -1906,7 +1991,7 @@ CREATE TABLE search.annotation_run (
     finished_at timestamp with time zone,
     created_by bigint NOT NULL,
     CONSTRAINT annotation_run_prompt_sha256_check CHECK ((length(prompt_sha256) = 32)),
-    CONSTRAINT annotation_run_status_check CHECK ((status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'stopped'::text])))
+    CONSTRAINT annotation_run_status_check CHECK ((status = ANY (ARRAY['running'::text, 'waiting'::text, 'succeeded'::text, 'failed'::text, 'stopped'::text])))
 );
 
 
@@ -2235,6 +2320,30 @@ ALTER TABLE ONLY core.identifier_scheme
 
 ALTER TABLE ONLY core.ingest_run
     ADD CONSTRAINT ingest_run_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: llm_batch_item llm_batch_item_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_batch_item
+    ADD CONSTRAINT llm_batch_item_pkey PRIMARY KEY (llm_batch_id, custom_id);
+
+
+--
+-- Name: llm_batch llm_batch_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_batch
+    ADD CONSTRAINT llm_batch_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: llm_batch llm_batch_provider_batch_id_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_batch
+    ADD CONSTRAINT llm_batch_provider_batch_id_key UNIQUE (provider_batch_id);
 
 
 --
@@ -2624,6 +2733,13 @@ CREATE INDEX ingest_run_job_idx ON core.ingest_run USING btree (job_id);
 --
 
 CREATE INDEX ingest_run_source_idx ON core.ingest_run USING btree (source_id, started_at DESC);
+
+
+--
+-- Name: llm_batch_job_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX llm_batch_job_idx ON core.llm_batch USING btree (job_id);
 
 
 --
@@ -3292,6 +3408,54 @@ ALTER TABLE ONLY core.ingest_run
 
 
 --
+-- Name: llm_batch llm_batch_annotation_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_batch
+    ADD CONSTRAINT llm_batch_annotation_run_id_fkey FOREIGN KEY (annotation_run_id) REFERENCES search.annotation_run(id);
+
+
+--
+-- Name: llm_batch llm_batch_check_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_batch
+    ADD CONSTRAINT llm_batch_check_run_id_fkey FOREIGN KEY (check_run_id) REFERENCES checks.run(id);
+
+
+--
+-- Name: llm_batch_item llm_batch_item_llm_batch_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_batch_item
+    ADD CONSTRAINT llm_batch_item_llm_batch_id_fkey FOREIGN KEY (llm_batch_id) REFERENCES core.llm_batch(id);
+
+
+--
+-- Name: llm_batch_item llm_batch_item_llm_call_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_batch_item
+    ADD CONSTRAINT llm_batch_item_llm_call_id_fkey FOREIGN KEY (llm_call_id) REFERENCES core.llm_call(id);
+
+
+--
+-- Name: llm_batch_item llm_batch_item_trial_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_batch_item
+    ADD CONSTRAINT llm_batch_item_trial_id_fkey FOREIGN KEY (trial_id) REFERENCES core.trial(id);
+
+
+--
+-- Name: llm_batch llm_batch_job_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_batch
+    ADD CONSTRAINT llm_batch_job_id_fkey FOREIGN KEY (job_id) REFERENCES jobs.job(id);
+
+
+--
 -- Name: llm_call llm_call_actor_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -3321,6 +3485,14 @@ ALTER TABLE ONLY core.llm_call
 
 ALTER TABLE ONLY core.llm_call
     ADD CONSTRAINT llm_call_job_id_fkey FOREIGN KEY (job_id) REFERENCES jobs.job(id);
+
+
+--
+-- Name: llm_call llm_call_llm_batch_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_call
+    ADD CONSTRAINT llm_call_llm_batch_id_fkey FOREIGN KEY (llm_batch_id) REFERENCES core.llm_batch(id);
 
 
 --
@@ -3740,6 +3912,14 @@ ALTER TABLE ONLY jobs.job
 
 
 --
+-- Name: job job_waiting_on_fkey; Type: FK CONSTRAINT; Schema: jobs; Owner: -
+--
+
+ALTER TABLE ONLY jobs.job
+    ADD CONSTRAINT job_waiting_on_fkey FOREIGN KEY (waiting_on) REFERENCES core.llm_batch(id);
+
+
+--
 -- Name: annotation_run annotation_run_created_by_fkey; Type: FK CONSTRAINT; Schema: search; Owner: -
 --
 
@@ -3847,4 +4027,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261125120000'),
     ('20261126100000'),
     ('20261127100000'),
-    ('20261127110000');
+    ('20261127110000'),
+    ('20261127120000');

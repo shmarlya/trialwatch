@@ -11,6 +11,11 @@ own connection (as trialwatch) keeps the queue: claims, progress lines, heartbea
 job runs, a heartbeat thread says it is alive; a job whose worker died (no heartbeat for STALLED) has
 lost its attempt and is queued again by whichever worker looks next.
 
+A job whose model calls go in a Message Batch (ADR-009) does not keep the worker while Anthropic answers:
+it waits (status waiting), and housekeeping asks Anthropic about its batch now and then (soon at first,
+then less often) and queues it again once the batch has ended, to go on from its answers. A waiting job
+cancelled by a person has its batch cancelled at Anthropic; the answers it got are still recorded.
+
 A job that stops moving (no progress line or beat for TRIALWATCH_STUCK_MINUTES: a read or a query that
 never returns) is not kept alive by its heartbeat: the worker logs where it was and exits, so the
 container's restart policy starts a fresh one, and the job, requeued after STALLED, resumes where it
@@ -26,19 +31,20 @@ import time
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 from opentelemetry.trace import StatusCode
 
-from trialwatch import config, db, progress, telemetry
+from trialwatch import config, db, llm, progress, telemetry
 from trialwatch.auth import sessions
 from trialwatch.db import auth as auth_db
+from trialwatch.db import batches as batches_db
 from trialwatch.db import core
 from trialwatch.db import costs as costs_db
 from trialwatch.db import jobs as jobs_db
 from trialwatch.db.jobs import Job
-from trialwatch.jobs import PRIORITY_AUTOMATIC, tasks
+from trialwatch.jobs import PRIORITY_AUTOMATIC, steps, tasks
 from trialwatch.jobs.retry import PermanentError, backoff
 from trialwatch.jobs.steps import JobContext, Outcome
 
@@ -56,6 +62,11 @@ LONGEST_ERROR = 4000
 STATEMENT_TIMEOUT = timedelta(minutes=15)
 # The longest pause before connecting again to a database that went away
 LONGEST_RECONNECT_WAIT = 60.0
+# How often a waiting job's batch is asked about: often while it is young (most end within the hour),
+# then less often
+BATCH_CHECK_SOON = timedelta(minutes=2)
+BATCH_CHECK_LATER = timedelta(minutes=10)
+BATCH_YOUNG = timedelta(minutes=30)
 
 log = logging.getLogger("trialwatch.worker")
 
@@ -226,6 +237,12 @@ def _record(
     if ctx.hold_reason is not None and error is None:
         jobs_db.hold(queue, job.id, result, ctx.hold_reason)
         return "held"
+    if outcome is not None and outcome.waiting is not None and error is None:
+        waiting = outcome.waiting
+        jobs_db.wait(queue, job.id, waiting.batch_id, result, BATCH_CHECK_SOON)
+        ctx.add(f"waiting: Anthropic answers {waiting.requests} requests in batch {waiting.provider_batch_id} "
+                f"(round {waiting.round}), at batch prices; the job goes on when it has ended (within 24 hours)")
+        return "waiting"
     # the step failed as a whole (it raised, or said so: Outcome.broken): failed once no attempt is left.
     # It ran, but items failed (worth another attempt) or were left to people: partial at the end.
     whole = error is not None or (outcome is not None and outcome.broken is not None)
@@ -280,10 +297,59 @@ def housekeeping(queue: psycopg.Connection) -> None:
     if stalled:
         log.warning("jobs whose worker stopped, queued again or failed: %s", stalled)
     start_due_schedules(queue)
+    wake_answered(queue)
     if not costs_db.cap_reached(queue):
         resumed = jobs_db.resume_held(queue)
         if resumed:
             log.info("held jobs resumed: %s", resumed)
+
+
+def wake_answered(queue: psycopg.Connection, client: llm.MessagesClient | None = None) -> list[int]:
+    """Ask Anthropic about the batches of waiting jobs that are due: queue each job whose batch has ended
+    (or ran past the longest a batch takes), ask again later about the others. A cancelled job's batch is
+    cancelled at Anthropic first. Returns the jobs queued."""
+    due = jobs_db.waiting_due(queue)
+    if not due:
+        return []
+    if client is None:
+        client = steps.anthropic_client()
+    woken = []
+    for waiting in due:
+        try:
+            ended = _batch_ended(queue, client, waiting)
+        except llm.BAD_CREDENTIALS:
+            raise
+        except Exception as exc:  # Anthropic or the network: ask again later, the job keeps waiting
+            log.warning("job %s: could not ask about batch %s (%s)", waiting.job_id, waiting.provider_batch_id, exc)
+            jobs_db.check_later(queue, waiting.job_id, BATCH_CHECK_LATER)
+            continue
+        if ended:
+            if jobs_db.wake(queue, waiting.job_id):
+                woken.append(waiting.job_id)
+            continue
+        jobs_db.check_later(queue, waiting.job_id, _next_check(waiting))
+    if woken:
+        log.info("jobs whose batch was answered, queued again: %s", woken)
+    return woken
+
+
+def _batch_ended(queue: psycopg.Connection, client: llm.MessagesClient, waiting: jobs_db.WaitingJob) -> bool:
+    state = llm.batch_state(client, waiting.provider_batch_id)
+    batches_db.set_counts(queue, waiting.llm_batch_id, state.counts(), state.ended)
+    if state.ended:
+        return True
+    if waiting.cancel_requested and state.status == "in_progress":
+        llm.cancel_batch(client, waiting.provider_batch_id)
+    # past the longest a batch takes: its run reads what it has (unanswered requests expired)
+    age = datetime.now(UTC) - waiting.submitted_at
+    return age.total_seconds() > llm.BATCH_LONGEST
+
+
+def _next_check(waiting: jobs_db.WaitingJob) -> timedelta:
+    age = datetime.now(UTC) - waiting.submitted_at
+    if age < BATCH_YOUNG:
+        return BATCH_CHECK_SOON
+    return BATCH_CHECK_LATER
 
 
 def start_due_schedules(queue: psycopg.Connection) -> list[int]:

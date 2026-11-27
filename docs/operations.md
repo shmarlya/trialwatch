@@ -131,9 +131,7 @@ worker's `cpus: 2.0`: set it to 1.0 and `TRIALWATCH_PDF_READERS` to 1). No Grafa
    **S3 Storages**), so the copies leave the server.
 
 To update: merge into `main`; the Image workflow pushes the new `latest`. Then **Redeploy** in Coolify (it pulls
-`latest`), or let the workflow do it: put the resource's **Webhooks → Deploy Webhook URL** in the repository secret
-`COOLIFY_WEBHOOK` and a Coolify API token with the deploy permission (**Keys & Tokens**) in `COOLIFY_TOKEN`, and
-each new image is deployed when it is pushed (a pinned `TRIALWATCH_TAG` stays pinned). To roll back, set
+`latest`) when you want it live. To roll back, set
 `TRIALWATCH_TAG=sha-<commit>` and redeploy (a migration is not undone: roll back only to an image whose migrations
 the database already has). One-off commands: Coolify's terminal on the `web` container, e.g. `trialwatch geo load`.
 
@@ -420,8 +418,7 @@ GitHub Actions:
 - `.github/workflows/docs.yml`, on every push and pull request: a strict build of this site; pushes to `main` also
   publish it to GitHub Pages.
 - `.github/workflows/image.yml`, on every push to `main` (each merged pull request) and by hand: the tests, then
-  the image to `ghcr.io/shmarlya/trialwatch` (`sha-<commit>`, and `latest` from `main`), then Coolify's deploy
-  webhook when its secrets are set.
+  the image to `ghcr.io/shmarlya/trialwatch` (`sha-<commit>`, and `latest` from `main`).
 - Started by hand, calling CTIS or the model: `eval-short.yml` and `eval-full.yml` (gold evaluations, sharing
   `eval-shared.yml`) and `gold-snapshot.yml` (records the frozen snapshot); see
   [gold evaluations](sources-and-gold.md#gold-evaluations-ci).

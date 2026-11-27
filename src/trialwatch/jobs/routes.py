@@ -386,7 +386,7 @@ def job_progress(job_id: int, after: int = 0, user: auth_db.User = Depends(Requi
 # --- jobs, schedules and spend (admin) -----------------------------------------------------------
 
 JOB_TABS = {
-    "attention": ("Need attention", ("failed", "partial", "held")),
+    "attention": ("Need attention", ("failed", "held")),
     "active": ("Running", ("running",)),
     "queued": ("Queued", ("queued",)),
     "ended": ("Ended", ("succeeded", "partial", "cancelled", "failed")),

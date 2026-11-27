@@ -1296,7 +1296,8 @@ def files_for_ocr(conn: psycopg.Connection, trial_ids: Sequence[int] | None, kin
                         AND (%(trials)s::bigint[] IS NULL OR l.trial_id = ANY(%(trials)s)))
           AND (SELECT count(*) FROM core.page p WHERE p.file_sha256 = f.sha256) <= %(max_pages)s
           AND EXISTS (SELECT 1 FROM core.page p WHERE p.file_sha256 = f.sha256 AND p.letters < %(min_letters)s)
-        ORDER BY f.sha256
+        -- a file whose OCR failed before goes after those never tried
+        ORDER BY f.ocr_error IS NOT NULL, f.sha256
         """,
         {"trials": wanted_trials, "kinds": wanted_kinds, "max_pages": max_pages, "min_letters": min_letters},
     ).fetchall()
@@ -1306,13 +1307,14 @@ def files_for_ocr(conn: psycopg.Connection, trial_ids: Sequence[int] | None, kin
 def trials_waiting_for_ocr(conn: psycopg.Connection, trial_ids: Sequence[int], kinds: Sequence[str],
                            max_pages: int, min_letters: int) -> set[int]:
     """The trials among these with a current file of these kinds that OCR has yet to look at
-    (files_for_ocr's files)."""
+    (files_for_ocr's files), not counting a file whose OCR failed before: a trial never waits for it."""
     rows = conn.execute(
         """
         SELECT DISTINCT l.trial_id
         FROM core.trial_document l
         JOIN core.document_current d ON d.id = l.document_id AND d.kind = ANY(%(kinds)s)
         JOIN core.file f ON f.sha256 = d.file_sha256 AND f.pages_extracted_at IS NOT NULL AND f.ocr_at IS NULL
+                        AND f.ocr_error IS NULL
         WHERE l.removed_at IS NULL AND l.trial_id = ANY(%(trials)s)
           AND (SELECT count(*) FROM core.page p WHERE p.file_sha256 = f.sha256) <= %(max_pages)s
           AND EXISTS (SELECT 1 FROM core.page p WHERE p.file_sha256 = f.sha256 AND p.letters < %(min_letters)s)
@@ -1343,6 +1345,16 @@ def _save_looks(conn: psycopg.Connection, sha256: bytes, looks: Mapping[int, Pag
             copy.write_row((sha256, page_no, look.is_picture, look.text, extractor))
 
 
+def save_ocr_error(conn: psycopg.Connection, sha256: bytes, error: str, lasting: bool) -> None:
+    """Why OCR of a file failed (core.file.ocr_error); a `lasting` failure (the file's own) also marks it as
+    looked at, so no pass takes it again by itself."""
+    conn.execute(
+        "UPDATE core.file SET ocr_error = %s, ocr_at = CASE WHEN %s THEN clock_timestamp() ELSE ocr_at END "
+        "WHERE sha256 = %s",
+        (error, lasting, sha256),
+    )
+
+
 def save_page_looks(conn: psycopg.Connection, sha256: bytes, looks: Mapping[int, PageLook]) -> list[int]:
     """Store what OCR made of a file's pages read before it ran (core.page_ocr), and mark the file as looked
     at; returns the trials linked to the file whose page text changed (a picture's text was read), to
@@ -1350,7 +1362,7 @@ def save_page_looks(conn: psycopg.Connection, sha256: bytes, looks: Mapping[int,
     with conn.transaction():
         if looks:
             _save_looks(conn, sha256, looks)
-        conn.execute("UPDATE core.file SET ocr_at = clock_timestamp() WHERE sha256 = %s", (sha256,))
+        conn.execute("UPDATE core.file SET ocr_at = clock_timestamp(), ocr_error = NULL WHERE sha256 = %s", (sha256,))
         if not any(look.text is not None for look in looks.values()):
             return []
         rows = conn.execute(

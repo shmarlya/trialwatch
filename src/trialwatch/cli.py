@@ -395,8 +395,8 @@ def source_ocr(
     if changed_to is not None:
         changed_to.write_text("".join(f"{names[trial_id]}\n" for trial_id in sorted(result.trial_ids)))
         typer.echo(f"their EU CT numbers: {changed_to}")
-    _echo_failures(result.failed)
-    if result.failed:
+    _echo_failures({**result.failed, **result.lasting})
+    if result.failed or result.lasting:
         raise typer.Exit(1)
 
 

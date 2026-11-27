@@ -94,7 +94,10 @@ once). The first refresh after the release that brought OCR had about 1,300 such
 sooner, by hand: `docker compose run --rm worker source ocr --all` (on Coolify, in the worker's terminal:
 `trialwatch source ocr --all`). A trial whose page text OCR changed has an outdated judgement, which the refresh
 checks again; a trial to be checked again only for other rules waits until OCR has looked at its files, so it
-is not paid for twice.
+is not paid for twice. A file whose OCR fails is listed on the refresh's page (the refresh ends partial, and is
+not tried again for it) with the reason in `core.file.ocr_error`: a failure of the file itself (tesseract can't
+read a page, or takes too long) is not tried again; another (the reader killed for memory) is, by the next
+refresh, after the files never tried. Either way no trial waits for that file before its check.
 
 **A release that changes the rules or the prompt** (`checks/requirement_sets/`, `checks/prompts/`) makes the
 refreshes after it check every judged trial again (about $0.015 a trial with Haiku): undecided ones first, held
@@ -210,7 +213,9 @@ How a job ends: **succeeded**, everything done; **partial**, it ran to its end b
 trial whose transfer still failed on the last attempt, a check call that failed, or a file or answer left to a
 person, which is never tried again); **failed**, it could not run as a whole (a crash, the database or the network
 gone, a source whose list could not be read, a refresh step that broke, an error a retry can't fix); or
-**cancelled**. A partial or failed job's page lists what did not succeed, each with a button to do it again. A job whose worker died (no heartbeat for 5 minutes) goes back to the
+**cancelled**. A partial or failed job's page lists what did not succeed, each with a button to do it again;
+partial jobs are listed under Ended, not in the staff banner (what they left is often for good: a file the source
+publishes broken). A job whose worker died (no heartbeat for 5 minutes) goes back to the
 queue. Jobs can be cancelled; a running one stops after the trial or page it is on, and what it did so far is kept.
 A long transfer says every 50 trials how long a trial takes and about how long is left. A job's page shows how
 far it is (trials done of trials to do, a percentage, how long it has run and about how long is left; transfers,
@@ -218,7 +223,7 @@ checks and tagging count their trials, written with the heartbeat), its lines 20
 follows a running job; "only what went wrong" keeps the lines about failures), and after an attempt what failed,
 trial by trial: each with its page (Inspect) and a button that does it again (a transfer of that trial, every
 document downloaded again, or a check with the same setup), and for a transfer one that redoes them all.
-`/admin/jobs` lists them by status, with the failed, partial and held ones first (every staff page shows a banner while
+`/admin/jobs` lists them by status, with the failed and held ones first (every staff page shows a banner while
 there are any), their errors and their progress per attempt; an admin can try one again.
 
 **Schedules** (`jobs.schedule`) start switched off: an admin starts or stops one and sets how often it runs (daily,

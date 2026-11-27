@@ -739,6 +739,35 @@ def test_ocr_past_its_time_leaves_the_files_for_another_pass(conn, monkeypatch):
     assert (stopped.files, stopped.left) == (0, 1)
 
 
+def test_ocr_that_fails_is_recorded_and_no_trial_waits_for_it(conn, monkeypatch):
+    from trialwatch.trials import ocr, pages
+
+    trial = seed(conn, pages_with(["", ""]))
+    sha = trial_file(conn, trial)
+    monkeypatch.setattr(ocr, "ocr_available", lambda: True)
+
+    def failing(error):
+        def read_in_children(files, *args, **kwargs):
+            for file in files:
+                yield pages.Read(file, error=error)
+
+        return read_in_children
+
+    # killed for memory: may pass, so tried again by the next pass; the trial no longer waits for it
+    monkeypatch.setattr(pages, "read_in_children", failing(pages.FileNotRead("killed, most likely out of memory")))
+    result = pages.ocr_missing(conn, [trial])
+    assert (list(result.failed.values()), result.lasting) == (["killed, most likely out of memory"], {})
+    assert core.files_for_ocr(conn, [trial], None, 1000, 200) == [sha]
+    assert core.trials_waiting_for_ocr(conn, [trial], ["results-summary"], 1000, 200) == set()
+    # tesseract can't read a page of it: the file's own, so it is not taken again
+    monkeypatch.setattr(pages, "read_in_children", failing(pages.UnreadableFile("TimeoutExpired: tesseract")))
+    result = pages.ocr_missing(conn, [trial])
+    assert (result.failed, list(result.lasting.values())) == ({}, ["TimeoutExpired: tesseract"])
+    assert core.files_for_ocr(conn, [trial], None, 1000, 200) == []
+    error = conn.execute("SELECT ocr_error FROM core.file WHERE sha256 = %s", (sha,)).fetchone()[0]
+    assert error == "TimeoutExpired: tesseract"
+
+
 def test_negative_in_retrieved_pages_is_asked_again_and_a_failed_widening_is_an_error(conn):
     trial = seed(conn, pages_with(APPENDIX))
     client = FakeClient(GOOD, api_error(anthropic.InternalServerError, "overloaded"))

@@ -200,7 +200,8 @@ def test_items_that_still_fail_on_the_last_attempt_make_the_job_partial(app_conn
     job = jobs_db.job(app_conn, job_id)
     assert (job.status, job.attempts) == ("partial", 2)
     assert job.finished_at is not None and job.last_error.startswith("1 failed: 2024-000001-01-00")
-    assert jobs_db.needing_attention(app_conn) == 1
+    # listed under Ended, not in the staff banner: what it left may be for good
+    assert jobs_db.needing_attention(app_conn) == 0
     # an admin tries it once more
     assert jobs_db.retry_now(app_conn, job_id)
 
@@ -504,6 +505,24 @@ def test_the_refresh_runs_ocr_before_its_checks_and_rechecks_wait_for_it(app_con
     done = refresh_job(app_conn)
     work(app_conn, monkeypatch)
     assert jobs_db.job(app_conn, done).result["check"]["trials"] == 2
+
+
+def test_ocr_that_fails_in_the_refresh_makes_it_partial_and_is_not_tried_again_with_it(app_conn, fake_world,
+                                                                                    monkeypatch):
+    from trialwatch.jobs import refresh
+    from trialwatch.trials import pages
+
+    def ocr_failing(conn, trial_ids, kinds, progress=None, readers=None, seconds=None, should_stop=None):
+        return pages.OcrResult(failed={"aaa": "killed, most likely out of memory"},
+                               lasting={"bbb": "TimeoutExpired: tesseract"})
+
+    monkeypatch.setattr(refresh.ocr, "ocr_available", lambda: True)
+    monkeypatch.setattr(refresh.pages, "ocr_missing", ocr_failing)
+    job_id = refresh_job(app_conn)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert (job.status, job.attempts) == ("partial", 1), job.last_error
+    assert set(job.failures) == {"ocr, aaa", "ocr, bbb"}
 
 
 def test_the_refresh_does_not_pay_again_for_a_check_that_failed_for_a_lasting_reason(app_conn, fake_world,
@@ -940,7 +959,7 @@ def test_a_partial_job_says_what_did_not_succeed_in_the_list(app_conn, admin_cli
     job_id = queue(app_conn, "transfer", {"source": "ctis", "keys": ["2025-000001-01-00"]}, actor="admin@test.example")
     jobs_db.record_attempt(app_conn, job_id, {"2025-000001-01-00/file 9626e32b175a": "the file is cut short"}, (1, 1))
     jobs_db.finish(app_conn, job_id, "partial", {}, "1 left to a person")
-    for tab in ("ended", "attention"):
-        page = admin_client.get(f"/admin/jobs?tab={tab}").text
-        assert f'<a href="/jobs/{job_id}#failed">1 did not succeed</a>' in page
+    page = admin_client.get("/admin/jobs?tab=ended").text
+    assert f'<a href="/jobs/{job_id}#failed">1 did not succeed</a>' in page
+    assert "needs attention" not in page
     assert "What did not succeed" in admin_client.get(f"/jobs/{job_id}").text

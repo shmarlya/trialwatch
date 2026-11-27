@@ -939,6 +939,7 @@ CREATE TABLE core.file (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     created_by bigint NOT NULL,
     ocr_at timestamp with time zone,
+    ocr_error text,
     CONSTRAINT file_check CHECK ((size_bytes = length(content))),
     CONSTRAINT file_sha256_check CHECK ((length(sha256) = 32)),
     CONSTRAINT file_text_fingerprint_check CHECK ((length(text_fingerprint) = 32))
@@ -3845,4 +3846,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20261125110000'),
     ('20261125120000'),
     ('20261126100000'),
-    ('20261127100000');
+    ('20261127100000'),
+    ('20261127110000');

@@ -12,8 +12,9 @@ from psycopg.types.json import Jsonb
 
 # A job in one of these has ended
 ENDED = ("succeeded", "partial", "failed", "cancelled")
-# ... and in one of these someone should look at it
-NEEDS_ATTENTION = ("failed", "partial", "held")
+# ... and in one of these someone should look at it (the staff banner). Not partial: what it left undone is
+# listed on its page, often for good (a file the source publishes broken), so a retry can't clear it
+NEEDS_ATTENTION = ("failed", "held")
 
 
 @dataclass(frozen=True)

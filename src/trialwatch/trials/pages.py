@@ -286,13 +286,17 @@ def _child_looks(sha256: bytes, answer: Connection) -> None:
             content = core.file_content(conn, sha256)
             layer = core.pages_under_letters(conn, sha256, ocr.MIN_LETTERS)
         size = len(content)
-        looks = ocr.look_at_pages(content, sorted(layer), config.ocr_languages())
-        stored = page_looks(layer, looks, ocr.extractor())
-    except MemoryError as exc:
+    except Exception as exc:  # the database, not the file: tried again later
         answer.send(("failed", f"{type(exc).__name__}: {exc}", _measures(size, started)))
         return
-    except Exception as exc:  # the parent records the message
+    try:
+        looks = ocr.look_at_pages(content, sorted(layer), config.ocr_languages())
+        stored = page_looks(layer, looks, ocr.extractor())
+    except MemoryError as exc:  # not the file's fault: tried again later
         answer.send(("failed", f"{type(exc).__name__}: {exc}", _measures(size, started)))
+        return
+    except Exception as exc:  # the file's (tesseract can't read a page, or takes too long): lasting
+        answer.send(("error", f"{type(exc).__name__}: {exc}", _measures(size, started)))
         return
     answer.send(("pages", stored, _measures(size, started)))
 
@@ -517,7 +521,11 @@ class OcrResult:
     image_pages: int = 0
     read_pages: int = 0
     trial_ids: set[int] = field(default_factory=set)
+    # files whose OCR failed for a reason that may pass (the process reading it killed): tried again by the
+    # next pass, after the others
     failed: dict[str, str] = field(default_factory=dict)
+    # files whose OCR failed for the file's own reason: not tried again (core.file.ocr_error)
+    lasting: dict[str, str] = field(default_factory=dict)
     # files left for another pass (a deadline, or a stop)
     left: int = 0
 
@@ -563,8 +571,13 @@ def ocr_missing(
 def _save_ocr(conn: psycopg.Connection, result: OcrResult, outcome: Read, progress: Progress) -> None:
     short_sha = outcome.sha256.hex()[:12]
     if outcome.error is not None:
-        result.failed[short_sha] = str(outcome.error)
-        report(progress, f"{short_sha}: failed: {result.failed[short_sha]}")
+        lasting = isinstance(outcome.error, UnreadableFile)
+        core.save_ocr_error(conn, outcome.sha256, str(outcome.error), lasting)
+        if lasting:
+            result.lasting[short_sha] = str(outcome.error)
+        else:
+            result.failed[short_sha] = str(outcome.error)
+        report(progress, f"{short_sha}: failed: {outcome.error}")
         return
     stored = outcome.looks or {}
     changed = core.save_page_looks(conn, outcome.sha256, stored)

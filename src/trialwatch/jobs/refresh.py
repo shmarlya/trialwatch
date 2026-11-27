@@ -77,8 +77,11 @@ def _ocr(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
                               should_stop=ctx.should_stop)
     ctx.add(f"{found.files} files looked at: {found.image_pages} picture pages, {found.read_pages} read by OCR; "
             f"page text changed in {len(found.trial_ids)} trials; {found.left} files left for a later refresh")
+    # a file whose OCR failed is shown, never a reason to try the refresh again: the next refresh tries
+    # again what may pass (core.file.ocr_error), and a trial does not wait for it
     return Outcome({"files": found.files, "picture_pages": found.image_pages, "read_pages": found.read_pages,
-                    "trials_changed": len(found.trial_ids), "left": found.left}, dict(found.failed))
+                    "trials_changed": len(found.trial_ids), "left": found.left}, {},
+                   {**found.failed, **found.lasting})
 
 
 def _check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:

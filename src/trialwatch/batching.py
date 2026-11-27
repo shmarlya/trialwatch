@@ -33,8 +33,10 @@ from trialwatch.llm import CallResult, MessagesClient
 
 log = logging.getLogger("trialwatch.batching")
 
-# Characters per input token, to estimate what a batch will cost before it is sent
-CHARS_PER_TOKEN = 4
+# Characters per input token, to estimate what a batch will cost before it is sent: trial documents (tables,
+# numbers, other languages) measured about 2.6 (2026-11-27, live run); lower is safer for the cap, and it
+# matters most near a long-prompt price tier
+CHARS_PER_TOKEN = 2.5
 # Output tokens counted per request in that estimate (answers with their thinking run to a few thousand)
 OUTPUT_ALLOWANCE = 3000
 # How often a run waiting on its batch in the foreground (the command line) asks Anthropic, in seconds
@@ -124,7 +126,7 @@ def estimate(pending: list[llm.PendingRequest]) -> Decimal:
     total = Decimal(0)
     for request in pending:
         characters = len(json.dumps(request.request.get("messages", []))) + len(str(request.request.get("system", "")))
-        input_tokens = characters // CHARS_PER_TOKEN
+        input_tokens = int(characters / CHARS_PER_TOKEN)
         cost = llm.price_tokens(request.request.get("model", ""), input_tokens, OUTPUT_ALLOWANCE, batch=True)
         if cost.cost_usd is not None:
             total += cost.cost_usd

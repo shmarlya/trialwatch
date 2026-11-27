@@ -981,7 +981,6 @@ def _finish_batched_run(conn: psycopg.Connection, run_id: int, state: dict, prog
     checks_db.finish_run(conn, run_id, status=status, error=None, trials=len(judgements),
                          errors=len(summary.failed))
     summary.published = publishing.publish_run(conn, run_id)
-    report(progress, summary.summary())
     report(progress, f"published {len(summary.published)} of {len(judgements)} judgements, each with how "
                      f"judgements of its kind agreed with the gold datasets")
     return summary

@@ -359,6 +359,29 @@ def test_batch_errors_are_tried_again_later():
     assert not is_transient("BatchInvalidRequest: max_tokens: too large")
 
 
+def test_a_rate_limit_in_a_batch_is_sent_again():
+    from types import SimpleNamespace
+
+    from trialwatch import llm
+    from trialwatch.jobs.retry import is_transient
+
+    def errored(error_type, message):
+        return SimpleNamespace(
+            type="errored", error=SimpleNamespace(error=SimpleNamespace(type=error_type, message=message))
+        )
+
+    limited = llm.batch_error(
+        errored(
+            "invalid_request_error",
+            "Grammar compilation rate limit exceeded. Organization x exceeded limit: 50 compilations per minute.",
+        )
+    )
+    assert limited.startswith("BatchErrored: invalid_request_error: Grammar compilation rate limit")
+    assert limited.startswith(llm.RESENDABLE) and is_transient(limited)
+    invalid = llm.batch_error(errored("invalid_request_error", "max_tokens: too large"))
+    assert invalid == "BatchInvalidRequest: max_tokens: too large" and not is_transient(invalid)
+
+
 def test_the_estimate_reads_text_as_written_and_pdfs_by_size():
     bulgarian = "Резултати от клиничното изпитване" * 100
     request = {"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": bulgarian}]}

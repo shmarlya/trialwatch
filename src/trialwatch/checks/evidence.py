@@ -309,7 +309,7 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
     first = pages_to_send_first(pages, per_question)
     whole_first = len(first) == len(pages)
     first_request = build_request(settings, prompt, first, questions, context)
-    call, call_answers = ask(client, first_request)
+    call, call_answers = ask(client, first_request, question_keys(questions))
     trace.add("call", tracing.call_data(1, settings, first, questions), call.duration_ms)
     count_call(result, 1, call, request_for_trace(first_request))
     if call.error:
@@ -339,7 +339,7 @@ def _ask_with_text(conn: psycopg.Connection, client: MessagesClient, settings: S
                                question_keys(retry), "pages": tracing.page_refs(widened_pages)})
     if retry and widened_pages:
         second_request = build_request(settings, prompt, widened_pages, retry, context)
-        again, again_answers = ask(client, second_request)
+        again, again_answers = ask(client, second_request, question_keys(retry))
         trace.add("call", tracing.call_data(2, settings, widened_pages, retry), again.duration_ms)
         count_call(result, 2, again, request_for_trace(second_request))
         if again.error:
@@ -395,7 +395,7 @@ def _ask_with_files(conn: psycopg.Connection, client: MessagesClient, settings: 
         if file.document_version_id not in result.document_versions:
             result.document_versions.append(file.document_version_id)
     request = build_files_request(settings, prompt, sendable, questions, context)
-    call, call_answers = ask(client, request)
+    call, call_answers = ask(client, request, question_keys(questions))
     trace.add("call", tracing.call_data(1, settings, pages, questions, sendable), call.duration_ms)
     count_call(result, 1, call, request_for_trace(request, sendable))
     if call.error:

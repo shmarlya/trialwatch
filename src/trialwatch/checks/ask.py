@@ -56,11 +56,14 @@ def render_pages(pages: list[Page]) -> str:
     return "\n".join(parts)
 
 
-def answer_schema(keys: list[str]) -> dict:
+def answer_schema() -> dict:
+    """The answers' JSON schema: the same for every request, so Anthropic compiles its grammar once. A
+    trial's question keys are not in it (an enum of them made each trial's schema new, and a batch of them
+    ran into the limit on grammar compilations per minute); ask() keeps only the keys it asked."""
     item = {
         "type": "object",
         "properties": {
-            "key": {"type": "string", "enum": keys},
+            "key": {"type": "string"},
             "found": {"type": "string", "enum": list(FOUND_ANSWERS)},
             "quote": {"type": "string"},
             "document": {"type": "integer"},
@@ -148,7 +151,7 @@ def _questions_text(questions: list[Question]) -> str:
 def _request(settings: Settings, prompt: Prompt, questions: list[Question], content: str | list[dict]) -> dict:
     """What every call of the check sends, whatever the documents are: the setup's model and effort, the
     system prompt, adaptive thinking, and the answers as JSON in the schema of these questions."""
-    schema = answer_schema(question_keys(questions))
+    schema = answer_schema()
     request: dict[str, Any] = {
         "model": settings.model,
         "max_tokens": settings.max_tokens,
@@ -213,8 +216,9 @@ def request_for_trace(request: dict, files: list[core.TrialFile] | None = None) 
     return sent
 
 
-def ask(client: MessagesClient, request: dict) -> tuple[CallResult, dict[str, dict]]:
-    """One model call of the check (trialwatch.llm.call), and the answer to each question by its key."""
+def ask(client: MessagesClient, request: dict, keys: list[str]) -> tuple[CallResult, dict[str, dict]]:
+    """One model call of the check (trialwatch.llm.call), and the answer to each question by its key.
+    `keys` are the questions asked: an answer under any other key is dropped."""
     result = llm.call(client, request, OPERATION)
     answers = {}
     if result.error is not None:
@@ -223,6 +227,8 @@ def ask(client: MessagesClient, request: dict) -> tuple[CallResult, dict[str, di
         parsed = json.loads(result.raw_text)
         for answer in parsed["answers"]:
             key = answer["key"]
+            if key not in keys:
+                continue
             if key not in answers:
                 answers[key] = answer
             elif _differs(answers[key], answer):

@@ -160,7 +160,19 @@ run" to send. A trial can be checked again, also with another setup to compare r
 with the default setup, the trials never judged or whose judgement is outdated ([operations](operations.md#jobs-the-worker-and-the-refresh)).
 
 The command line, the worker's check job and the gold evaluation all run a check the same way (`run` in
-`checks/evidence.py`), and a dry run shows the same preview everywhere. Only what happens to a trial whose evidence
+`checks/evidence.py`), and a dry run shows the same preview everywhere.
+
+**In batches** ([ADR-009](adr/ADR-009-model-calls-in-batches.md)). A setup's `mode` says how its calls go: `batch`
+(every setup today) sends them as an Anthropic Message Batch, at half price, answered within 24 hours (usually
+within the hour); `direct` calls the model at once, at list price. A check job in batch mode goes in rounds
+(`run_batched`): it sends the first call of every trial in one batch and waits (job and run status `waiting`)
+while the worker does other jobs; once Anthropic has answered, it goes through its trials again with the batch's
+answers in place of the model (`llm.BatchReplay`), so each trial is judged by the same steps as a direct check.
+A trial whose widening call is still unanswered goes into a second batch. A refusal in a batch is asked again
+directly, with the server-side fallback (batches can't ask for it); a request a batch did not answer (errored,
+expired) is sent again, three times in all. A trial whose evidence changed between rounds asks anew; the answer it
+no longer needs is recorded as unused. On the site, tick "now, at list price" for a check you want answered at once;
+on the command line, `--direct` (`--batch` waits here for the batches). Only what happens to a trial whose evidence
 is not complete and current differs, by who chose it: a trial a person asked for is refused before anything is sent,
 with why; a trial TrialWatch chose (the refresh) or a gold evaluation took is left out, and the run's summary says
 why. With no trial left, no run is started.
@@ -177,7 +189,8 @@ why. With no trial left, no run is started.
 | `checks/requirements.py`, `requirement_sets/` | requirement sets and their rules |
 | `checks/settings.py`, `configs/` | setups |
 | `checks/prompts/` | the system prompts and loading them |
-| `llm.py` (shared) | the model call and its cost |
+| `llm.py` (shared) | the model call and its cost; Message Batches: sending, asking about, reading their answers (`BatchReplay`) |
+| `batching.py` (shared) | a run's rounds of batches: their answers, unused answers recorded, the cost estimate checked against the cap, sending |
 | `checks/publishing.py` | publication and its gold agreement |
 | `checks/routes.py`, `checks/views.py` | the run, prompts and requirements pages, withdrawing a judgement; the trace as the trial page shows it |
 | `gold/converters/due_date.py` | due-date rules (the Bruckner converter uses them) |
@@ -206,7 +219,7 @@ erDiagram
 
 | Table | What it holds |
 |---|---|
-| `checks.run` | one check run: who ran it, model, effort, prompt and requirement set (name, sha256, text as sent), params (method, top_k, …), status (running, succeeded, failed, stopped) and why it ended early, counts, job; its tokens and cost are its calls' (`core.llm_call`) |
+| `checks.run` | one check run: who ran it, model, effort, prompt and requirement set (name, sha256, text as sent), params (method, top_k, mode, …), status (running, waiting on a batch, succeeded, failed, stopped) and why it ended early, counts, job; its tokens and cost are its calls' (`core.llm_call`) |
 | `checks.answer` | each question a run asked about a trial (`participants`, `cancelled`, `endpoint:<registered id>`, …): the registered item it is about, the pages shown, whether it was asked again with every page; and the model's answer, if it gave one (`evidence_id`, which the rules trace names): found (true, false, NULL = don't know), kind (numeric_result, narrative_only, chart_only, redacted, not_analysed, not_conducted, partial_result, other), the quote, document version, file sha256 and page, and whether the quote is really on that page |
 | `checks.judgement` | the rules' verdict per trial per run: label (full, not full, undecided; NULL only with an error), parts by name (NULL = undecided), the rule and evidence behind each, the inputs read (trial record, document versions), the models that served it (its rules' trace is its rules step; its tokens and cost its calls'); its `agreement` with gold labels, recorded as its run finished; and its withdrawal by staff (at, by, the reason shown to all; audited) |
 | `checks.step` | the trace of one trial in one run: questions, pages, retrieval, call (naming its `core.llm_call`), widening, verification, rules, error, each with its data |
@@ -215,5 +228,6 @@ erDiagram
 ## Claude API
 
 `POST https://api.anthropic.com/v1/messages`, with the API key from `.env`: the page text or PDFs, the questions
-and the system prompt. Anthropic only, through its SDK. Every call is a `core.llm_call` row, its billed attempts priced
-([spend](operations.md#spend)).
+and the system prompt. Anthropic only, through its SDK. In batch mode the same requests go to
+`POST /v1/messages/batches` (without the `fallbacks` parameter, which batches refuse). Every call is a `core.llm_call`
+row, its billed attempts priced ([spend](operations.md#spend)).

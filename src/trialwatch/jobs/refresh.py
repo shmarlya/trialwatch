@@ -40,6 +40,7 @@ from trialwatch.jobs import PRIORITY_AUTOMATIC
 from trialwatch.jobs import steps
 from trialwatch.jobs.retry import PermanentError, is_transient
 from trialwatch.jobs.steps import Context, Outcome
+from trialwatch.search import annotate
 from trialwatch.sources import registry
 from trialwatch.trials import ocr, pages, readiness
 
@@ -86,6 +87,17 @@ def _ocr(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
     return Outcome({"files": found.files, "picture_pages": found.image_pages, "read_pages": found.read_pages,
                     "trials_changed": len(found.trial_ids), "left": found.left}, {},
                    {**found.failed, **found.lasting})
+
+
+def _annotate(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
+    """Tag the recruiting trials not tagged for their current profile: here, or, with calls in batches,
+    as a job of its own."""
+    settings = annotate.load_settings()
+    if settings.mode != "batch" or ctx.foreground:
+        return steps.run_annotate(ctx, conn, params)
+    chosen = steps.trials_to_tag(conn, ctx, params, settings)
+    ctx.add(f"{len(chosen)} trials to tag with {settings.model} (effort {settings.effort})")
+    return queue_step(ctx, conn, "annotate", {"trial_ids": chosen}, len(chosen))
 
 
 def _check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
@@ -223,7 +235,7 @@ def run_refresh(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome
     ctx.watch_cap = ctx.automatic
     if ctx.should_stop():
         return _ended(result, failed, left)
-    _run(ctx, conn, "annotate", steps.run_annotate, {"every": True}, result, failed, left)
+    _run(ctx, conn, "annotate", _annotate, {"every": True}, result, failed, left)
     if ctx.should_stop():
         return _ended(result, failed, left)
     _run(ctx, conn, "check", _check, {"config": config_name}, result, failed, left)

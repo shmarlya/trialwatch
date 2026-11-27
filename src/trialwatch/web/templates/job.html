@@ -21,9 +21,10 @@
   {% if job.params.config %} · setup {{ job.params.config }}{% endif %}
 </p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+{% if job.status == "waiting" and batch %}<div class="alert info"><b>Waiting on Anthropic:</b> round {{ batch.round }}, {{ batch.request_count }} requests in batch <code class="small">{{ batch.provider_batch_id }}</code>, sent {{ when(batch.submitted_at) }}{% if batch.counts %} · {{ batch.request_count - batch.counts.get("processing", 0) }} answered so far{% endif %}. Calls in a batch cost half; Anthropic answers within 24 hours, and the job goes on by itself{% if job.wait_until %} (asked again {{ when(job.wait_until) }}){% endif %}.</div>{% endif %}
 {% if job.last_error and job.status != "succeeded" %}<div class="alert"><b>{% if job.status == "held" %}Held{% else %}Last error{% endif %}:</b> {{ job.last_error }}</div>{% endif %}
 <div class="actions">
-  {% if not job.ended and (can("job.stop.any") or job.actor == user.email) %}<form method="post" action="/jobs/{{ job.id }}/stop" id="stop"><button class="secondary" {% if job.cancel_requested %}disabled{% endif %}>{% if job.status == "running" %}Stop after the current item{% else %}Cancel{% endif %}</button></form>{% endif %}
+  {% if not job.ended and (can("job.stop.any") or job.actor == user.email) %}<form method="post" action="/jobs/{{ job.id }}/stop" id="stop"><button class="secondary" {% if job.cancel_requested %}disabled{% endif %}>{% if job.status == "running" %}Stop after the current item{% elif job.status == "waiting" %}Cancel its batch{% else %}Cancel{% endif %}</button></form>{% endif %}
   {% if job.status in ("failed", "partial", "cancelled", "held") and can("job.retry") %}<form method="post" action="/jobs/{{ job.id }}/retry"><button>{% if job.status == "held" %}Release now{% else %}Try again now{% endif %}</button></form>{% endif %}
 </div>
 {% if runs.check_runs or runs.ingest_runs %}

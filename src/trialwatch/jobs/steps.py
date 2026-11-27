@@ -304,12 +304,13 @@ def run_check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
                 ctx.add(f"  {question.key}")
         ctx.add("dry run: nothing was sent")
         return Outcome({"trials": len(trial_ids), "dry_run": True})
+    # a batched run going on from its batch's answers records them, whatever happens next (they are paid)
+    state = ctx.batch_state()
     # an automatic check never starts over the cap; it is held before anything is sent
-    if ctx.should_stop():
+    if not state and ctx.should_stop():
         return Outcome({"trials": 0})
     try:
         if settings.mode == "batch":
-            state = ctx.batch_state()
             found = evidence.run_batched(conn, anthropic_client(), trial_ids, settings, state, progress=ctx.add,
                                          should_stop=ctx.cancel_asked, unready=unready, capped=ctx.watch_cap,
                                          foreground=ctx.foreground)
@@ -348,7 +349,7 @@ def run_check(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
 
 # --- annotate (patient search, ADR-008) ----------------------------------------------------------
 
-def _trials_to_tag(conn: psycopg.Connection, ctx: Context, params: dict, settings: annotate.Settings) -> list[int]:
+def trials_to_tag(conn: psycopg.Connection, ctx: Context, params: dict, settings: annotate.Settings) -> list[int]:
     """The trials given, or every recruiting trial not tagged for its current profile (with
     `outdated_prompt`, also those tagged by an earlier prompt text); on a retry, only those still untagged."""
     prompt_sha = None
@@ -396,7 +397,9 @@ def _show_annotate_request(ctx: Context, conn: psycopg.Connection, settings: ann
 def run_annotate(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcome:
     """Tag trials with AI for patient search."""
     settings = annotate.load_settings()
-    chosen = _trials_to_tag(conn, ctx, params, settings)
+    if params.get("mode") in check_settings.MODES:
+        settings = dataclasses.replace(settings, mode=params["mode"])
+    chosen = trials_to_tag(conn, ctx, params, settings)
     ctx.add(f"{len(chosen)} trials to tag with {settings.model} (effort {settings.effort})")
     if not chosen:
         return Outcome({"trials": 0})
@@ -404,12 +407,26 @@ def run_annotate(ctx: Context, conn: psycopg.Connection, params: dict) -> Outcom
         _show_annotate_request(ctx, conn, settings, chosen[0])
         ctx.add("dry run: nothing was sent")
         return Outcome({"trials": len(chosen), "dry_run": True})
+    # a batched run going on from its batch's answers records them, whatever happens next (they are paid)
+    state = ctx.batch_state()
     # an automatic run never starts over the cap; it is held before anything is sent
-    if ctx.should_stop():
+    if not state and ctx.should_stop():
         return Outcome({"trials": 0})
     try:
-        summary = annotate.run(conn, anthropic_client(), chosen, settings, progress=ctx.add,
-                               should_stop=ctx.should_stop)
+        if settings.mode == "batch":
+            found = annotate.run_batched(conn, anthropic_client(), chosen, settings, state, progress=ctx.add,
+                                         should_stop=ctx.cancel_asked, capped=ctx.watch_cap,
+                                         foreground=ctx.foreground)
+            if isinstance(found, batching.Waiting):
+                return Outcome({"batch": state, "trials": len(state["trials"])}, waiting=found)
+            if isinstance(found, annotate.Held):
+                ctx.hold_reason = f"{CAP_REACHED}; its next batch may cost {llm.dollars(found.estimated_usd)}"
+                ctx.add(ctx.hold_reason)
+                return Outcome({"batch": state})
+            summary = found
+        else:
+            summary = annotate.run(conn, anthropic_client(), chosen, settings, progress=ctx.add,
+                                   should_stop=ctx.should_stop)
     except llm.BAD_CREDENTIALS as exc:
         raise PermanentError(f"{type(exc).__name__}: {exc}") from exc
     # only a failure that passes (an outage, a rate limit) is worth another attempt

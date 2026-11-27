@@ -215,7 +215,7 @@ Exam: F3 · P3 · cards 18
     - B. real-time calls on the cheapest model
     - C. real-time calls on the strongest model, no budget
 - **Needs:** S7 · full CTIS crawl
-- **Lab:** cost estimate from S7's run data; a batch path in the gateway.
+- **Lab:** cost estimate from S7's run data; a batch path in the gateway (built: ADR-009, `llm.py` batches and `batching.py`).
 - **Done when:** cost per trial and per run are written down, with an alert threshold.
 
 ### S12 Observability & safe change

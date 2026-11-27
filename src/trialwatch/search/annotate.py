@@ -20,9 +20,10 @@ from pathlib import Path
 
 import psycopg
 
-from trialwatch import llm
+from trialwatch import batching, llm
 from trialwatch.checks.prompts import Prompt, load_prompt
 from trialwatch.checks.verify import verify_in_text
+from trialwatch.db import batches as batches_db
 from trialwatch.db import geo as geo_db
 from trialwatch.db import search as search_db
 from trialwatch.db import vocab as vocab_db
@@ -52,13 +53,15 @@ class Settings:
     max_tokens: int
     max_languages: int
     max_candidates: int
+    # batch: the calls in Message Batches, at half price, answered within 24 hours (ADR-009); direct
+    mode: str = "batch"
 
 
 def load_settings() -> Settings:
     with SETTINGS_FILE.open(encoding="utf-8") as file:
         data = json.load(file)
     return Settings(data["model"], data["effort"], data["prompt"], data["max_tokens"], data["max_languages"],
-                    data["max_candidates"])
+                    data["max_candidates"], data["mode"])
 
 
 # --- what the model is sent ----------------------------------------------------------------------
@@ -438,3 +441,125 @@ def run(conn: psycopg.Connection, client: MessagesClient, trial_ids: list[int], 
     finally:
         search_db.finish_annotation_run(conn, run_id, status, error)
     return summary
+
+
+# --- a run in Message Batches (ADR-009) ------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Held:
+    """A batched run did not send its next batch: it may cost more than the spending cap leaves."""
+
+    estimated_usd: Decimal
+
+
+def run_batched(conn: psycopg.Connection, client: MessagesClient, trial_ids: list[int], settings: Settings,
+                state: dict, progress: Progress = None, should_stop: ShouldStop = None, capped: bool = False,
+                foreground: bool = False) -> "RunSummary | batching.Waiting | Held":
+    """run() with the calls in Message Batches, in rounds (batching.py): the same tags, saved the same
+    way. `state` is what earlier rounds kept (the run, its trials and counts), filled in here and kept by
+    the caller. Returns the run's summary when every trial is done, else the batch it waits on (the run
+    waits too), or Held when the next batch may take this month's spend over the cap (`capped`). In the
+    `foreground` it waits here for each batch."""
+    prompt = load_prompt(settings.prompt)
+    if "run_id" in state and not search_db.resume_annotation_run(conn, state["run_id"]):
+        report_line(progress, f"annotation run {state['run_id']} was closed while it waited: a new run starts")
+        state.clear()
+    if "run_id" not in state:
+        state["run_id"] = _start_run(conn, settings, prompt, trial_ids)
+        state["trials"] = list(trial_ids)
+        state["kept"] = 0
+        state["dropped"] = 0
+        state["failed"] = {}
+        report_line(progress, f"annotation run {state['run_id']} started: {len(trial_ids)} trials, calls in batches")
+    run_id = state["run_id"]
+    try:
+        while True:
+            outcome = _batched_round(conn, client, settings, prompt, state, progress, should_stop, capped)
+            if foreground and isinstance(outcome, batching.Waiting):
+                batching.wait_here(conn, client, outcome, progress)
+                continue
+            break
+    except BaseException as exc:
+        if foreground:
+            search_db.finish_annotation_run(conn, run_id, "failed", f"{type(exc).__name__}: {exc}")
+        else:
+            search_db.wait_annotation_run(conn, run_id)
+        raise
+    if not isinstance(outcome, bool):
+        search_db.wait_annotation_run(conn, run_id)
+        return outcome
+    status = "succeeded"
+    if outcome:
+        status = "stopped"
+    search_db.finish_annotation_run(conn, run_id, status, None)
+    summary = RunSummary(run_id=run_id, stopped=outcome)
+    # a trial tried and failed may have no annotation (no profile): it counts as tried all the same
+    tried = search_db.annotated_trials(conn, run_id)
+    for trial_id, problem in state["failed"].items():
+        summary.failed[int(trial_id)] = problem
+        tried.add(int(trial_id))
+    summary.trials = len(tried)
+    summary.tagged = summary.trials - len(summary.failed)
+    summary.kept = state["kept"]
+    summary.dropped = state["dropped"]
+    summary.cost_usd = batches_db.call_totals(conn, annotation_run_id=run_id).cost_usd
+    return summary
+
+
+def _start_run(conn: psycopg.Connection, settings: Settings, prompt: Prompt, trial_ids: list[int]) -> int:
+    return search_db.start_annotation_run(
+        conn, model=settings.model, effort=settings.effort, prompt=prompt.name, prompt_sha256=prompt.sha256,
+        prompt_text=prompt.text, params={"trials": len(trial_ids), "max_tokens": settings.max_tokens,
+                                         "max_languages": settings.max_languages,
+                                         "max_candidates": settings.max_candidates, "mode": settings.mode},
+    )
+
+
+def _batched_round(conn: psycopg.Connection, client: MessagesClient, settings: Settings, prompt: Prompt,
+                   state: dict, progress: Progress, should_stop: ShouldStop,
+                   capped: bool) -> "bool | batching.Waiting | Held":
+    """One round: the run's trials not tagged yet, from the answers of its batches; the requests still
+    unanswered go into the next batch. Returns whether it stopped, once nothing is left to send."""
+    run_id = state["run_id"]
+    batches = batches_db.batches_of_run(conn, annotation_run_id=run_id)
+    answers, sends, items, running = batching.answers(conn, client, batches, OPERATION)
+    if running is not None:
+        return batching.Waiting(running.id, running.provider_batch_id, running.round, running.request_count)
+    replay = llm.BatchReplay(answers, sends, client)
+    done = search_db.annotated_trials(conn, run_id)
+    stopped = False
+    for number, trial_id in enumerate(state["trials"], start=1):
+        if trial_id in done:
+            continue
+        if should_stop is not None and should_stop():
+            stopped = True
+            break
+        replay.begin(trial_id)
+        try:
+            kept, dropped, problem, _cost = annotate_trial(conn, replay, settings, prompt, run_id, trial_id)
+        except llm.Pending:
+            continue
+        state["kept"] += kept
+        state["dropped"] += dropped
+        line = f"{number}/{len(state['trials'])} trial {trial_id}: {kept} tags kept, {dropped} dropped"
+        if problem is not None:
+            state["failed"][str(trial_id)] = problem
+            line = f"{line}, {problem}"
+        report_line(progress, line)
+    batching.record_unused(conn, replay, items, OPERATION, annotation_run_id=run_id)
+    if stopped or not replay.pending:
+        return stopped
+    pending = list(replay.pending.values())
+    estimated = batching.estimate(pending)
+    if capped and batching.over_cap(conn, estimated):
+        return Held(estimated)
+    waiting = batching.submit(conn, client, pending, OPERATION, batching.next_round(batches), estimated,
+                              annotation_run_id=run_id)
+    report_line(progress, f"round {waiting.round}: {len(pending)} requests sent in batch "
+                          f"{waiting.provider_batch_id} (about {llm.dollars(estimated)})")
+    return waiting
+
+
+def report_line(progress: Progress, line: str) -> None:
+    if progress is not None:
+        progress(line)

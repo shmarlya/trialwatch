@@ -317,9 +317,7 @@ def wake_answered(queue: psycopg.Connection, client: llm.MessagesClient | None =
     for waiting in due:
         try:
             ended = _batch_ended(queue, client, waiting)
-        except llm.BAD_CREDENTIALS:
-            raise
-        except Exception as exc:  # Anthropic or the network: ask again later, the job keeps waiting
+        except Exception as exc:  # Anthropic, the network or its key: ask again later, the job keeps waiting
             log.warning("job %s: could not ask about batch %s (%s)", waiting.job_id, waiting.provider_batch_id, exc)
             jobs_db.check_later(queue, waiting.job_id, BATCH_CHECK_LATER)
             continue

@@ -156,6 +156,9 @@ class SpendTotals:
     # billed calls (an attempt priced or not), and attempts on a model missing from the price list
     calls: int
     unpriced_calls: int
+    # this month's calls answered in Message Batches (ADR-009): what they cost, and how many
+    batch_this_month: Decimal = Decimal(0)
+    batch_calls_this_month: int = 0
 
 
 def spend_totals(conn: psycopg.Connection) -> SpendTotals:
@@ -164,11 +167,13 @@ def spend_totals(conn: psycopg.Connection) -> SpendTotals:
         SELECT coalesce(sum(cost_usd), 0),
                coalesce(sum(cost_usd) FILTER (WHERE at >= date_trunc('month', now())), 0),
                coalesce(sum(cost_usd) FILTER (WHERE at >= now() - interval '30 days'), 0),
-               count(*) FILTER (WHERE attempts <> '[]'), coalesce(sum(unpriced_attempts), 0)::int
+               count(*) FILTER (WHERE attempts <> '[]'), coalesce(sum(unpriced_attempts), 0)::int,
+               coalesce(sum(cost_usd) FILTER (WHERE tier = 'batch' AND at >= date_trunc('month', now())), 0),
+               count(*) FILTER (WHERE tier = 'batch' AND at >= date_trunc('month', now()))
           FROM core.llm_call
         """
     ).fetchone()
-    return SpendTotals(row[0], row[1], row[2], row[3], row[4])
+    return SpendTotals(row[0], row[1], row[2], row[3], row[4], row[5], row[6])
 
 
 @dataclass(frozen=True)

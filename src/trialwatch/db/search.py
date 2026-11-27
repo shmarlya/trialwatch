@@ -649,3 +649,26 @@ def naive_count(conn: psycopg.Connection, words: Sequence[str], country: str | N
         params["country"] = country
     row = conn.execute(f"SELECT count(*) FROM core.source_listing l WHERE {' AND '.join(conditions)}", params).fetchone()
     return row[0]
+
+
+def wait_annotation_run(conn: psycopg.Connection, run_id: int) -> None:
+    """The run waits on a Message Batch (ADR-009)."""
+    conn.execute("UPDATE search.annotation_run SET status = 'waiting' WHERE id = %s AND status = 'running'", (run_id,))
+
+
+def resume_annotation_run(conn: psycopg.Connection, run_id: int) -> bool:
+    """Take a waiting (or running) run back: running again. False when it has been closed."""
+    cursor = conn.execute(
+        "UPDATE search.annotation_run SET status = 'running' WHERE id = %s AND status IN ('running', 'waiting')",
+        (run_id,),
+    )
+    return cursor.rowcount == 1
+
+
+def annotated_trials(conn: psycopg.Connection, run_id: int) -> set[int]:
+    """The trials the run has an annotation for (tagged, or failed)."""
+    rows = conn.execute("SELECT trial_id FROM search.annotation WHERE run_id = %s", (run_id,)).fetchall()
+    found = set()
+    for row in rows:
+        found.add(row[0])
+    return found

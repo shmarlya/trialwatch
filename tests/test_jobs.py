@@ -477,7 +477,9 @@ def test_the_refresh_checks_again_what_other_rules_or_another_prompt_judged(app_
 
     # the same rules, written differently: nothing to check
     reformatted = json.dumps(json.loads(current.text), indent=4, sort_keys=True)
-    assert with_rules(reformatted).result["check"]["trials"] == 0
+    found = with_rules(reformatted)
+    assert "check" in found.result, (found.last_error, line_texts(app_conn, found.id)[-15:])
+    assert found.result["check"]["trials"] == 0
     # other rules: both trials again
     changed = json.loads(current.text)
     changed["description"] = changed["description"] + " Changed."
@@ -996,3 +998,102 @@ def test_a_partial_job_says_what_did_not_succeed_in_the_list(app_conn, admin_cli
     assert f'<a href="/jobs/{job_id}#failed">1 did not succeed</a>' in page
     assert "needs attention" not in page
     assert "What did not succeed" in admin_client.get(f"/jobs/{job_id}").text
+
+
+# --- jobs waiting on a Message Batch (ADR-009) -----------------------------------------------------
+
+def test_a_waiting_job_lets_the_worker_run_others(app_conn, fake_world, monkeypatch):
+    fake, model = fake_world
+    trial = seed(app_conn)
+    model.client.batches.polls_before_end = 1
+    check = queue(app_conn, "check", {"trial_ids": [trial], "config": "default"})
+    sync = queue(app_conn, "sync", {"source": "ctis"}, priority=200)
+    assert worker.run(once=True) == 2
+    assert jobs_db.job(app_conn, check).status == "waiting"
+    assert jobs_db.job(app_conn, sync).status == "succeeded"
+    run = app_conn.execute("SELECT status FROM checks.run WHERE job_id = %s", (check,)).fetchone()
+    assert run == ("waiting",)
+    # its batch is not answered yet: asked about again later
+    assert answer_batches(app_conn) == []
+    job = jobs_db.job(app_conn, check)
+    assert job.status == "waiting" and job.wait_until > datetime.now(UTC)
+    # then it is, and the job goes on
+    assert answer_batches(app_conn) == [check]
+    worker.run(once=True)
+    job = jobs_db.job(app_conn, check)
+    assert (job.status, job.attempts, job.waiting_on) == ("succeeded", 1, None)
+    assert "batch" not in job.result
+
+
+def test_a_waiting_job_cancelled_cancels_its_batch_and_keeps_what_was_answered(app_conn, fake_world, monkeypatch):
+    fake, model = fake_world
+    trial = seed(app_conn)
+    model.client.batches.polls_before_end = 1
+    job_id = queue(app_conn, "check", {"trial_ids": [trial], "config": "default"})
+    worker.run(once=True)
+    assert jobs_db.request_cancel(app_conn, job_id) == "waiting"
+    answer_batches(app_conn)
+    assert model.client.batches.cancelled == ["msgbatch_1"]
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "cancelled"
+    # the answer it had paid for is recorded, though no trial was judged from it
+    calls = app_conn.execute("SELECT request ? 'unused', tier FROM core.llm_call WHERE job_id = %s",
+                             (job_id,)).fetchall()
+    assert calls == [(True, "batch")]
+    run = app_conn.execute("SELECT status FROM checks.run WHERE job_id = %s", (job_id,)).fetchone()
+    assert run == ("stopped",)
+
+
+def test_an_automatic_check_is_held_before_a_batch_the_cap_cannot_pay(app_conn, fake_world, monkeypatch):
+    fake, model = fake_world
+    trial = seed(app_conn)
+    costs_db.set_monthly_cap(app_conn, Decimal("0.000001"))
+    job_id = queue(app_conn, "check", {"trial_ids": [trial], "config": "default"}, actor=db.SYSTEM_ACTOR,
+                   automatic=True)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "held" and job.last_error.startswith(steps.CAP_REACHED)
+    assert model.client.batches.sent == []
+    costs_db.set_monthly_cap(app_conn, None)
+    worker.housekeeping(app_conn)
+    work(app_conn, monkeypatch)
+    job = jobs_db.job(app_conn, job_id)
+    assert job.status == "succeeded", job.last_error
+    # the same run went on
+    assert len(jobs_db.runs_of(app_conn, job_id).check_runs) == 1
+
+
+def test_the_refresh_queues_no_second_check_while_one_is_open(app_conn, fake_world, monkeypatch):
+    fake, model = fake_world
+    model.client.batches.polls_before_end = 100
+    first = refresh_job(app_conn)
+    worker.run(once=True)
+    check_job = jobs_db.job(app_conn, first).result["check"]["queued_job"]
+    assert jobs_db.job(app_conn, check_job).status == "waiting"
+    second = refresh_job(app_conn)
+    worker.run(once=True)
+    result = jobs_db.job(app_conn, second).result["check"]
+    assert result["open_job"] == check_job and "queued_job" not in result
+
+
+def test_staff_see_a_waiting_job_its_batch_and_what_batches_saved(app_conn, fake_world, monkeypatch, admin_client):
+    fake, model = fake_world
+    trial = seed(app_conn)
+    model.client.batches.polls_before_end = 1
+    # a person may want the answers now, at list price
+    response = admin_client.post("/jobs", data={"step": "evidence", "trial_ids": [str(trial)], "now": "true"},
+                                 follow_redirects=False)
+    assert response.status_code == 303
+    now_job = jobs_db.recent_jobs(app_conn)[0]
+    assert now_job.params["mode"] == "direct"
+    jobs_db.finish(app_conn, now_job.id, "cancelled", {})
+    job_id = queue(app_conn, "check", {"trial_ids": [trial], "config": "default"})
+    worker.run(once=True)
+    page = admin_client.get(f"/jobs/{job_id}").text
+    assert "Waiting on Anthropic:" in page and "msgbatch_1" in page and "Cancel its batch" in page
+    answer_batches(app_conn)
+    answer_batches(app_conn)
+    worker.run(once=True)
+    spend = admin_client.get("/admin/spend").text
+    assert "In batches this month" in spend and "1 calls, about $0.0000 saved" in spend

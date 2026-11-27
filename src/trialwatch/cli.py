@@ -3,6 +3,7 @@ evidence), the evidence check (ADR-004), the gold datasets (ADR-003) and the web
 (ADR-006). Every command reads .env
 first, so outside compose it uses the same database and API key as the web interface."""
 
+import dataclasses
 import json
 import signal
 import subprocess
@@ -584,6 +585,11 @@ def search_annotate(
     ] = False,
     limit: Annotated[int | None, typer.Option(min=1, help="Tag at most this many trials")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would be sent for the first trial; call nothing")] = False,
+    direct: Annotated[
+        bool | None,
+        typer.Option("--direct/--batch", help="Call the model directly (list price) or in Message Batches (half "
+                     "price, answered within 24 hours, waited for here); default: annotate.json's mode"),
+    ] = None,
 ) -> None:
     """Tag recruiting trials with AI for patient search (ADR-008): categories, the kind of medicine, the
     purpose, synonyms of their conditions in their countries' languages, MeSH concepts and the age
@@ -594,6 +600,8 @@ def search_annotate(
         params["limit"] = limit
     if dry_run:
         params["dry_run"] = True
+    if direct is not None:
+        params["mode"] = _mode(direct)
     with db.connect() as conn:
         if ct_numbers:
             found = core_db.trials_with_scheme(conn, "eu-ct", ct_numbers)
@@ -686,6 +694,13 @@ def _trials_to_judge(conn, ct_numbers: list[str] | None, from_file: Path | None)
     return trial_ids
 
 
+def _mode(direct: bool) -> str:
+    """--direct or --batch as a job's mode (checks/settings.py MODES)."""
+    if direct:
+        return "direct"
+    return "batch"
+
+
 @check_app.command("evidence")
 def check_evidence(
     ct_numbers: Annotated[list[str] | None, typer.Argument(help="EU CT numbers, e.g. 2025-522750-39-00")] = None,
@@ -700,12 +715,19 @@ def check_evidence(
         str, typer.Option(help="The setup to run with: a file in checks/configs/, without .json (see `check configs`)")
     ] = check_settings.DEFAULT,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Show questions and pages per trial; call nothing")] = False,
+    direct: Annotated[
+        bool | None,
+        typer.Option("--direct/--batch", help="Call the model directly (list price, answers now) or in Message "
+                     "Batches (half price, answered within 24 hours, waited for here); default: the setup's mode"),
+    ] = None,
 ) -> None:
     """Judge trials with a named setup (checks/configs/): retrieve the pages of every document of its
     requirement set's kinds linked to the trial, have the model quote evidence, verify every quote
     against the page text, and decide with the set's rules. Each run adds rows, with a step-by-step
     trace per trial, and records the setup it used."""
     params = {"config": config}
+    if direct is not None:
+        params["mode"] = _mode(direct)
     if limit is not None:
         params["limit"] = limit
     if dry_run:
@@ -924,6 +946,10 @@ def gold_eval(
         Path | None, typer.Option(dir_okay=False, help="Also record these runs' measures here as the accepted "
                                                        "baseline (a gates file's baseline)")
     ] = None,
+    batch: Annotated[
+        bool, typer.Option("--batch", help="Send the check's calls in Message Batches: half price, but answered "
+                           "within 24 hours (waited for here); CI runs directly")
+    ] = False,
 ) -> None:
     """Our whole workflow on a gold dataset's labelled items: transfer their evidence from CTIS, run the
     evidence check (it calls the model), score the run against the labels, and fail (exit 1) when a
@@ -931,6 +957,8 @@ def gold_eval(
     try:
         chosen = datasets.load(dataset)
         settings = check_settings.load(config)
+        # the run records how its calls went: directly, or in batches with --batch
+        settings = dataclasses.replace(settings, mode=_mode(not batch))
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     if sample is not None:
@@ -981,7 +1009,12 @@ def gold_eval(
             if repeat > 1:
                 typer.echo(f"check {number} of {repeat}")
             # a trial whose evidence did not come in completely is not checked: it counts as missing
-            summary = evidence.run(conn, llm.client(), trial_ids, settings, progress=typer.echo, unready=evidence.SKIP)
+            if batch:
+                summary = evidence.run_batched(conn, llm.client(), trial_ids, settings, {}, progress=typer.echo,
+                                               unready=evidence.SKIP, foreground=True)
+            else:
+                summary = evidence.run(conn, llm.client(), trial_ids, settings, progress=typer.echo,
+                                       unready=evidence.SKIP)
             typer.echo(f"{len(trial_ids) - len(summary.skipped)} of {len(gold.keys)} trials ready for the check")
             if summary.run_id is None:
                 raise typer.Exit(1)

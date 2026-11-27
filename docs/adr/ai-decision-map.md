@@ -329,14 +329,14 @@ Run it every week: one gateway, known cost, full visibility, safe change.
 
 ### 18 Cost & latency
 
-*open* · F3 · P3
+*proposed (ADR-009, batches)* · F3 · P3
 
 - **Decide:** What may one trial and one weekly run cost, and which levers do we pull?
 - **Terms:** Prompt caching = repeated prefix at ~10% of input price. Batch API = asynchronous, 50% off, results within 24 h. Routing = cheap model first, strong one when needed. Pre-filter = code removes work before the LLM.
 - **Practice:** Measure cost per item first. Cache the long stable prefix. Batch whatever is not needed now. Only due trials with a results document reach the LLM.
 - **Pitfall:** Real-time calls for a weekly job; paying to re-read an unchanged PDF every week.
-- **TrialWatch:** Built: per-call cost (src/trialwatch/prices.json), a monthly cap, and the weekly refresh checks only new or outdated trials.
-- **Lab:** Estimate due trials × tokens × price, with and without batch + caching; record it in an ADR.
+- **TrialWatch:** Built: per-call cost (src/trialwatch/prices.json), a monthly cap, the weekly refresh checks only new or outdated trials, and checks and AI tags go in Message Batches at half price (ADR-009). Not built: prompt caching.
+- **Lab:** Estimate due trials × tokens × price, with and without batch + caching; record it in an ADR (ADR-009 for batches).
 
 ### 19 Observability
 

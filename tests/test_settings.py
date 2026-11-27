@@ -32,7 +32,8 @@ def test_a_name_is_never_a_path():
 def good_setup() -> dict:
     return {"description": "x", "model": "claude-test", "effort": "high", "method": "text", "prompt": "evidence",
             "requirements": "eu-ctr-results", "max_tokens": 100, "fallbacks": True, "whole_pages": 15, "top_k": 4,
-            "max_text_chars": 1000, "unreadable_pages_allowed": 1, "widen_top_k": 20, "widen_max_chars": 1000}
+            "max_text_chars": 1000, "unreadable_pages_allowed": 1, "widen_top_k": 20, "widen_max_chars": 1000,
+            "mode": "batch"}
 
 
 def test_a_good_setup_has_no_problems():
@@ -62,7 +63,9 @@ def test_a_setup_naming_what_does_not_exist_is_refused():
     setup["prompt"] = "nope"
     setup["requirements"] = "nope"
     setup["top_k"] = 0
+    setup["mode"] = "someday"
     problems = settings._problems("x", setup)
+    assert "mode must be one of batch, direct" in problems
     assert "method must be one of text, files" in problems
     assert "effort must be one of low, medium, high, xhigh, max" in problems
     assert "no prompt 'nope' in checks/prompts/" in problems

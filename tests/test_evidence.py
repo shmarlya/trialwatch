@@ -152,14 +152,16 @@ def api_error(kind, message):
 
 class FakeClient:
     """The model: each call answers with the next of `replies` (a list of answers), or raises it when
-    it is an exception."""
+    it is an exception. Its batches (FakeBatches) answer each request the same way, in turn; a reply
+    EXPIRED, ERRORED or REFUSED there is that batch result instead."""
 
     def __init__(self, *replies):
         self.replies = list(replies)
         self.requests = []
         self.usage = SimpleNamespace(input_tokens=500, output_tokens=50)
         self.stop_reason = "end_turn"
-        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self.create))
+        self.batches = FakeBatches(self)
+        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self.create, batches=self.batches))
 
     # the SDK's own signature: the request comes as keyword arguments
     def create(self, **request):
@@ -167,9 +169,77 @@ class FakeClient:
         reply = self.replies.pop(0)
         if isinstance(reply, BaseException):
             raise reply
+        return self.message(reply, self.stop_reason)
+
+    def message(self, reply, stop_reason):
         body = {"answers": reply}
-        return SimpleNamespace(stop_reason=self.stop_reason, usage=self.usage,
+        return SimpleNamespace(stop_reason=stop_reason, usage=self.usage,
                                content=[SimpleNamespace(type="text", text=json.dumps(body))])
+
+
+EXPIRED = "expired"
+ERRORED = "errored"
+REFUSED = "refused"
+
+
+class FakeBatches:
+    """client.beta.messages.batches: a batch is answered as it is sent (from the client's replies, in
+    order), and says it is in progress the first `polls_before_end` times it is asked."""
+
+    def __init__(self, client):
+        self.client = client
+        self.sent = []
+        self.results_of = {}
+        self.polls = {}
+        self.polls_before_end = 0
+        self.cancelled = []
+        # raised by the next create, or by every retrieve while set
+        self.create_error = None
+        self.retrieve_error = None
+
+    def create(self, requests, betas=None):
+        if self.create_error is not None:
+            error = self.create_error
+            self.create_error = None
+            raise error
+        batch_id = f"msgbatch_{len(self.sent) + 1}"
+        self.sent.append({"id": batch_id, "requests": requests, "betas": betas})
+        lines = []
+        for request in requests:
+            self.client.requests.append(request["params"])
+            reply = self.client.replies.pop(0)
+            if reply == EXPIRED:
+                outcome = SimpleNamespace(type="expired")
+            elif reply == ERRORED:
+                error = SimpleNamespace(type="overloaded_error", message="Overloaded")
+                outcome = SimpleNamespace(type="errored", error=SimpleNamespace(type="error", error=error))
+            elif reply == REFUSED:
+                outcome = SimpleNamespace(type="succeeded", message=self.client.message([], "refusal"))
+            else:
+                outcome = SimpleNamespace(type="succeeded", message=self.client.message(reply, "end_turn"))
+            lines.append(SimpleNamespace(custom_id=request["custom_id"], result=outcome))
+        # results come in any order
+        lines.reverse()
+        self.results_of[batch_id] = lines
+        self.polls[batch_id] = 0
+        return SimpleNamespace(id=batch_id)
+
+    def retrieve(self, batch_id):
+        if self.retrieve_error is not None:
+            raise self.retrieve_error
+        self.polls[batch_id] += 1
+        status = "ended"
+        if self.polls[batch_id] <= self.polls_before_end:
+            status = "in_progress"
+        counts = SimpleNamespace(processing=0, succeeded=len(self.results_of[batch_id]), errored=0, canceled=0,
+                                 expired=0)
+        return SimpleNamespace(processing_status=status, request_counts=counts)
+
+    def results(self, batch_id):
+        return list(self.results_of[batch_id])
+
+    def cancel(self, batch_id):
+        self.cancelled.append(batch_id)
 
 
 def steps_named(conn, run_id, name):

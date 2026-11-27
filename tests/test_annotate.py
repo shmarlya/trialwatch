@@ -54,17 +54,39 @@ ANSWER = {
 
 
 class Model:
-    """The model: every call answers `answer` (JSON), and is counted."""
+    """The model: every call answers `answer` (JSON), and is counted; so does every request of a batch,
+    which ends as it is sent."""
 
     def __init__(self, answer):
         self.answer = answer
         self.requests = []
-        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self.create))
+        self.answered = {}
+        batches = SimpleNamespace(create=self.create_batch, retrieve=self.retrieve_batch, results=self.batch_results)
+        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self.create, batches=batches))
 
     def create(self, **request):
         self.requests.append(request)
         return SimpleNamespace(stop_reason="end_turn", usage=SimpleNamespace(input_tokens=4000, output_tokens=900),
                                content=[SimpleNamespace(type="text", text=json.dumps(self.answer))])
+
+    def create_batch(self, requests, betas=None):
+        batch_id = f"msgbatch_{len(self.answered) + 1}"
+        lines = []
+        for request in requests:
+            # the prepared request is passed as keyword arguments, as the SDK takes it
+            message = self.create(**request["params"])
+            lines.append(SimpleNamespace(custom_id=request["custom_id"],
+                                         result=SimpleNamespace(type="succeeded", message=message)))
+        self.answered[batch_id] = lines
+        return SimpleNamespace(id=batch_id)
+
+    def retrieve_batch(self, batch_id):
+        counts = SimpleNamespace(processing=0, succeeded=len(self.answered[batch_id]), errored=0, canceled=0,
+                                 expired=0)
+        return SimpleNamespace(processing_status="ended", request_counts=counts)
+
+    def batch_results(self, batch_id):
+        return list(self.answered[batch_id])
 
     def __call__(self):
         return self
@@ -166,6 +188,28 @@ def test_a_run_records_its_prompt_and_cost_and_the_search_uses_the_kept_tags(app
     assert search_db.trials_to_annotate(app_conn) == []
 
 
+def test_a_batched_run_tags_as_a_direct_one_at_half_the_price(app_conn, recruiting):
+    from trialwatch import batching
+
+    direct = annotate.run(app_conn, Model(ANSWER), [recruiting[CT]])
+    model = Model(ANSWER)
+    settings = annotate.load_settings()
+    state = {}
+    first = annotate.run_batched(app_conn, model, [recruiting[CT]], settings, state)
+    assert isinstance(first, batching.Waiting)
+    status = app_conn.execute("SELECT status FROM search.annotation_run WHERE id = %s", (state["run_id"],)).fetchone()
+    assert status == ("waiting",)
+    summary = annotate.run_batched(app_conn, model, [recruiting[CT]], settings, state)
+    assert (summary.trials, summary.tagged, summary.kept, summary.dropped) == (1, 1, 7, 5)
+    assert abs(summary.cost_usd - direct.cost_usd / 2) <= Decimal("0.000001")
+    run = app_conn.execute("SELECT status, trials FROM search.annotation_run WHERE id = %s",
+                           (summary.run_id,)).fetchone()
+    assert run == ("succeeded", 1)
+    facts = app_conn.execute("SELECT facts FROM search.annotation WHERE trial_id = %s ORDER BY run_id",
+                             (recruiting[CT],)).fetchall()
+    assert facts[0] == facts[1]
+
+
 def test_the_page_shows_the_tags_as_ai_made_with_their_quotes(app_conn, recruiting):
     from fastapi.testclient import TestClient
 
@@ -198,7 +242,13 @@ def test_the_refresh_tags_recruiting_trials_and_the_cap_holds_it(app_conn, recru
     work(app_conn, monkeypatch)
     job = jobs_db.job(app_conn, job_id)
     assert job.status == "succeeded", job.last_error
-    assert len(model.requests) == 1 and job.result["annotate"]["tagged"] == 1
+    # the tagging is a job of its own, its call in a batch (ADR-009)
+    tagging = jobs_db.job(app_conn, job.result["annotate"]["queued_job"])
+    assert tagging.status == "succeeded", tagging.last_error
+    assert len(model.requests) == 1 and tagging.result["tagged"] == 1
+    tier = app_conn.execute("SELECT tier FROM core.llm_call WHERE annotation_run_id = %s",
+                            (tagging.result["annotation_run"],)).fetchone()
+    assert tier == ("batch",)
 
 
 def test_the_command_dry_run_sends_nothing(app_conn, recruiting, monkeypatch):

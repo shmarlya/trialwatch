@@ -12,5 +12,6 @@
   "max_text_chars": 1600000,
   "unreadable_pages_allowed": 1,
   "widen_top_k": 20,
-  "widen_max_chars": 400000
+  "widen_max_chars": 400000,
+  "mode": "batch"
 }

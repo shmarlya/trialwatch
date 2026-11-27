@@ -20,7 +20,7 @@
 
 {% macro run_status(status) -%}
   {%- if status == "succeeded" -%}<span class="badge full">succeeded</span>
-  {%- elif status in ("running", "held", "partial") -%}<span class="badge undecided">{{ status }}</span>
+  {%- elif status in ("running", "waiting", "held", "partial") -%}<span class="badge undecided">{{ status }}</span>
   {%- elif status in ("failed", "stopped") -%}<span class="badge not-full">{{ status }}</span>
   {%- else -%}<span class="badge none">{{ status }}</span>
   {%- endif -%}
@@ -57,4 +57,6 @@
     {% for setup in configs %}<option value="{{ setup.config }}" title="{{ setup.description }}" {% if setup.config == chosen %}selected{% endif %}>{{ setup.summary() }}</option>{% endfor %}
   </select>
 </label>
+{# A setup's calls go in Message Batches (ADR-009): half price, answered within 24 hours. A person may want them now #}
+<label class="check small" title="Without it, a setup whose calls go in batches is answered within 24 hours, at half price"><input type="checkbox" name="now" value="true"> now, at list price</label>
 {% endmacro %}

@@ -3,13 +3,14 @@
 {% block title %}Spend · TrialWatch{% endblock %}
 {% block content %}
 <h1>Spend</h1>
-<p class="sub">Model calls at Anthropic's list prices, in US dollars.</p>
+<p class="sub">Model calls at Anthropic's list prices, in US dollars; calls answered in Message Batches at half of them.</p>
 {% if error %}<div class="alert">{{ error }}</div>{% endif %}
 <div class="grid">
   <div class="panel">
     <div class="stat"><span>This month</span><b>{{ dollars(totals.this_month) }}{% if cap is not none %} <span class="small muted">of {{ dollars(cap) }} cap</span>{% endif %}</b></div>
     <div class="stat"><span>Last 30 days</span><b>{{ dollars(totals.last_30_days) }}</b></div>
     <div class="stat"><span>All time</span><b>{{ dollars(totals.all_time) }}</b></div>
+    <div class="stat"><span>In batches this month</span><b>{{ dollars(totals.batch_this_month) }} <span class="small muted">{{ "{:,}".format(totals.batch_calls_this_month) }} calls, about {{ dollars(totals.batch_this_month * batch_saving) }} saved</span></b></div>
     <div class="stat"><span>Billed calls</span><b>{{ "{:,}".format(totals.calls) }}{% if totals.unpriced_calls %} <span class="small muted">({{ totals.unpriced_calls }} unpriced, not counted)</span>{% endif %}</b></div>
   </div>
   <div class="panel">

@@ -173,6 +173,6 @@ def gold_items_for(identifiers: list, judgements: list) -> list[tuple]:
 def comparable(judgement: overview.JudgementRow, dataset: gold_datasets.Dataset) -> bool:
     """A judgement whose run has ended, without an error, under the requirement set the dataset's
     labels answer."""
-    if judgement.error or judgement.run_status == "running":
+    if judgement.error or judgement.run_status in ("running", "waiting"):
         return False
     return judgement.requirements == dataset.requirements

@@ -450,7 +450,7 @@ _JUDGEMENT_ROWS = f"""
            r.started_at, j.trial_record_id, j.document_versions, r.status AS run_status,
            (SELECT max(v.published_at) FROM core.document_version v WHERE v.id = ANY(j.document_versions))
                AS latest_published_at,
-           (j.error IS NULL AND r.status <> 'running') AS published,
+           (j.error IS NULL AND r.finished_at IS NOT NULL) AS published,
            (j.agreement->>'confidence')::real AS published_confidence, j.agreement->>'basis' AS published_basis,
            j.withdrawn_at, wa.name AS withdrawn_by, j.withdrawn_reason AS withdrawn_note
     FROM checks.judgement j
@@ -469,7 +469,7 @@ _JUDGEMENT_ROWS = f"""
 """
 # Keeps only published judgements (withdrawn ones too: they stay public, marked) when %(published_only)s
 _PUBLISHED_FILTER = """
-      AND (NOT %(published_only)s OR (j.error IS NULL AND r.status <> 'running'))
+      AND (NOT %(published_only)s OR (j.error IS NULL AND r.finished_at IS NOT NULL))
 """
 
 
@@ -826,7 +826,7 @@ def file_is_public(conn: psycopg.Connection, sha256: bytes) -> bool:
                         WHERE v.file_sha256 = %(sha)s AND s.kind <> 'manual')
             OR EXISTS (SELECT FROM checks.answer a
                          JOIN checks.judgement j ON j.run_id = a.run_id AND j.trial_id = a.trial_id AND j.error IS NULL
-                         JOIN checks.run r ON r.id = a.run_id AND r.status <> 'running'
+                         JOIN checks.run r ON r.id = a.run_id AND r.finished_at IS NOT NULL
                         WHERE a.file_sha256 = %(sha)s)
         """,
         {"sha": sha256},

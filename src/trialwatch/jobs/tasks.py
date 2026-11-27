@@ -67,6 +67,9 @@ def problem(kind: str, params: dict) -> str | None:
         return "choose trials, or every recruiting trial not tagged yet"
     if kind == "check" and not params.get("trial_ids") and not params.get("every"):
         return "choose trials, or every trial ready for a check"
+    mode = params.get("mode")
+    if mode is not None and mode not in check_settings.MODES:
+        return f"mode must be one of {', '.join(check_settings.MODES)}"
     if kind in ("check", "refresh"):
         try:
             check_settings.load(params.get("config", check_settings.DEFAULT))

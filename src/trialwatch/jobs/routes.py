@@ -14,12 +14,13 @@ import psycopg
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from trialwatch import db
+from trialwatch import db, llm
 from trialwatch.checks import evidence
 from trialwatch.checks import requirements as requirement_sets
 from trialwatch.checks import settings as check_settings
 from trialwatch.db import core, overview
 from trialwatch.db import costs as costs_db
+from trialwatch.db import batches as batches_db
 from trialwatch.db import jobs as jobs_db
 from trialwatch.jobs import PRIORITY_AUTOMATIC, PRIORITY_PERSON, failures, tasks
 from trialwatch.llm import dollars
@@ -52,6 +53,8 @@ class JobRequest:
     # evidence: the setup the check runs with (a file in checks/configs/)
     config: str = check_settings.DEFAULT
     dry_run: bool = False
+    # evidence: call the model now, at list price, though the setup sends its calls in batches (ADR-009)
+    now: bool = False
     # transfer: download every document again, even those held at the version the source lists
     recheck: bool = False
 
@@ -79,6 +82,8 @@ def job_params(request: JobRequest) -> tuple[str, dict]:
         params["config"] = request.config
         if request.dry_run:
             params["dry_run"] = True
+        if request.now:
+            params["mode"] = "direct"
     return kind, params
 
 
@@ -136,6 +141,7 @@ def start_job(
     # the check's setup: a file in checks/configs/
     config: Annotated[str, Form()] = check_settings.DEFAULT,
     dry_run: Annotated[bool, Form()] = False,
+    now: Annotated[bool, Form()] = False,
     recheck: Annotated[bool, Form()] = False,
     back: Annotated[str, Form()] = "",
     user: auth_db.User = Depends(Requires("source.sync", "trial.transfer", "check.dry_run", "check.run")),
@@ -191,6 +197,7 @@ def start_job(
         limit=chosen_limit,
         config=config.strip(),
         dry_run=dry_run,
+        now=now,
         recheck=recheck,
     )
     try:
@@ -331,8 +338,12 @@ def job_page(
         runs = jobs_db.runs_of(conn, job_id)
         cost = jobs_db.job_cost(conn, job_id)
         failed = failures.failed_items(conn, job)
+        batch = None
+        if job.status == "waiting":
+            batch = batches_db.open_batch_of_job(conn, job_id)
     context = {
         "job": job,
+        "batch": batch,
         "lines": lines,
         "line_total": line_total,
         "page": page,
@@ -387,7 +398,8 @@ def job_progress(job_id: int, after: int = 0, user: auth_db.User = Depends(Requi
 
 JOB_TABS = {
     "attention": ("Need attention", ("failed", "held")),
-    "active": ("Running", ("running",)),
+    # a job waiting on a Message Batch is still at work (ADR-009)
+    "active": ("Running", ("running", "waiting")),
     "queued": ("Queued", ("queued",)),
     "ended": ("Ended", ("succeeded", "partial", "cancelled", "failed")),
 }
@@ -503,8 +515,11 @@ def spend_page(
         cap = costs_db.monthly_cap(conn)
         costliest = costs_db.costliest_runs(conn)
         held = jobs_db.jobs_with_status(conn, ("held",))
+    # what batch prices left unpaid, per dollar paid at them: list price is paid / discount
+    discount = llm.batch_discount()
     context = {
         "totals": totals,
+        "batch_saving": (1 - discount) / discount,
         "cap": cap,
         "costliest": costliest,
         "held": held,

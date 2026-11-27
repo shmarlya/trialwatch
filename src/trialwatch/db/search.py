@@ -18,6 +18,7 @@ from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
 from trialwatch.search.constants import RADII, TOKENS, age_group_of
+from trialwatch.db.core import ABANDONED
 from trialwatch.db.overview import like_text
 
 # ts_rank_cd's weights for D, C, B, A words (A: conditions; see search/index.py)
@@ -649,3 +650,64 @@ def naive_count(conn: psycopg.Connection, words: Sequence[str], country: str | N
         params["country"] = country
     row = conn.execute(f"SELECT count(*) FROM core.source_listing l WHERE {' AND '.join(conditions)}", params).fetchone()
     return row[0]
+
+
+def wait_annotation_run(conn: psycopg.Connection, run_id: int) -> None:
+    """The run waits on a Message Batch (ADR-009)."""
+    conn.execute("UPDATE search.annotation_run SET status = 'waiting' WHERE id = %s AND status = 'running'", (run_id,))
+
+
+def resume_annotation_run(conn: psycopg.Connection, run_id: int) -> bool:
+    """Take a waiting (or running) run back: running again. False when it has been closed."""
+    cursor = conn.execute(
+        "UPDATE search.annotation_run SET status = 'running' WHERE id = %s AND status IN ('running', 'waiting')",
+        (run_id,),
+    )
+    return cursor.rowcount == 1
+
+
+def annotated_trials(conn: psycopg.Connection, run_id: int) -> set[int]:
+    """The trials the run has an annotation for (tagged, or failed)."""
+    rows = conn.execute("SELECT trial_id FROM search.annotation WHERE run_id = %s", (run_id,)).fetchall()
+    found = set()
+    for row in rows:
+        found.add(row[0])
+    return found
+
+
+@dataclass(frozen=True)
+class AnnotationRunIdentity:
+    """What a tagging run tags with, as it recorded it, and its status."""
+
+    status: str
+    model: str
+    effort: str
+    prompt_sha256: bytes
+
+
+def annotation_run_identity(conn: psycopg.Connection, run_id: int) -> AnnotationRunIdentity | None:
+    row = conn.execute(
+        "SELECT status, model, effort, prompt_sha256 FROM search.annotation_run WHERE id = %s", (run_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return AnnotationRunIdentity(*row)
+
+
+def close_abandoned_annotation_runs(conn: psycopg.Connection) -> list[int]:
+    """Close as failed the tagging runs waiting on a batch whose job has ended: nobody takes them back.
+    Returns them."""
+    rows = conn.execute(
+        """
+        UPDATE search.annotation_run r SET status = 'failed', error = %s, finished_at = clock_timestamp(),
+               trials = (SELECT count(*) FROM search.annotation a WHERE a.run_id = r.id)
+         WHERE r.status = 'waiting'
+           AND EXISTS (SELECT FROM jobs.job b WHERE b.id = r.job_id AND b.finished_at IS NOT NULL)
+        RETURNING r.id
+        """,
+        (ABANDONED,),
+    ).fetchall()
+    closed = []
+    for row in rows:
+        closed.append(row[0])
+    return closed

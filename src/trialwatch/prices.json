@@ -1,7 +1,8 @@
 {
-  "about": "Anthropic list prices in US dollars per million tokens, one current list (no versions: each core.api_call row keeps the prices it was charged at). cache_write is the 5-minute cache write. long_prompt applies when a request's prompt (input + cache write + cache read tokens) is over over_prompt_tokens.",
+  "about": "Anthropic list prices in US dollars per million tokens, one current list (no versions: each core.api_call row keeps the prices it was charged at). cache_write is the 5-minute cache write. batch_discount multiplies every price of a call sent in a Message Batch (cache reads and writes included). long_prompt applies when a request's prompt (input + cache write + cache read tokens) is over over_prompt_tokens.",
   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
-  "checked": "2026-11-22",
+  "checked": "2026-11-27",
+  "batch_discount": "0.5",
   "models": {
     "claude-haiku-5-5": {
       "input": "0.10", "output": "0.50", "cache_write": "0.125", "cache_read": "0.01",

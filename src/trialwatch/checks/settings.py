@@ -22,6 +22,9 @@ from trialwatch.checks.requirements import set_names
 # when needed), or their files sent whole (the model also reads scanned pages and charts)
 METHODS = ("text", "files")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# How a job sends the model's calls: in Message Batches, at half price, answered within 24 hours
+# (ADR-009); or directly, at list price, answered at once. A job may ask for the other (its params' mode)
+MODES = ("batch", "direct")
 # The setup a check uses unless another is chosen
 DEFAULT = "default"
 # Every field a setup file must have, with its type
@@ -40,6 +43,7 @@ FIELDS = {
     "unreadable_pages_allowed": int,
     "widen_top_k": int,
     "widen_max_chars": int,
+    "mode": str,
 }
 
 
@@ -75,13 +79,15 @@ class Settings:
     # counts; "not found" there still isn't the whole document
     widen_top_k: int
     widen_max_chars: int
+    # batch | direct: see MODES
+    mode: str = "batch"
 
     def params(self) -> dict:
         """What checks.run keeps besides its own columns (model, effort, prompt, requirements)."""
         return {"config": self.config, "method": self.method, "max_tokens": self.max_tokens,
                 "fallbacks": self.fallbacks, "whole_pages": self.whole_pages, "top_k": self.top_k,
                 "max_text_chars": self.max_text_chars, "unreadable_pages_allowed": self.unreadable_pages_allowed,
-                "widen_top_k": self.widen_top_k, "widen_max_chars": self.widen_max_chars}
+                "widen_top_k": self.widen_top_k, "widen_max_chars": self.widen_max_chars, "mode": self.mode}
 
     def summary(self) -> str:
         """The setup in one line, for forms and progress."""
@@ -89,7 +95,7 @@ class Settings:
         if self.method == "files":
             method = "whole PDFs"
         return (f"{self.config}: {self.model}, effort {self.effort}, {method}, prompt {self.prompt}, "
-                f"requirements {self.requirements}")
+                f"requirements {self.requirements}, calls {self.mode}")
 
 
 def names() -> list[str]:
@@ -118,6 +124,8 @@ def _problems(name: str, data: object) -> list[str]:
         return problems
     if data["method"] not in METHODS:
         problems.append(f"method must be one of {', '.join(METHODS)}")
+    if data["mode"] not in MODES:
+        problems.append(f"mode must be one of {', '.join(MODES)}")
     if data["effort"] not in EFFORTS:
         problems.append(f"effort must be one of {', '.join(EFFORTS)}")
     if data["prompt"] not in prompt_names():
@@ -151,7 +159,7 @@ def load(name: str) -> Settings:
         max_tokens=data["max_tokens"], fallbacks=data["fallbacks"], whole_pages=data["whole_pages"],
         top_k=data["top_k"], max_text_chars=data["max_text_chars"],
         unreadable_pages_allowed=data["unreadable_pages_allowed"], widen_top_k=data["widen_top_k"],
-        widen_max_chars=data["widen_max_chars"],
+        widen_max_chars=data["widen_max_chars"], mode=data["mode"],
     )
 
 

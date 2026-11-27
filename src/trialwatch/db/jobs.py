@@ -48,6 +48,9 @@ class Job:
     attempt_started_at: datetime | None = None
     # what failed, item by item: a trial's key or name (or a step) -> why
     failures: dict = field(default_factory=dict)
+    # waiting: the Message Batch it waits on (core.llm_batch), and when the worker next asks about it
+    waiting_on: int | None = None
+    wait_until: datetime | None = None
 
     @property
     def ended(self) -> bool:
@@ -58,7 +61,7 @@ _JOB_COLUMNS = """
     j.id, j.kind, j.params, j.automatic, j.schedule_id, j.priority, j.status, j.attempts,
     j.max_attempts, j.run_after, j.cancel_requested, j.last_error, j.result, j.locked_by, j.heartbeat_at,
     j.created_by, j.created_at, j.started_at, j.finished_at, a.name AS actor, j.trace_id,
-    j.progress_done, j.progress_total, j.attempt_started_at, j.failures
+    j.progress_done, j.progress_total, j.attempt_started_at, j.failures, j.waiting_on, j.wait_until
 """
 _JOBS = f"SELECT {_JOB_COLUMNS} FROM jobs.job j JOIN core.actor a ON a.id = j.created_by"
 
@@ -280,10 +283,19 @@ def requeue_stalled(conn: psycopg.Connection, older_than: timedelta) -> list[int
     return touched
 
 
-def resume_held(conn: psycopg.Connection) -> list[int]:
-    """Queue every held job again (the cap allows spending again)."""
-    rows = conn.execute("UPDATE jobs.job SET status = 'queued', run_after = clock_timestamp(), last_error = NULL "
-                        "WHERE status = 'held' RETURNING id").fetchall()
+def resume_held(conn: psycopg.Connection, room: Decimal | None = None) -> list[int]:
+    """Queue the held jobs again (the cap allows spending again): every one when `room` is None (no cap),
+    else those whose next batch, as estimated when it was held (result.batch.held_usd), fits in `room`
+    (what the cap leaves this month); a job held before it sent anything needs only room above nothing."""
+    rows = conn.execute(
+        """
+        UPDATE jobs.job SET status = 'queued', run_after = clock_timestamp(), last_error = NULL
+         WHERE status = 'held'
+           AND (%(room)s::numeric IS NULL OR coalesce((result #>> '{batch,held_usd}')::numeric, 0) < %(room)s::numeric)
+        RETURNING id
+        """,
+        {"room": room},
+    ).fetchall()
     resumed = []
     for row in rows:
         resumed.append(row[0])
@@ -294,14 +306,26 @@ def resume_held(conn: psycopg.Connection) -> list[int]:
 
 def request_cancel(conn: psycopg.Connection, job_id: int) -> str | None:
     """Cancel a job: one not running (queued, held) ends at once; a running one stops after the trial or
-    page it is on. Returns its status after, None if it has ended."""
+    page it is on; a waiting one has its batch cancelled at Anthropic, and once that has ended, the
+    answers it got are recorded and the job ends (worker.py); a batched one between rounds (queued or
+    held) runs once more to record its answers and settle its batches, then ends. Returns its status
+    after, None if it has ended."""
     with conn.transaction():
-        row = conn.execute("SELECT status FROM jobs.job WHERE id = %s FOR UPDATE", (job_id,)).fetchone()
+        row = conn.execute("SELECT status, result -> 'batch' FROM jobs.job WHERE id = %s FOR UPDATE",
+                           (job_id,)).fetchone()
         if row is None or row[0] in ENDED:
             return None
-        if row[0] == "running":
-            conn.execute("UPDATE jobs.job SET cancel_requested = true WHERE id = %s", (job_id,))
-            return "running"
+        if row[0] in ("running", "waiting"):
+            # a waiting job is asked about its batch at once
+            conn.execute("UPDATE jobs.job SET cancel_requested = true, wait_until = least(wait_until, clock_timestamp()) "
+                         "WHERE id = %s", (job_id,))
+            return row[0]
+        if row[1] is not None:
+            # a batched run between rounds (queued, or held by the cap) has answers that are billed: it runs
+            # once more to record them and settle its batches, then ends cancelled
+            conn.execute("UPDATE jobs.job SET status = 'queued', cancel_requested = true, run_after = clock_timestamp() "
+                         "WHERE id = %s", (job_id,))
+            return "queued"
         conn.execute("UPDATE jobs.job SET status = 'cancelled', cancel_requested = true, finished_at = clock_timestamp() "
                      "WHERE id = %s", (job_id,))
     return "cancelled"
@@ -497,3 +521,84 @@ def take_due_schedule(conn: psycopg.Connection) -> Schedule | None:
     conn.execute(f"UPDATE jobs.schedule SET next_run_at = {_NEXT_TIME} WHERE id = %(id)s",
                  {"frequency": row[1], "weekday": row[2], "hour": row[3], "id": row[0]})
     return schedule(conn, row[0])
+
+
+# --- jobs waiting on a Message Batch (ADR-009) -----------------------------------------------------
+
+@dataclass(frozen=True)
+class WaitingJob:
+    job_id: int
+    llm_batch_id: int
+    provider_batch_id: str
+    cancel_requested: bool
+    # since when its batch has run
+    submitted_at: datetime
+
+
+def wait(conn: psycopg.Connection, job_id: int, llm_batch_id: int, result: dict, check_after: timedelta) -> None:
+    """The job waits on a batch: the worker lets it go until Anthropic has answered (wake). Waiting is not
+    an attempt, so the claim's count is given back."""
+    conn.execute(
+        "UPDATE jobs.job SET status = 'waiting', waiting_on = %s, wait_until = clock_timestamp() + %s, result = %s, "
+        "attempts = attempts - 1, locked_by = NULL, last_error = NULL WHERE id = %s",
+        (llm_batch_id, check_after, Jsonb(result), job_id),
+    )
+
+
+def waiting_due(conn: psycopg.Connection) -> list[WaitingJob]:
+    """Waiting jobs whose batch is due to be asked about."""
+    rows = conn.execute(
+        """
+        SELECT j.id, b.id, b.provider_batch_id, j.cancel_requested, coalesce(b.submitted_at, b.created_at)
+          FROM jobs.job j JOIN core.llm_batch b ON b.id = j.waiting_on
+         WHERE j.status = 'waiting' AND j.wait_until <= clock_timestamp()
+         ORDER BY j.wait_until
+        """
+    ).fetchall()
+    found = []
+    for row in rows:
+        found.append(WaitingJob(*row))
+    return found
+
+
+def check_later(conn: psycopg.Connection, job_id: int, after: timedelta) -> None:
+    conn.execute("UPDATE jobs.job SET wait_until = clock_timestamp() + %s WHERE id = %s AND status = 'waiting'",
+                 (after, job_id))
+
+
+def wake(conn: psycopg.Connection, job_id: int, llm_batch_id: int) -> bool:
+    """Its batch has ended: the job is queued again, to go on from its answers (only while it still waits
+    on that batch: another worker may have woken it already)."""
+    cursor = conn.execute(
+        "UPDATE jobs.job SET status = 'queued', waiting_on = NULL, wait_until = NULL, run_after = clock_timestamp() "
+        "WHERE id = %s AND status = 'waiting' AND waiting_on = %s",
+        (job_id, llm_batch_id),
+    )
+    return cursor.rowcount == 1
+
+
+def end_waiting(conn: psycopg.Connection, job_id: int, status: str, error: str) -> bool:
+    """End a waiting job whose batch can't be reached (failed), or that was cancelled meanwhile
+    (cancelled); its run is closed by the next run (close_abandoned_runs)."""
+    cursor = conn.execute(
+        "UPDATE jobs.job SET status = %s, last_error = %s, waiting_on = NULL, wait_until = NULL, "
+        "finished_at = clock_timestamp() WHERE id = %s AND status = 'waiting'",
+        (status, error, job_id),
+    )
+    return cursor.rowcount == 1
+
+
+def open_automatic_job(conn: psycopg.Connection, kind: str) -> int | None:
+    """A job of this kind that TrialWatch started and that has not ended (the oldest), or None."""
+    row = conn.execute(
+        "SELECT id FROM jobs.job WHERE kind = %s AND automatic AND finished_at IS NULL ORDER BY id LIMIT 1",
+        (kind,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row[0]
+
+
+def keep_result(conn: psycopg.Connection, job_id: int, result: dict) -> None:
+    """A running job's result as it is now (a batched run's state, kept before its attempt ends)."""
+    conn.execute("UPDATE jobs.job SET result = %s WHERE id = %s AND status = 'running'", (Jsonb(result), job_id))

@@ -209,6 +209,20 @@ attempt is tried again after about a minute; a retry redoes only what is left (t
 failed for a passing reason such as an overload). An error that a retry can't fix (an unknown source, an invalid
 setup, a bad API key) fails the job at once.
 
+**Waiting on a batch.** A check or tagging job whose setup sends its calls in Message Batches
+([ADR-009](adr/ADR-009-model-calls-in-batches.md)) does not keep the worker while Anthropic answers: after sending a
+batch it is **waiting** (not an attempt; its page says which batch, how many requests are answered so far, and when
+it is asked about next). Every minute the worker's housekeeping asks Anthropic about the batches that are due (every 2
+minutes for the first half hour, then every 10) and queues each job whose batch has ended; it goes on from the
+answers and may send a second batch (widening), or finish. A batch not ended 25 hours after it was sent is cancelled
+at Anthropic (its unanswered requests come back canceled, and are sent again). A job whose batch can't be found with
+the API key fails at once; one that can't be reached for two days fails. Cancelling a waiting job cancels its batch
+at Anthropic; cancelling one queued or held between rounds lets it run once more: either way the answers it got are
+recorded (they are billed) and the job ends cancelled. A batched job held by the cap stays held until the cap leaves
+room for its next batch's estimate (what was spent and what batches in flight may cost are taken off). The refresh does not run batched checks or
+tags itself: it queues a check job and a tagging job (automatic, held by the cap), and queues no other while one is
+open.
+
 How a job ends: **succeeded**, everything done; **partial**, it ran to its end but some items did not succeed (a
 trial whose transfer still failed on the last attempt, a check call that failed, or a file or answer left to a
 person, which is never tried again); **failed**, it could not run as a whole (a crash, the database or the network
@@ -247,7 +261,8 @@ runs. Everything it does, and what TrialWatch publishes by itself, is recorded a
 | `auth/` | accounts, passwords, sessions, the action chart |
 | `jobs/tasks.py`, `worker.py`, `steps.py`, `refresh.py`, `retry.py` | every kind of job, the worker, what each kind does, the refresh, retries |
 | `config.py` | every setting read from the environment (and `.env`) |
-| `llm.py`, `prices.json` | every model call: the client, pricing per billed attempt, recording it as spend |
+| `llm.py`, `prices.json` | every model call: the client, pricing per billed attempt (at batch prices for Message Batches), recording it as spend; sending batches and reading their answers |
+| `batching.py` | a run's rounds of Message Batches, shared by checks and tagging (ADR-009) |
 | `telemetry.py` | what TrialWatch records about itself for admins: traces, metrics, JSON logs, redaction ([below](#what-trialwatch-records-about-itself)) |
 | `db/__init__.py` | connections: the web server's pool, everyone else's own |
 | `db/overview.py`, `db/auth.py`, `db/jobs.py`, `db/costs.py` | their SQL |
@@ -354,10 +369,12 @@ and start them again.
 Every model call is one row in `core.llm_call`, kept once: the request as sent and the answer (a check's trace
 and an AI tagging name it), and each billed attempt with its tokens and its cost in US dollars, priced at
 Anthropic's list prices in `src/trialwatch/prices.json` (each attempt keeps the prices it was charged at; a model
-missing from the list is shown as unpriced, never as $0; a new model needs a price before it runs). Runs,
+missing from the list is shown as unpriced, never as $0; a new model needs a price before it runs). A call answered
+in a Message Batch is priced at `batch_discount` (half) of each list price, and says so (`tier` batch, its batch and
+its id in it); `/admin/spend` shows what batches cost this month and about what they saved. Runs,
 judgements, trace steps and jobs show their cost to staff, and `/admin/spend` shows the totals: this month, the
 last 30 days, all time, by month, model, operation and actor, and the costliest runs. An admin sets a monthly cap
-there (`core.app_setting`): once this month's spend reaches it, the refresh's checks and tags are held, not failed (they go on by themselves next month or when the cap is raised); checks a person starts always
+there (`core.app_setting`): once this month's spend reaches it, or before a batch whose estimated cost would pass it, the refresh's checks and tags are held, not failed (they go on by themselves next month or when the cap is raised); checks a person starts always
 run. The gold evaluation reports show the cost too.
 
 ## Database
@@ -401,10 +418,11 @@ erDiagram
 |---|---|
 | `auth.app_user` | a person who can sign in: email (unique, lower case), argon2id password hash (left out of the audit log), role (admin, moderator), their `core.actor`, disabled_at |
 | `auth.session` | a signed-in browser: the SHA-256 of the cookie's token (the token isn't kept), user, last seen, expiry |
-| `jobs.job` | one job: kind (sync, transfer, check, annotate, refresh), params, automatic (the cap applies), schedule, priority, status (queued, running, held, succeeded, partial, failed, cancelled), attempts and retries, the worker on it and its heartbeat |
+| `jobs.job` | one job: kind (sync, transfer, check, annotate, refresh), params, automatic (the cap applies), schedule, priority, status (queued, running, waiting on a Message Batch, held, succeeded, partial, failed, cancelled), the batch it waits on and when it is asked about next, attempts and retries, the worker on it and its heartbeat |
 | `jobs.job_line` | a job's progress lines, per attempt |
 | `jobs.schedule` | when a job starts by itself: name, kind and params, frequency (daily, weekly, monthly), weekday, hour UTC, enabled, next run |
-| `core.llm_call` | every model call, one row each, failed ones too: model asked and model that answered, operation (check, annotate), run, trial, call number, job, the request as sent (no system prompt; files by sha256), the answer, stop reason, latency, error, the provider's request id, and each billed attempt priced (more than one after a fallback) with their sums: tokens, cost, attempts on an unpriced model |
+| `core.llm_call` | every model call, one row each, failed ones too: model asked and model that answered, operation (check, annotate), run, trial, call number, job, the request as sent (no system prompt; files by sha256), the answer, stop reason, latency, error, the provider's request id, and each billed attempt priced (more than one after a fallback, or a refusal in a batch asked again directly) with their sums: tokens, cost, attempts on an unpriced model; tier (direct or batch), its batch and its custom id there |
+| `core.llm_batch`, `core.llm_batch_item` | each Message Batch a run sent (ADR-009): Anthropic's id, operation, job, run, round, status, estimated cost, Anthropic's counts, when sent, ended and collected; and its requests: custom id (the sha256 of the request), trial, call number, model, and the call it was recorded as |
 | `core.app_setting` | settings an admin changes (audited): `spend.monthly_cap_usd` |
 | `core.backup` | each nightly backup: file, size in bytes, when ([backups](#backups)) |
 | `report.*` | views Grafana reads as `grafana_ro`: jobs, llm_calls, spend, spend_cap, check_runs, judgements, ingest_runs, sources, backups |
